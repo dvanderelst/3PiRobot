@@ -1,11 +1,11 @@
 from pololu_3pi_2040_robot import robot
 import Speed
+import time
 
 rgb_leds = robot.RGBLEDs()
 display = robot.Display()
-motors = robot.Motors()
 
-converter = Speed.Converter()
+controller = Speed.Controller()
 
 
 # for led in range(6):
@@ -25,6 +25,8 @@ converter = Speed.Converter()
 # display.text("F", 0, 57)
 # display.show()
 
-cps = converter.mps2cps(0.1)
 
-motors.set_speeds(cps, cps)
+
+controller.set_mps(0.1, 0.3)
+time.sleep(1)
+controller.set_mps(0.1,
