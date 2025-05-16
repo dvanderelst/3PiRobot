@@ -18,9 +18,10 @@ class MaxBotix:
         self.fixed_delay_us = 10
         self.max_delay_us = 1000000
 
-        self.vref = 3.3
         self.sample_rate = 10000
         self.n_samples = 500
+        
+        self.vref = 3.3
 
         self.buf1 = None
         self.buf2 = None
@@ -96,11 +97,13 @@ class MaxBotix:
     @property
     def max_distance(self):
         speed = 331
-        distance = (self.n_samples / self.sample_rate) * speed / 2
+        distance = self.duration * speed / 2
         return distance
+    
+    @property
+    def duration(self):
+        duration = self.n_samples / self.sample_rate
+        return duration
+        
             
 if __name__ == "__main__":
-    mb = MaxBotix()
-    m1, m2 = mb.measure()
-    for i, x in enumerate(m1): print(i, x)
-    print(mb.max_distance)

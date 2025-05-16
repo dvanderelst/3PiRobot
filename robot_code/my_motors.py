@@ -32,11 +32,11 @@ class Motors:
         mps = self.check_mps(mps)
         return mps * self.counts_per_meter
     
-    def set_speeds(left, right):
+    def set_speeds(self, left, right):
         left_speed = self.check_mps(left)
         right_speed = self.check_mps(right)
         left_cps = self.mps2cps(left_speed)
         right_cps = self.mps2cps(right_speed)
         self.motors.set_speeds(left_cps, right_cps)
-        
-        
+    
+    de

@@ -1,9 +1,8 @@
 import my_leds
 import my_maxbotix
+import my_motors
 import time
 
 sonar = my_maxbotix.MaxBotix()
-
-for x in range(10):
-    sonar.measure()
-    time.sleep(0.1)
+motors = my_motors.Motors()
+start = time.tic
