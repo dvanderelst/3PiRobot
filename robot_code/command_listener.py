@@ -2,10 +2,10 @@ from machine import UART, Pin
 
 class CommandListener:
     def __init__(self):
-        uart_id = 1
+        uart_id = 0
         baudrate = 115200
-        tx_pin = Pin(4)
-        rx_pin = Pin(5)
+        tx_pin = Pin(16)
+        rx_pin = Pin(17)
         
         self.end_char = "*"
         self.buffer = b""

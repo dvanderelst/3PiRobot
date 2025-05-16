@@ -1,8 +1,13 @@
-import my_leds
-import my_maxbotix
-import my_motors
-import time
+import command_listener
+import screen
+import leds
 
-sonar = my_maxbotix.MaxBotix()
-motors = my_motors.Motors()
-start = time.tic
+listener = command_listener.CommandListener()
+screen = screen.Screen()
+leds = leds.LEDs()
+
+screen.write(0, 'awaiting command')
+leds.set_all('blue')
+
+x = listener.wait_for_command()
+print(x)
