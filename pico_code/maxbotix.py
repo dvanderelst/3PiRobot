@@ -1,13 +1,16 @@
 from machine import Pin, ADC, Timer
-import my_leds
 import array
 import time
+
+# self.adc_emit = ADC(Pin(26))   # ADC0
+# self.adc_recv1 = ADC(Pin(27))  # ADC1
+# self.adc_recv2 = ADC(Pin(28))  # ADC2
 
 class MaxBotix:
     def __init__(self):
         self.trigger = Pin(24, Pin.OUT)
         self.adc_emit = ADC(Pin(26))   # ADC0
-        self.adc_recv1 = ADC(Pin(27))  # ADC1
+        self.adc_recv1 = ADC(Pin(26))  # ADC1
         self.adc_recv2 = ADC(Pin(28))  # ADC2
 
         self.wait_method = "threshold"
@@ -27,8 +30,6 @@ class MaxBotix:
 
         self.trigger.value(0)
         
-        self.leds = my_leds.LEDs()
-
     def _sample_callback(self, timer):
         if self._index < len(self.buf1):
             self.buf1[self._index] = self.adc_recv1.read_u16()
@@ -49,8 +50,6 @@ class MaxBotix:
         n_samples = self.n_samples
         sample_rate = self.sample_rate
         
-        self.leds.set_all('blue')
-
         self.buf1 = array.array("H", [0] * n_samples)
         self.buf2 = array.array("H", [0] * n_samples)
         self._index = 0
@@ -72,7 +71,6 @@ class MaxBotix:
         while not self._done:
             pass
         
-        self.leds.set_all('off')
         return self.buf1, self.buf2
 
     def get_voltages(self):
