@@ -1,10 +1,7 @@
 from machine import Pin, ADC, Timer
-import my_leds
+import leds
 import array
 import time
-
-
-
 
 class MaxBotix:
     def __init__(self):
@@ -31,7 +28,7 @@ class MaxBotix:
 
         self.trigger.value(0)
         
-        self.leds = my_leds.LEDs()
+        self.leds = leds.LEDs()
 
     def _sample_callback(self, timer):
         if self._index < len(self.buf1):
@@ -53,7 +50,7 @@ class MaxBotix:
         n_samples = self.n_samples
         sample_rate = self.sample_rate
         
-        self.leds.set_all('blue')
+        self.leds.set_all('orange')
 
         self.buf1 = array.array("H", [0] * n_samples)
         self.buf2 = array.array("H", [0] * n_samples)
@@ -104,6 +101,4 @@ class MaxBotix:
     def duration(self):
         duration = self.n_samples / self.sample_rate
         return duration
-        
-            
-if __name__ == "__main__":
+

@@ -25,8 +25,3 @@ class Screen:
             self.display.text(text, 0, y_position)
         self.display.show()
         
-        
-        
-        
-        
-        

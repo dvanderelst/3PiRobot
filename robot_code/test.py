@@ -1,13 +1,19 @@
-import command_listener
 import screen
 import leds
+import maxbotix
+import time
+import motors
 
-listener = command_listener.CommandListener()
-screen = screen.Screen()
-leds = leds.LEDs()
 
-screen.write(0, 'awaiting command')
-leds.set_all('blue')
+display = screen.Screen()
+led = leds.LEDs()
+sonar = maxbotix.MaxBotix()
+drive = motors.Motors()
 
-x = listener.wait_for_command()
-print(x)
+drive.set_speeds(0.1)
+for x in range(100):
+    display.write(0, x)
+    sonar.measure()
+    time.sleep(0.025)
+    
+drive.stop()
