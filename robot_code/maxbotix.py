@@ -28,7 +28,7 @@ class MaxBotix:
 
         self.trigger.value(0)
         
-        self.leds = leds.LEDs()
+        #self.leds = leds.LEDs()
 
     def _sample_callback(self, timer):
         if self._index < len(self.buf1):
@@ -46,11 +46,11 @@ class MaxBotix:
                 return True
         return False
 
-    def measure(self):
-        n_samples = self.n_samples
-        sample_rate = self.sample_rate
+    def measure(self, sample_rate=0, n_samples=0):
+        if sample_rate == 0: sample_rate = self.sample_rate
+        if n_samples == 0: n_samples = self.n_samples
         
-        self.leds.set_all('orange')
+        #self.leds.set_all('orange')
 
         self.buf1 = array.array("H", [0] * n_samples)
         self.buf2 = array.array("H", [0] * n_samples)
@@ -73,7 +73,7 @@ class MaxBotix:
         while not self._done:
             pass
         
-        self.leds.set_all('off')
+        #self.leds.set_all('off')
         return self.buf1, self.buf2
 
     def get_voltages(self):
