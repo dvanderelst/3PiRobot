@@ -19,20 +19,49 @@ def parse_command(command):
 
 class WifiServer:
     def __init__(self):
-        self.baudrate = 115200
-        self.tx_pin = Pin(16)
-        self.rx_pin = Pin(17)
-        self.en_pin = Pin(18, Pin.OUT)
+        self.boot_baud = 74880
+        self.baudrate = 115200  # AT firmware baud
+        self.tx_pin = Pin(settings.tx_pin)
+        self.rx_pin = Pin(settings.rx_pin)
+        self.en_pin = Pin(settings.en_pin, Pin.OUT)
         self.end_char = settings.end_char
         self.verbose = settings.verbose
         self.uart = UART(0, baudrate=self.baudrate, tx=self.tx_pin, rx=self.rx_pin)
         self.buffer = b""
 
+    def check_status(self):
+        if self.verbose:
+            print("[ESP] Checking ESP8266 status...")
+        response = self.send_cmd("AT")
+        ok = "OK" in response
+        if self.verbose:
+            if ok:
+                print("[ESP] Status: OK")
+            else:
+                print("[ESP] Status: FAILED")
+        return ok
+    
     def enable(self):
         if self.verbose:
             print("[ESP] Powering on...")
         self.en_pin.value(1)
+        time.sleep(1.2)
+
+        # Switch to bootloader baudrate temporarily to flush or print boot logs
+        self.uart.init(baudrate=self.boot_baud, tx=self.tx_pin, rx=self.rx_pin)
         time.sleep(1)
+        if self.uart.any():
+            boot_log = self.uart.read()
+            if self.verbose and boot_log:
+                try:
+                    print("[ESP] Boot log:")
+                    print(boot_log.decode())
+                except:
+                    print("[ESP] Boot log (raw):")
+                    print(boot_log)
+
+        # Now switch back to AT firmware baud
+        self.uart.init(baudrate=self.baudrate, tx=self.tx_pin, rx=self.rx_pin)
 
     def disable(self):
         if self.verbose:
@@ -60,7 +89,17 @@ class WifiServer:
                     break
             if time.ticks_diff(time.ticks_ms(), start_time) > 3000:
                 break  # timeout
-        return out.decode()
+
+        try:
+            return out.decode()
+        except UnicodeError:
+            if self.verbose:
+                print("[ESP] Unicode decode failed. Raw bytes:")
+                print(out)
+
+            # Filter to printable ASCII + newline + carriage return
+            clean_bytes = bytes([b for b in out if 32 <= b <= 126 or b in (10, 13)])
+            return clean_bytes.decode()
 
     def print_response(self, response):
         lines = response.strip().splitlines()
@@ -156,11 +195,16 @@ class WifiServer:
 
     
 if __name__ == '__main__':
-    wifi = WifiServer(verbose=True)
+    wifi = WifiServer()
+    
+    print("[TEST] Disabling ESP8266...")
+    wifi.disable()
+    time.sleep(1)
 
     print("[TEST] Enabling ESP8266...")
     wifi.enable()
-
+    time.sleep(1)
+    
     print("[TEST] Connecting to Wi-Fi...")
     wifi.connect_wifi("batnet", "lebowski")
 
