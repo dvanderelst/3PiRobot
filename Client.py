@@ -1,7 +1,6 @@
 import socket
-
-from pygments.lexers.textedit import AwkLexer
-
+import struct
+import numpy
 
 class Client:
     def __init__(self, host):
@@ -19,7 +18,13 @@ class Client:
 
     def ping(self, rate, samples):
         self.send_list(['ping', rate, samples])
-        return self.receive()
+        number_of_bytes = samples * 2 * 2
+        buffer =  self.receive(number_of_bytes)
+        data = struct.unpack(f"{samples * 2}H", buffer)
+        data = numpy.array(data)
+        data = data.reshape((2, samples))
+        data = data.transpose()
+        return data
 
     def send_list(self, lst):
         msg = ''
@@ -32,7 +37,20 @@ class Client:
             msg += self.end_char
         self.sock.send(msg.encode())
 
-    def receive(self):
+    def receive(self, num_bytes=None):
+        if num_bytes is not None:
+            buffer = b""
+            while len(buffer) < num_bytes:
+                try:
+                    chunk = self.sock.recv(num_bytes - len(buffer))
+                    if not chunk:
+                        return None
+                    buffer += chunk
+                except socket.timeout:
+                    return None
+            return buffer  # binary data
+
+        # Otherwise, read until end_char (text mode)
         while self.end_char.encode() not in self._buffer:
             try:
                 data = self.sock.recv(1024)

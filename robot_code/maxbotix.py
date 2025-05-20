@@ -2,13 +2,14 @@ from machine import Pin, ADC, Timer
 import leds
 import array
 import time
+import settings
 
 class MaxBotix:
     def __init__(self):
-        self.trigger = Pin(24, Pin.OUT)
-        self.adc_emit = ADC(1)
-        self.adc_recv1 = ADC(1)
-        self.adc_recv2 = ADC(2)
+        self.trigger = Pin(settings.trigger_emitter, Pin.OUT)
+        self.adc_emit = ADC(settings.adc_emitter)
+        self.adc_recv1 = ADC(settings.adc_recv1)
+        self.adc_recv2 = ADC(settings.adc_recv2)
 
         self.wait_method = "threshold"
         self.pulse_threshold = 15000

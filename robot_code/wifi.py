@@ -1,6 +1,10 @@
 from machine import UART, Pin
 import settings
 import time
+import struct
+
+def array_to_bytes(arr):
+    return struct.pack(f'{len(arr)}H', *arr)
 
 def parse_command(command):
     split_char = settings.split_char
@@ -132,14 +136,16 @@ class WifiServer:
             print("[ESP] Failed to retrieve IP address.")
         return None
     
-    def send_data(self, conn_id, data):
+    def send_data(self, data, conn_id=0):
         if isinstance(data, str):
+            data += self.end_char
             data = data.encode()
         length = len(data)
         cmd = f"AT+CIPSEND={conn_id},{length}"
         if self.verbose:
             print(f"[ESP →] {cmd}")
         self.uart.write(cmd + '\r\n')
+
         # Wait for '>' prompt
         timeout = time.ticks_ms()
         while True:
@@ -150,11 +156,15 @@ class WifiServer:
                 if self.verbose:
                     print("[ESP] Timed out waiting for '>'")
                 return False
-        # Send the actual data
+
         self.uart.write(data)
+
         if self.verbose:
-            print(f"[ESP →] (data) {data.decode()}")
-        # Optionally wait for SEND OK
+            try:
+                print(f"[ESP →] (data) {data.decode()}")
+            except UnicodeError:
+                print(f"[ESP →] (data) {data[:8]}... ({len(data)} bytes)")
+
         response = self.read_response()
         if self.verbose:
             self.print_response(response)

@@ -58,7 +58,10 @@ while True:
     if action == 'ping':
         display.write(2, action)
         b1, b2 = sonar.measure(values[0], values[1])
-        bridge.send_data(conn_id=0, data='test*')
+        byte_data1 = wifi.array_to_bytes(b1)
+        byte_data2 = wifi.array_to_bytes(b2)
+        byte_data_all = byte_data1 + byte_data2
+        bridge.send_data(data=byte_data_all)
         
     loop_nr = loop_nr + 1
     if loop_nr == 2: loop_nr = 0
