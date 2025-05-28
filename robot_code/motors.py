@@ -1,10 +1,12 @@
 from pololu_3pi_2040_robot import robot
 import math
+import settings
 
 class Motors:
     def __init__(self):
         counts_per_rev = 909.72
         wheel_diameter_mm = 31
+        self.verbose = settings.verbose
         self.max_mps = 0.4 #This comes from the specs. Probably conservative.
         self.counts_per_rev = counts_per_rev
         self.wheel_diameter_m = wheel_diameter_mm / 1000  # convert to meters
@@ -39,6 +41,7 @@ class Motors:
         left_cps = self.mps2cps(left_speed)
         right_cps = self.mps2cps(right_speed)
         self.motors.set_speeds(left_cps, right_cps)
+        if self.verbose: print(f'[MTR] L {left_speed}, R {right_speed}')
     
     def stop(self):
         self.set_speeds(0)

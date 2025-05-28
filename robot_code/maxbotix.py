@@ -6,13 +6,18 @@ import settings
 
 class MaxBotix:
     def __init__(self):
+        self.verbose = settings.verbose
         self.trigger = Pin(settings.trigger_emitter, Pin.OUT)
+        self.recv1_enable = Pin(settings.trigger_recv1, Pin.OUT)
+        self.recv2_enable = Pin(settings.trigger_recv2, Pin.OUT)
+        
+        
         self.adc_emit = ADC(settings.adc_emitter)
         self.adc_recv1 = ADC(settings.adc_recv1)
         self.adc_recv2 = ADC(settings.adc_recv2)
 
         self.wait_method = "threshold"
-        self.pulse_threshold = 15000
+        self.pulse_threshold = settings.pulse_threshold
         self.fixed_delay_us = 10
         self.max_delay_us = 1000000
 
@@ -28,8 +33,10 @@ class MaxBotix:
         self._timer = Timer()
 
         self.trigger.value(0)
+        self.recv1_enable.value(0)
+        self.recv2_enable.value(0)
         
-        #self.leds = leds.LEDs()
+        if self.verbose: print("[SNR] Initialized")
 
     def _sample_callback(self, timer):
         if self._index < len(self.buf1):
@@ -41,11 +48,13 @@ class MaxBotix:
             self._done = True
 
     def _wait_for_pulse(self):
+        current_max = 0
         start = time.ticks_us()
         while time.ticks_diff(time.ticks_us(), start) < self.max_delay_us:
-            if self.adc_emit.read_u16() > self.pulse_threshold:
-                return True
-        return False
+            value = self.adc_emit.read_u16()
+            current_max = max(value, current_max)
+            if  value > self.pulse_threshold: return True, current_max
+        return False, current_max
 
     def measure(self, sample_rate=0, n_samples=0):
         if sample_rate == 0: sample_rate = self.sample_rate
@@ -61,13 +70,16 @@ class MaxBotix:
         self.trigger.value(1)
         time.sleep_ms(30)
         self.trigger.value(0)
-
+        exceeded = False
+        max_value = 0
         if self.wait_method == "threshold":
-            self._wait_for_pulse()
+            exceeded, max_value = self._wait_for_pulse()
         elif self.wait_method == "fixed":
             time.sleep_us(self.fixed_delay_us)
         else:
             raise ValueError("Invalid wait_method.")
+        
+        if self.verbose: print(f'[SNR] wait method {self.wait_method}, exceeded: {exceeded}, {max_value}')
 
         self._timer.init(freq=sample_rate, mode=Timer.PERIODIC, callback=self._sample_callback)
 

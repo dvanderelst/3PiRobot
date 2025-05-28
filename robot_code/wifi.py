@@ -20,6 +20,13 @@ def parse_command(command):
         samples = int(parts[2])
         return parts[0], [rate, samples]
     
+    return [None, None]
+
+def parse_commands(commands):
+    parsed = []
+    for command in commands:
+        parsed.append(parse_command(command))
+    return parsed
 
 class WifiServer:
     def __init__(self):
@@ -164,44 +171,98 @@ class WifiServer:
                 print(f"[ESP →] (data) {data.decode()}")
             except UnicodeError:
                 print(f"[ESP →] (data) {data[:8]}... ({len(data)} bytes)")
-
+        
+        if self.verbose > 1: print('sent here')
         response = self.read_response()
-        if self.verbose:
-            self.print_response(response)
+        if self.verbose > 1: print('response', response)
+        if self.verbose: self.print_response(response)
         return b"SEND OK" in response.encode()
-
-    def wait_command(self):
+    
+    def wait_commands(self):
         if self.verbose:
-            print("[ESP] Waiting for incoming command...")
+            print("[ESP] Waiting for incoming commands...")
         buffer = b""
-        payload = b""
-        in_payload = False
+        commands = []
 
         while True:
             if self.uart.any():
                 buffer += self.uart.read()
+                if self.verbose > 1:
+                    print("buffer:", buffer)
 
                 while b"+IPD," in buffer:
-                    # Look for start of +IPD line
                     start = buffer.find(b"+IPD,")
-                    buffer = buffer[start:]  # discard anything before
+                    buffer = buffer[start:]
 
-                    # Make sure we got the ':' separator
-                    if b':' not in buffer:
-                        break  # wait for more data
+                    if b":" not in buffer: break  # Incomplete header, wait for more data
+                    header, rest = buffer.split(b":", 1)
 
-                    header, rest = buffer.split(b':', 1)
-                    payload += rest
-                    buffer = b""  # reset after extracting
+                    # Parse length from header
+                    try:
+                        parts = header.split(b",")
+                        length = int(parts[-1])  # "+IPD,<id>,<length>:"
+                    except (ValueError, IndexError):
+                        if self.verbose:
+                            print("[ESP] Failed to parse +IPD header")
+                        buffer = b""  # reset to avoid lockup
+                        break
 
-                    in_payload = True  # now inside payload
+                    if len(rest) < length: break  # Payload incomplete
+                    payload = rest[:length]
+                    buffer = rest[length:]  # keep rest for next loop
 
-            if in_payload and self.end_char.encode() in payload:
-                command, _ = payload.split(self.end_char.encode(), 1)
-                cmd_str = command.decode().strip()
-                if self.verbose:
-                    print(f"[ESP ←] Payload: {cmd_str}")
-                return cmd_str
+                    # Extract all complete commands from payload
+                    chunks = payload.split(self.end_char.encode())
+                    for chunk in chunks[:-1]:  # all except possible last incomplete
+                        try:
+                            cmd = chunk.decode().strip()
+                            if cmd:
+                                commands.append(cmd)
+                                if self.verbose:
+                                    print(f"[ESP ←] Command: {cmd}")
+                        except UnicodeDecodeError:
+                            if self.verbose:
+                                print("[ESP] Skipped undecodable chunk")
+
+                    # If there's a last chunk that didn't end with end_char, put it back
+                    if not payload.endswith(self.end_char.encode()):
+                        buffer = self.end_char.encode().join([chunks[-1]]) + buffer
+
+            if commands: return commands
+
+
+#     def wait_command(self):
+#         if self.verbose:
+#             print("[ESP] Waiting for incoming command...")
+#         buffer = b""
+#         payload = b""
+#         in_payload = False
+# 
+#         while True:
+#             if self.uart.any():
+#                 buffer += self.uart.read()
+#                 if self.verbose > 1: print('buffer', buffer)
+#                 while b"+IPD," in buffer:
+#                     # Look for start of +IPD line
+#                     start = buffer.find(b"+IPD,")
+#                     buffer = buffer[start:]  # discard anything before
+# 
+#                     # Make sure we got the ':' separator
+#                     if b':' not in buffer:
+#                         break  # wait for more data
+# 
+#                     header, rest = buffer.split(b':', 1)
+#                     payload += rest
+#                     buffer = b""  # reset after extracting
+# 
+#                     in_payload = True  # now inside payload
+# 
+#             if in_payload and self.end_char.encode() in payload:
+#                 command, _ = payload.split(self.end_char.encode(), 1)
+#                 cmd_str = command.decode().strip()
+#                 if self.verbose:
+#                     print(f"[ESP ←] Payload: {cmd_str}")
+#                 return cmd_str
 
     
 if __name__ == '__main__':
