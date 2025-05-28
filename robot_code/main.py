@@ -8,6 +8,7 @@ import settings
 
 print('[Main] Initialize')
 
+verbose = settings.verbose
 display = screen.Screen()
 led = leds.LEDs()
 sonar = maxbotix.MaxBotix()
@@ -43,11 +44,11 @@ while True:
     if loop_nr == 0: led.set(5, 'blue')
     if loop_nr == 1: led.set(5, 'orange')
     
-    print('[Received]', commands)
+    if verbose: print('[Received]', commands)
     parsed_commands = wifi.parse_commands(commands)
     
     for parsed_command in parsed_commands:
-        print('[Parsed]', parsed_command)
+        if verbose > 1: print('[Parsed]', parsed_command)
         action = parsed_command[0]
         values = parsed_command[1]
     
