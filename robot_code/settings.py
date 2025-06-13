@@ -1,10 +1,20 @@
-ssid = 'batnet'
-password = 'lebowski'
+import passwords
+
+verbose = 2
+ssid_index = 1  # Choose which known SSID to connect to
+
+
+ssid_list = [
+    ('batnet', passwords.password0),
+    ('ZyXEL39940', passwords.password1),
+    # Add more if needed
+]
+
 split_char = ','
 end_char = '*'
-verbose = 0
-tx_pin = 16
-rx_pin = 17
+
+tx_pin = 4
+rx_pin = 5
 en_pin = 18
 
 pulse_threshold = 12000

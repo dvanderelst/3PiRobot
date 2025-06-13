@@ -5,69 +5,85 @@ import time
 import motors
 import wifi
 import settings
-
-print('[Main] Initialize')
+import bumpers
 
 verbose = settings.verbose
-display = screen.Screen()
+
+print('[Main] Initialize')
 led = leds.LEDs()
 sonar = maxbotix.MaxBotix()
-drive = motors.Motors()
-bridge = wifi.WifiServer()
-
-display.write(0, 'Booting')
 led.set_all('off')
-led.set(0, 'orange')
-led.set(1, 'orange')
-led.set(2, 'orange')
 
-print("[Main] Enabling ESP8266...")
-bridge.enable()
+# ────────────── Wi-Fi Setup ──────────────
+print("[Main] Preparing Wi-Fi module...")
+bridge = wifi.WifiServer()
+bridge.setup()
+
 print("[Main] Connecting to Wi-Fi...")
-bridge.connect_wifi("batnet", "lebowski")
-led.set(0, 'green')
+ssid, password = settings.ssid_list[settings.ssid_index]
+join_response = bridge.connect_wifi(ssid, password)
 
+if "ERROR" in join_response:
+    print(f"[FAIL] Could not join network '{ssid}'")
+else:
+    print(f"[OK] Successfully joined '{ssid}'")
+    print("→ IP info:")
+    print(join_response)
+    ip = bridge.get_ip()
+
+# ────────────── Server Startup ──────────────
 print("[Main] Starting server...")
 bridge.start_server(1234)
-led.set(1, 'green')
-
-print("[Main] Getting IP address...")
-ip = bridge.get_ip()
-display.write(1, ip)
-led.set(2, 'green')
 
 print('[Main] Starting main loop')
 
+# ────────────── Bring other systems online ──────────────
+display = screen.Screen()
+#bump = bumpers.bumpers()
+drive = motors.Motors()
+
+led.set_all('off')
+
+display.write(0, ssid)
+display.write(1, ip)
+
 loop_nr = 0
+command_queue = []
 while True:
-    commands = bridge.wait_commands()    
-    if loop_nr == 0: led.set(5, 'blue')
-    if loop_nr == 1: led.set(5, 'orange')
-    
-    if verbose: print('[Received]', commands)
-    parsed_commands = wifi.parse_commands(commands)
-    
-    for parsed_command in parsed_commands:
-        if verbose > 1: print('[Parsed]', parsed_command)
-        action = parsed_command[0]
-        values = parsed_command[1]
-    
-        if action == 'motors':
-            display.write(2, action)
-            drive.set_speeds(values[0], values[1])
-        
-        if action == 'ping':
-            display.write(2, action)
-            b1, b2 = sonar.measure(values[0], values[1])
-            byte_data1 = wifi.array_to_bytes(b1)
-            byte_data2 = wifi.array_to_bytes(b2)
-            byte_data_all = byte_data1 + byte_data2
-            bridge.send_data(data=byte_data_all)
-            
-    loop_nr = loop_nr + 1
-    if loop_nr == 2: loop_nr = 0
-   
+    # 1. Check for new Wi-Fi commands
+    new_commands = bridge.check_commands()  # Non-blocking
+    if new_commands: command_queue.extend(new_commands)
 
+    # 2. Read bumpers
+#     left, right = bump.read()
+#     if left or right:
+#         print("[BUMP] L:", left, "R:", right)
+#         display.write(3, f"BUMP L:{int(left)} R:{int(right)}")
+#         drive.set_speeds(0, 0)
 
+    # 3. Blink LED to indicate loop activity
+    #led.set(5, 'blue' if loop_nr == 0 else 'orange')
+    loop_nr = (loop_nr + 1) % 2
 
+    # 4. Process incoming commands
+    if command_queue:
+        commands = command_queue.copy()
+        command_queue.clear()
+        if verbose: print('[Received]', commands)
 
+        parsed = wifi.parse_commands(commands)
+        for action, values in parsed:
+            if verbose > 1:
+                print('[Parsed]', (action, values))
+
+            if action == 'motors':
+                #display.write(2, action)
+                drive.set_speeds(values[0], values[1])
+
+            elif action == 'ping':
+                #display.write(2, action)
+                b1, b2 = sonar.measure(values[0], values[1])
+                data = wifi.array_to_bytes(b1) + wifi.array_to_bytes(b2)
+                bridge.send_data(data)
+
+    time.sleep(0.01)

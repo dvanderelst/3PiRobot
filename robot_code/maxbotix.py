@@ -37,6 +37,7 @@ class MaxBotix:
         self.recv2_enable.value(0)
         
         if self.verbose: print("[SNR] Initialized")
+                
 
     def _sample_callback(self, timer):
         if self._index < len(self.buf1):
@@ -55,6 +56,24 @@ class MaxBotix:
             current_max = max(value, current_max)
             if  value > self.pulse_threshold: return True, current_max
         return False, current_max
+    
+    def free_pulse(self, index):
+        if index == 1:
+            self.trigger.value(1)
+            self.recv1_enable.value(0)
+            self.recv2_enable.value(0)
+        if index == 2:
+            self.trigger.value(0)
+            self.recv1_enable.value(1)
+            self.recv2_enable.value(0)
+        if index == 3:
+            self.trigger.value(0)
+            self.recv1_enable.value(0)
+            self.recv2_enable.value(1)
+        if index == 0:
+            self.trigger.value(0)
+            self.recv1_enable.value(0)
+            self.recv2_enable.value(0)
 
     def measure(self, sample_rate=0, n_samples=0):
         if sample_rate == 0: sample_rate = self.sample_rate
