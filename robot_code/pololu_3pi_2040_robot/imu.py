@@ -3,7 +3,8 @@ class IMU:
         from ._lib import lis3mdl, lsm6dso
         if i2c is None:
             from machine import I2C, Pin
-            i2c = I2C(id=0, scl=Pin(5), sda=Pin(4), freq=400_000)
+            #i2c = I2C(id=0, scl=Pin(5), sda=Pin(4), freq=400_000)
+            i2c = I2C(id=0, scl=Pin(20), sda=Pin(19), freq=400_000)
             # Send low pulses on SCL to fix devices that are stuck
             # driving SDA low.
             for i in range(10):
