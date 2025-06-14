@@ -15,7 +15,7 @@ end_char = '*'
 
 tx_pin = 4
 rx_pin = 5
-en_pin = 18
+en_pin = 27
 
 pulse_threshold = 12000
 

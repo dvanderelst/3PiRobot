@@ -98,7 +98,7 @@ class MaxBotix:
         else:
             raise ValueError("Invalid wait_method.")
         
-        if self.verbose: print(f'[SNR] wait method {self.wait_method}, exceeded: {exceeded}, {max_value}')
+        if self.verbose: print(f'[SNR] wait method: {self.wait_method}. Exceeded: {exceeded}, {max_value}')
 
         self._timer.init(freq=sample_rate, mode=Timer.PERIODIC, callback=self._sample_callback)
 

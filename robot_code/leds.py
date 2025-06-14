@@ -41,7 +41,7 @@ class LEDs:
         self.leds = robot.RGBLEDs()
         self.num_leds = 6
         self.colors = [[0, 0, 0]] * self.num_leds
-        self.leds.set_brightness(10)
+        self.leds.set_brightness(5)
 
     def set_brightness(self, level):
         """Set global brightness (0–31)."""

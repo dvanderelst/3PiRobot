@@ -10,8 +10,14 @@ import bumpers
 verbose = settings.verbose
 
 print('[Main] Initialize')
+# ────────────── Init systems ──────────────
+
 led = leds.LEDs()
 sonar = maxbotix.MaxBotix()
+display = screen.Screen()
+bump = bumpers.Bumpers()
+drive = motors.Motors()
+display.write(0, 'Systems up')
 led.set_all('off')
 
 # ────────────── Wi-Fi Setup ──────────────
@@ -30,36 +36,32 @@ else:
     print("→ IP info:")
     print(join_response)
     ip = bridge.get_ip()
+    display.write(0, 'Connected')
+    display.write(1, ssid)
+    display.write(2, ip)
+    led.set(0, 'green')
 
 # ────────────── Server Startup ──────────────
 print("[Main] Starting server...")
 bridge.start_server(1234)
+display.write(0, 'Server up')
 
+# ──────────── Starting main loop ────────────
 print('[Main] Starting main loop')
-
-# ────────────── Bring other systems online ──────────────
-display = screen.Screen()
-#bump = bumpers.bumpers()
-drive = motors.Motors()
-
-led.set_all('off')
-
-display.write(0, ssid)
-display.write(1, ip)
-
 loop_nr = 0
 command_queue = []
+display.write(0, 'Ready')
 while True:
     # 1. Check for new Wi-Fi commands
     new_commands = bridge.check_commands()  # Non-blocking
     if new_commands: command_queue.extend(new_commands)
 
     # 2. Read bumpers
-#     left, right = bump.read()
-#     if left or right:
-#         print("[BUMP] L:", left, "R:", right)
-#         display.write(3, f"BUMP L:{int(left)} R:{int(right)}")
-#         drive.set_speeds(0, 0)
+    left, right = bump.read()
+    if left or right:
+        print("[BUMP] L:", left, "R:", right)
+        display.write(3, f"BUMP L:{int(left)} R:{int(right)}")
+        drive.set_speeds(0, 0)
 
     # 3. Blink LED to indicate loop activity
     #led.set(5, 'blue' if loop_nr == 0 else 'orange')
@@ -77,11 +79,11 @@ while True:
                 print('[Parsed]', (action, values))
 
             if action == 'motors':
-                #display.write(2, action)
+                display.write(0, action)
                 drive.set_speeds(values[0], values[1])
 
             elif action == 'ping':
-                #display.write(2, action)
+                display.write(0, action)
                 b1, b2 = sonar.measure(values[0], values[1])
                 data = wifi.array_to_bytes(b1) + wifi.array_to_bytes(b2)
                 bridge.send_data(data)
