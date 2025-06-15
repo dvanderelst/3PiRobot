@@ -50,12 +50,16 @@ class MaxBotix:
 
     def _wait_for_pulse(self):
         current_max = 0
+        pulse_time = None
         start = time.ticks_us()
         while time.ticks_diff(time.ticks_us(), start) < self.max_delay_us:
             value = self.adc_emit.read_u16()
             current_max = max(value, current_max)
-            if  value > self.pulse_threshold: return True, current_max
-        return False, current_max
+            if value > self.pulse_threshold:
+                pulse_time = time.ticks_us()
+                return True, current_max, pulse_time
+            time.sleep_us(10)
+        return False, current_max, pulse_time
     
     def free_pulse(self, index):
         if index == 1:
@@ -78,35 +82,52 @@ class MaxBotix:
     def measure(self, sample_rate=0, n_samples=0):
         if sample_rate == 0: sample_rate = self.sample_rate
         if n_samples == 0: n_samples = self.n_samples
-        
-        #self.leds.set_all('orange')
 
         self.buf1 = array.array("H", [0] * n_samples)
         self.buf2 = array.array("H", [0] * n_samples)
-        self._index = 0
-        self._done = False
 
         self.trigger.value(1)
         time.sleep_ms(30)
         self.trigger.value(0)
+
         exceeded = False
         max_value = 0
+        pulse_time = None
+
         if self.wait_method == "threshold":
-            exceeded, max_value = self._wait_for_pulse()
+            exceeded, max_value, pulse_time = self._wait_for_pulse()
         elif self.wait_method == "fixed":
             time.sleep_us(self.fixed_delay_us)
         else:
             raise ValueError("Invalid wait_method.")
-        
-        if self.verbose: print(f'[SNR] wait method: {self.wait_method}. Exceeded: {exceeded}, {max_value}')
 
-        self._timer.init(freq=sample_rate, mode=Timer.PERIODIC, callback=self._sample_callback)
+        if self.verbose:
+            print(f'[SNR] wait method: {self.wait_method}. Exceeded: {exceeded}, max: {max_value}')
 
-        while not self._done:
-            pass
-        
-        #self.leds.set_all('off')
-        return self.buf1, self.buf2
+        # Manual sampling loop
+        delay_us = int(1_000_000 / sample_rate)
+        start_time = time.ticks_us()
+
+        for i in range(n_samples):
+            self.buf1[i] = self.adc_recv1.read_u16()
+            self.buf2[i] = self.adc_recv2.read_u16()
+            time.sleep_us(delay_us)
+
+        end_time = time.ticks_us()
+
+        if self.verbose:
+            total_time = time.ticks_diff(end_time, start_time)
+            print(f"[SNR] Sampled {n_samples} points in {total_time} us")
+
+        # Compute echo sample index
+        echo_index = None
+        if pulse_time is not None:
+            time_diff = time.ticks_diff(start_time, pulse_time)  # positive = sampling started after pulse
+            echo_index = time_diff / delay_us
+            if self.verbose:
+                print(f"[SNR] Echo threshold to first sample: {time_diff} us → index offset ≈ {echo_index:.2f}")
+
+        return self.buf1, self.buf2, echo_index
 
     def get_voltages(self):
         if self.buf1 is None or self.buf2 is None:

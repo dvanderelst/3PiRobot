@@ -49,12 +49,20 @@ display.write(0, 'Server up')
 # ──────────── Starting main loop ────────────
 print('[Main] Starting main loop')
 loop_nr = 0
+current_led_color = 'blue'
+led.set(5, current_led_color)
+
+last_toggle = time.ticks_ms()
+toggle_interval = 500  # milliseconds
+
 command_queue = []
 display.write(0, 'Ready')
+
 while True:
     # 1. Check for new Wi-Fi commands
     new_commands = bridge.check_commands()  # Non-blocking
-    if new_commands: command_queue.extend(new_commands)
+    if new_commands:
+        command_queue.extend(new_commands)
 
     # 2. Read bumpers
     left, right = bump.read()
@@ -63,15 +71,12 @@ while True:
         display.write(3, f"BUMP L:{int(left)} R:{int(right)}")
         drive.set_speeds(0, 0)
 
-    # 3. Blink LED to indicate loop activity
-    #led.set(5, 'blue' if loop_nr == 0 else 'orange')
-    loop_nr = (loop_nr + 1) % 2
-
-    # 4. Process incoming commands
+    # 3. Process incoming commands
     if command_queue:
         commands = command_queue.copy()
         command_queue.clear()
-        if verbose: print('[Received]', commands)
+        if verbose:
+            print('[Received]', commands)
 
         parsed = wifi.parse_commands(commands)
         for action, values in parsed:
@@ -84,8 +89,15 @@ while True:
 
             elif action == 'ping':
                 display.write(0, action)
-                b1, b2 = sonar.measure(values[0], values[1])
+                b1, b2, _ = sonar.measure(values[0], values[1])
                 data = wifi.array_to_bytes(b1) + wifi.array_to_bytes(b2)
                 bridge.send_data(data)
+
+    # 4. Blink LED 5 to indicate readiness
+    now = time.ticks_ms()
+    if time.ticks_diff(now, last_toggle) >= toggle_interval:
+        current_led_color = 'blue' if current_led_color == 'orange' else 'orange'
+        led.set(5, current_led_color)
+        last_toggle = now
 
     time.sleep(0.01)

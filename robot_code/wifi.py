@@ -13,13 +13,14 @@ def array_to_bytes(arr):
 def parse_command(command):
     split_char = settings.split_char
     parts = command.split(split_char)
-
-    if parts[0] == 'motors':
-        return parts[0], [float(parts[1]), float(parts[2])]
-    if parts[0] == 'ping':
-        return parts[0], [int(parts[1]), int(parts[2])]
-
-    return [None, None]
+    try:
+        if parts[0] == 'motors' and len(parts) == 3:
+            return parts[0], [float(parts[1]), float(parts[2])]
+        if parts[0] == 'ping' and len(parts) == 3:
+            return parts[0], [int(parts[1]), int(parts[2])]
+    except:
+        pass
+    return None, None
 
 def parse_commands(commands):
     return [parse_command(c) for c in commands]
@@ -37,7 +38,7 @@ class WifiServer:
         self.boot_baud = 74880
         self.baudrate = 115200
         self.uart = UART(1, baudrate=self.baudrate, tx=self.tx_pin, rx=self.rx_pin)
-        self.buffer = b""
+        self.buffer = b""  # Persistent buffer for incoming data
 
     def setup(self):
         self.disable()
@@ -108,43 +109,41 @@ class WifiServer:
         self.send_cmd('AT+CIPMUX=1')
         return self.send_cmd(f'AT+CIPSERVER=1,{port}')
 
-    def wait_commands(self):
-        if self.verbose:
-            print("[ESP] Waiting for incoming commands...")
-        buffer = b""
+    def update_buffer(self):
+        """Non-blocking read from UART and extract complete commands."""
+        if self.uart.any():
+            self.buffer += self.uart.read()
+
         commands = []
+        while b"+IPD," in self.buffer:
+            start = self.buffer.find(b"+IPD,")
+            self.buffer = self.buffer[start:]
+            if b":" not in self.buffer:
+                break
+            header, rest = self.buffer.split(b":", 1)
+            try:
+                length = int(header.split(b",")[-1])
+            except:
+                self.buffer = b""
+                break
+            if len(rest) < length:
+                break
+            payload = rest[:length]
+            self.buffer = rest[length:]
+            chunks = payload.split(self.end_char.encode())
+            for chunk in chunks[:-1]:
+                try:
+                    cmd = chunk.decode().strip()
+                    if cmd:
+                        commands.append(cmd)
+                except:
+                    pass
+            if not payload.endswith(self.end_char.encode()):
+                self.buffer = self.end_char.encode().join([chunks[-1]]) + self.buffer
+        return commands
 
-        while True:
-            if self.uart.any():
-                buffer += self.uart.read()
-
-                while b"+IPD," in buffer:
-                    start = buffer.find(b"+IPD,")
-                    buffer = buffer[start:]
-                    if b":" not in buffer:
-                        break
-                    header, rest = buffer.split(b":", 1)
-                    try:
-                        length = int(header.split(b",")[-1])
-                    except:
-                        buffer = b""
-                        break
-                    if len(rest) < length:
-                        break
-                    payload = rest[:length]
-                    buffer = rest[length:]
-                    chunks = payload.split(self.end_char.encode())
-                    for chunk in chunks[:-1]:
-                        try:
-                            cmd = chunk.decode().strip()
-                            if cmd:
-                                commands.append(cmd)
-                        except:
-                            pass
-                    if not payload.endswith(self.end_char.encode()):
-                        buffer = self.end_char.encode().join([chunks[-1]]) + buffer
-            if commands:
-                return commands
+    def check_commands(self):
+        return self.update_buffer()
 
     def send_data(self, data, conn_id=0):
         if isinstance(data, str):
@@ -168,35 +167,3 @@ class WifiServer:
             if line.startswith("+CIFSR:STAIP"):
                 return line.split('"')[1]
         return None
-
-    def check_commands(self):
-        if self.uart.any():
-            return self.wait_commands()
-        return []
-
-# ──────────────────────────────────────────────────────
-# Standalone Test
-
-if __name__ == "__main__":
-    print("[TEST] Starting Wi-Fi diagnostic test...")
-    wifi = WifiServer()
-    wifi.setup()
-
-    ssid_list = settings.ssid_list
-    use_ssid_index = 1
-    ssid, password = ssid_list[use_ssid_index]
-
-    print(f"[TEST] Attempting to join network: '{ssid}'")
-    join_response = wifi.connect_wifi(ssid, password)
-
-    if "ERROR" in join_response:
-        print(f"[FAIL] Could not join network '{ssid}'")
-    else:
-        print(f"[OK] Successfully joined '{ssid}'")
-        print("→ IP info:")
-        print(join_response)
-
-    print("[TEST] Starting server and waiting for incoming commands...")
-    wifi.start_server(1234)
-    commands = wifi.wait_commands()
-    print("[TEST] Received commands:", commands)

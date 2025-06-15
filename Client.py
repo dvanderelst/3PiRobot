@@ -2,9 +2,10 @@ import socket
 import struct
 import numpy
 import time
+import matplotlib.pyplot as plt
 
 class Client:
-    def __init__(self, host):
+    def __init__(self, host, name=False):
         self.verbose = True
         self.host = host
         self.port = 1234
@@ -13,6 +14,7 @@ class Client:
         self.sock = socket.socket()
         self.sock.settimeout(5)
         self.sock.connect((self.host, self.port))
+        self.name = name
         self._buffer = b""
 
     def set_motors(self, left, right):
@@ -21,7 +23,7 @@ class Client:
         end = time.time()
         if self.verbose: print(f"set_motors took {end - start:.4f} seconds")
 
-    def ping(self, rate, samples):
+    def ping(self, rate, samples, plot=False):
         start = time.time()
         self.send_list(['ping', rate, samples])
         number_of_bytes = samples * 2 * 2
@@ -38,6 +40,14 @@ class Client:
         if self.verbose: print(f"ping took {end - start:.4f} seconds")
         max_distance = (343 / 2) * (samples / rate)
         distances = numpy.linspace(0, max_distance, samples)
+        if plot:
+            plt.figure()
+            plt.plot(distances, data)
+            plt.title(self.host)
+            if self.name: plt.title(self.name)
+            plt.xlabel("Distance")
+            plt.ylabel("Amplitude")
+            plt.show()
         return data, distances
 
     def send_list(self, lst):
