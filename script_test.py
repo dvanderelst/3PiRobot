@@ -4,10 +4,13 @@ import Client
 from matplotlib import pyplot as plt
 
 client = Client.Client('192.168.200.38')
-x, distances = client.ping(10000, 200, True)
+client.name = 'Robot01'
+while True:
+    x, distances = client.ping(50000, 200, True)
+    time.sleep(1)
 # while True:
 #     client.set_motors(0, 0)
-#
+#10000
 #     time.sleep(1)
 # #
 # #plt.figure()

@@ -46,6 +46,7 @@ class Client:
             plt.plot(distances, data)
             plt.title(self.host)
             if self.name: plt.title(self.name)
+            plt.legend(['Emitter', 'Channel 1', 'Channel 2'])
             plt.xlabel("Distance")
             plt.ylabel("Amplitude")
             plt.show()

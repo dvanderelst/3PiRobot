@@ -89,8 +89,8 @@ while True:
 
             elif action == 'ping':
                 display.write(0, action)
-                b1, b2, _ = sonar.measure(values[0], values[1])
-                data = wifi.array_to_bytes(b1) + wifi.array_to_bytes(b2)
+                b0, b1, b2 = sonar.measure(values[0], values[1])
+                data = wifi.array_to_bytes(b0) + wifi.array_to_bytes(b1) + wifi.array_to_bytes(b2)
                 bridge.send_data(data)
 
     # 4. Blink LED 5 to indicate readiness
