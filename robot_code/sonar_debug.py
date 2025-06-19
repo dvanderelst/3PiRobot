@@ -14,7 +14,7 @@ Pin(settings.trigger_recv1, Pin.OUT).value(0)
 Pin(settings.trigger_recv2, Pin.OUT).value(0)
 
 # ───── Sampling Parameters ─────
-n_samples = 200
+n_samples = 500
 sample_rate = 10000  # 10kHz → 100 μs per sample
 delay_us = int(1_000_000 / sample_rate)
 pulse_threshold = settings.pulse_threshold  # <- pulled from settings

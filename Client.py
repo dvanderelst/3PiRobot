@@ -1,6 +1,7 @@
 import socket
 import struct
-import numpy
+import msgpack
+import numpy as np
 import time
 import matplotlib.pyplot as plt
 
@@ -9,88 +10,84 @@ class Client:
         self.verbose = True
         self.host = host
         self.port = 1234
-        self.end_char = "*"
-        self.split_char = ","
         self.sock = socket.socket()
         self.sock.settimeout(5)
         self.sock.connect((self.host, self.port))
         self.name = name
-        self._buffer = b""
+
+    def _recv_exact(self, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
+    def send_dict(self, dct):
+        packed = msgpack.packb(dct)
+        prefix = struct.pack(">H", len(packed))
+        self.sock.sendall(prefix + packed)
+
+    def receive_msgpack(self):
+        # Read 2-byte prefix
+        pre = self._recv_exact(2)
+        if not pre:
+            return None
+        length = struct.unpack(">H", pre)[0]
+        body = self._recv_exact(length)
+        if not body:
+            return None
+        return msgpack.unpackb(body, raw=False)
 
     def set_motors(self, left, right):
         start = time.time()
-        self.send_list(['motors', left, right])
-        end = time.time()
-        if self.verbose: print(f"set_motors took {end - start:.4f} seconds")
+        self.send_dict({'action': 'motors', 'left': left, 'right': right})
+        if self.verbose: print(f"set_motors took {time.time() - start:.4f}s")
+
+
+    def plot_data(self, data, rate, samples):
+        max_d = (343 / 2) * (samples / rate)
+        dist = np.linspace(0, max_d, samples)
+        plt.plot(dist, data)
+        plt.title(self.name or self.host)
+        plt.legend(['Emitter','Ch1','Ch2'])
+        plt.xlabel("Distance (m)")
+        plt.ylabel("Amplitude")
+        plt.show()
+
+    def ping_robust(self, rate, samples, plot=False):
+        threshold_detection_delay = 0
+        attempts = 0
+        while threshold_detection_delay < 20000:
+            data, timing_info = self.ping(rate, samples)
+            threshold_detection_delay = timing_info.get('threshold detect (us)')
+            attempts = attempts + 1
+        timing_info['attempts'] = attempts
+        if plot: self.plot_data(data, rate, samples)
+        return data, timing_info
 
     def ping(self, rate, samples, plot=False):
         start = time.time()
-        self.send_list(['ping', rate, samples])
-        number_of_bytes = samples * 2 * 3
-        buffer =  self.receive(number_of_bytes)
-        # Must be sent to acknowledge the data reception to avoid next command to be read as the response
-        self.send_list(['received data'])
-        data = struct.unpack(f"{samples * 3}H", buffer)
-        data = numpy.array(data)
-        data = data.reshape((3, samples))
-        data = data.transpose()
-        data[:, 0] = data[:, 0]  - numpy.min(data[:, 0])
-        data[:, 1] = data[:, 1]  - numpy.min(data[:, 1])
-        data[:, 2] = data[:, 2] - numpy.min(data[:, 2])
-        end = time.time()
-        if self.verbose: print(f"ping took {end - start:.4f} seconds")
-        max_distance = (343 / 2) * (samples / rate)
-        distances = numpy.linspace(0, max_distance, samples)
-        if plot:
-            plt.figure()
-            plt.plot(distances, data)
-            plt.title(self.host)
-            if self.name: plt.title(self.name)
-            plt.legend(['Emitter', 'Channel 1', 'Channel 2'])
-            plt.xlabel("Distance")
-            plt.ylabel("Amplitude")
-            plt.show()
-        return data, distances
+        self.send_dict({'action': 'ping', 'rate': rate, 'samples': samples})
+        msg = self.receive_msgpack()
+        self.send_dict({'action': 'acknowledge'})  # ack back
 
-    def send_list(self, lst):
-        msg = ''
-        for item in lst: msg += f"{item}{self.split_char}"
-        msg = msg.rstrip(self.split_char)
-        self.send(msg)
+        if msg is None or 'data' not in msg:
+            print("No data received.")
+            return None, None
 
-    def send(self, msg):
-        if not msg.endswith(self.end_char):
-            msg += self.end_char
-        self.sock.send(msg.encode())
+        data = np.array(msg['data'], dtype=np.uint16).reshape((3, samples)).T
+        #data -= data.min(axis=0)
+        timing_info = msg['timing_info']
 
-    def receive(self, num_bytes=None):
-        if num_bytes is not None:
-            buffer = b""
-            while len(buffer) < num_bytes:
-                try:
-                    chunk = self.sock.recv(num_bytes - len(buffer))
-                    if not chunk:
-                        return None
-                    buffer += chunk
-                except socket.timeout:
-                    return None
-            return buffer  # binary data
+        if self.verbose:
+            keys = timing_info.keys()
+            for key in keys: print(key, timing_info[key])
+            print(f"ping took {time.time() - start:.4f}s")
 
-        # Otherwise, read until end_char (text mode)
-        while self.end_char.encode() not in self._buffer:
-            try:
-                data = self.sock.recv(1024)
-                if not data:
-                    return None
-                self._buffer += data
-            except socket.timeout:
-                return None
-        msg, _, self._buffer = self._buffer.partition(self.end_char.encode())
-        return msg.decode().strip()
-
-    def query(self, msg):
-        self.send(msg)
-        return self.receive()
+        if plot: self.plot_data(data, rate, samples)
+        return data, timing_info
 
     def close(self):
         self.sock.close()

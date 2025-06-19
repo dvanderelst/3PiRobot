@@ -60,9 +60,8 @@ display.write(0, 'Ready')
 
 while True:
     # 1. Check for new Wi-Fi commands
-    new_commands = bridge.check_commands()  # Non-blocking
-    if new_commands:
-        command_queue.extend(new_commands)
+    new_commands = bridge.read_messages()
+    if new_commands: command_queue.extend(new_commands)
 
     # 2. Read bumpers
     left, right = bump.read()
@@ -75,23 +74,25 @@ while True:
     if command_queue:
         commands = command_queue.copy()
         command_queue.clear()
-        if verbose:
-            print('[Received]', commands)
+        if verbose: print('[Main] Received:', commands)
 
-        parsed = wifi.parse_commands(commands)
-        for action, values in parsed:
-            if verbose > 1:
-                print('[Parsed]', (action, values))
+        for cmd in commands:
+            action = cmd.get('action')
 
             if action == 'motors':
                 display.write(0, action)
-                drive.set_speeds(values[0], values[1])
+                drive.set_speeds(cmd.get('left', 0), cmd.get('right', 0))
 
             elif action == 'ping':
                 display.write(0, action)
-                b0, b1, b2 = sonar.measure(values[0], values[1])
-                data = wifi.array_to_bytes(b0) + wifi.array_to_bytes(b1) + wifi.array_to_bytes(b2)
-                bridge.send_data(data)
+                rate = cmd.get('rate')
+                samples = cmd.get('samples')
+                sonar.measure(rate, samples)
+                package = {'action': 'ping_response', 'data': [sonar.buf0, sonar.buf1, sonar.buf2], 'timing_info': sonar.timing_info}
+                bridge.send_data(package)
+
+            elif action == 'acknowledge':
+                if verbose: print('[Main] Acknowledgment received')
 
     # 4. Blink LED 5 to indicate readiness
     now = time.ticks_ms()
