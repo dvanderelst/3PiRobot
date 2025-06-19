@@ -25,7 +25,8 @@ class MaxBotix:
         self.n_samples = 500
         
         self.vref = 3.3
-
+        
+        self.buf0 = None
         self.buf1 = None
         self.buf2 = None
         self._index = 0
@@ -37,29 +38,22 @@ class MaxBotix:
         self.recv2_enable.value(0)
         
         if self.verbose: print("[SNR] Initialized")
-                
-
-    def _sample_callback(self, timer):
-        if self._index < len(self.buf1):
-            self.buf1[self._index] = self.adc_recv1.read_u16()
-            self.buf2[self._index] = self.adc_recv2.read_u16()
-            self._index += 1
-        else:
-            timer.deinit()
-            self._done = True
 
     def _wait_for_pulse(self):
         current_max = 0
         pulse_time = None
         start = time.ticks_us()
+        index = 0
         while time.ticks_diff(time.ticks_us(), start) < self.max_delay_us:
             value = self.adc_emit.read_u16()
+            if index < len(self.buf0): self.buf0[index] = value
             current_max = max(value, current_max)
             if value > self.pulse_threshold:
                 pulse_time = time.ticks_us()
-                return True, current_max, pulse_time
-            time.sleep_us(10)
-        return False, current_max, pulse_time
+                return True, current_max, pulse_time, index
+            index += 1
+            time.sleep_us(1)
+        return False, current_max, pulse_time, index
     
     def free_pulse(self, index):
         if index == 1:
@@ -82,12 +76,13 @@ class MaxBotix:
     def measure(self, sample_rate=0, n_samples=0):
         if sample_rate == 0: sample_rate = self.sample_rate
         if n_samples == 0: n_samples = self.n_samples
-
+        
+        self.buf0 = array.array("H", [0] * n_samples)
         self.buf1 = array.array("H", [0] * n_samples)
         self.buf2 = array.array("H", [0] * n_samples)
 
         self.trigger.value(1)
-        time.sleep_ms(30)
+        time.sleep_us(25)
         self.trigger.value(0)
 
         exceeded = False
@@ -95,14 +90,15 @@ class MaxBotix:
         pulse_time = None
 
         if self.wait_method == "threshold":
-            exceeded, max_value, pulse_time = self._wait_for_pulse()
+            exceeded, max_value, pulse_time, pulse_index = self._wait_for_pulse()
         elif self.wait_method == "fixed":
             time.sleep_us(self.fixed_delay_us)
         else:
             raise ValueError("Invalid wait_method.")
 
         if self.verbose:
-            print(f'[SNR] wait method: {self.wait_method}. Exceeded: {exceeded}, max: {max_value}')
+            print(f'[SNR] wait method: {self.wait_method}. Exceeded: {exceeded}, max: {max_value} at index {pulse_index}')
+            print(f'[SNR] Pulse threshold: {self.pulse_threshold}')
 
         # Manual sampling loop
         delay_us = int(1_000_000 / sample_rate)
@@ -126,8 +122,8 @@ class MaxBotix:
             echo_index = time_diff / delay_us
             if self.verbose:
                 print(f"[SNR] Echo threshold to first sample: {time_diff} us → index offset ≈ {echo_index:.2f}")
-
-        return self.buf1, self.buf2, echo_index
+                
+        return self.buf1, self.buf2, self.buf0
 
     def get_voltages(self):
         if self.buf1 is None or self.buf2 is None:

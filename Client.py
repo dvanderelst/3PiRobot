@@ -26,16 +26,17 @@ class Client:
     def ping(self, rate, samples, plot=False):
         start = time.time()
         self.send_list(['ping', rate, samples])
-        number_of_bytes = samples * 2 * 2
+        number_of_bytes = samples * 2 * 3
         buffer =  self.receive(number_of_bytes)
         # Must be sent to acknowledge the data reception to avoid next command to be read as the response
         self.send_list(['received data'])
-        data = struct.unpack(f"{samples * 2}H", buffer)
+        data = struct.unpack(f"{samples * 3}H", buffer)
         data = numpy.array(data)
-        data = data.reshape((2, samples))
+        data = data.reshape((3, samples))
         data = data.transpose()
         data[:, 0] = data[:, 0]  - numpy.min(data[:, 0])
         data[:, 1] = data[:, 1]  - numpy.min(data[:, 1])
+        data[:, 2] = data[:, 2] - numpy.min(data[:, 2])
         end = time.time()
         if self.verbose: print(f"ping took {end - start:.4f} seconds")
         max_distance = (343 / 2) * (samples / rate)

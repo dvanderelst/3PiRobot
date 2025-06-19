@@ -17,7 +17,7 @@ tx_pin = 4
 rx_pin = 5
 en_pin = 27
 
-pulse_threshold = 17000
+pulse_threshold = 15000# 17000
 
 adc_recv1 = 2
 adc_recv2 = 3
