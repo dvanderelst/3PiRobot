@@ -1,11 +1,13 @@
 import screen
 import leds
-import maxbotix
+#import maxbotix
+import sonar
 import time
 import motors
 import wifi
 import settings
 import bumpers
+from machine import Pin, ADC
 
 verbose = settings.verbose
 
@@ -13,7 +15,7 @@ print('[Main] Initialize')
 # ────────────── Init systems ──────────────
 
 led = leds.LEDs()
-sonar = maxbotix.MaxBotix()
+#sonar = maxbotix.MaxBotix()
 display = screen.Screen()
 bump = bumpers.Bumpers()
 drive = motors.Motors()
@@ -87,9 +89,10 @@ while True:
                 display.write(0, action)
                 rate = cmd.get('rate')
                 samples = cmd.get('samples')
-                sonar.measure(rate, samples)
-                package = {'action': 'ping_response', 'data': [sonar.buf0, sonar.buf1, sonar.buf2], 'timing_info': sonar.timing_info}
+                buf0, buf1, buf2, timing_info = sonar.measure(rate, samples)
+                package = {'action': 'ping_response', 'data': [list(buf0), list(buf1), list(buf2)], 'timing_info': timing_info}
                 bridge.send_data(package)
+
 
             elif action == 'acknowledge':
                 if verbose: print('[Main] Acknowledgment received')

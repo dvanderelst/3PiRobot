@@ -113,8 +113,8 @@ class WifiServer:
                 # skip
         return msgs
 
-    def send_data(self, obj, conn_id=0):
-        """Prefix msgpack.dumps(obj) with 2-byte length, then AT+CIPSEND."""
+    def send_data(self, obj, conn_id=0, max_chunk_size=1024):
+        """Send a msgpack-encoded object in chunks with 2-byte length prefix per chunk."""
         try:
             packed = msgpack.dumps(obj)
         except Exception as e:
@@ -123,14 +123,45 @@ class WifiServer:
 
         prefix = struct.pack(">H", len(packed))
         full = prefix + packed
-        self.uart.write(f"AT+CIPSEND={conn_id},{len(full)}\r\n")
-        t0 = time.ticks_ms()
-        while True:
-            if self.uart.any() and b'>' in self.uart.read():
-                break
-            if time.ticks_diff(time.ticks_ms(), t0) > 2000:
-                return False
 
-        self.uart.write(full)
-        resp = self._read_response()
-        return "SEND OK" in resp
+        total_len = len(full)
+        index = 0
+        chunk_id = 0
+        success = True
+
+        while index < total_len:
+            chunk = full[index:index+max_chunk_size]
+            chunk_len = len(chunk)
+
+            # Send AT+CIPSEND command for this chunk
+            self.uart.write(f"AT+CIPSEND={conn_id},{chunk_len}\r\n")
+            t0 = time.ticks_ms()
+
+            # Wait for '>' prompt
+            while True:
+                if self.uart.any():
+                    if b'>' in self.uart.read():
+                        break
+                if time.ticks_diff(time.ticks_ms(), t0) > 2000:
+                    if self.verbose:
+                        print(f"[ESP] Timed out waiting for '>' on chunk {chunk_id}")
+                    return False
+
+            self.uart.write(chunk)
+            resp = self._read_response()
+
+            if "SEND OK" not in resp:
+                if self.verbose:
+                    print(f"[ESP] Chunk {chunk_id} failed to send.")
+                    print("→", resp)
+                success = False
+                break
+
+            index += chunk_len
+            chunk_id += 1
+            time.sleep(0.05)  # slight pause to avoid overloading ESP
+
+        if self.verbose:
+            print(f"[ESP] Data sent in {chunk_id} chunk(s), total {total_len} bytes")
+
+        return success
