@@ -3,24 +3,24 @@ import struct
 import msgpack
 import numpy as np
 import time
+import Process
+import Utils
+import pickle
 import matplotlib.pyplot as plt
-
-
-def get_distance(rate, samples):
-    max_d = (343 / 2) * (samples / rate)
-    distance_axis = np.linspace(0, max_d, samples)
-    return distance_axis
-
 
 class Client:
     def __init__(self, host, name=False):
+        self.name = name
         self.verbose = True
         self.host = host
         self.port = 1234
         self.sock = socket.socket()
         self.sock.settimeout(5)
         self.sock.connect((self.host, self.port))
-        self.name = name
+        self.baseline = self.load_baseline()
+
+    def close(self):
+        self.sock.close()
 
     def _recv_exact(self, n):
         buf = b""
@@ -44,13 +44,21 @@ class Client:
         if not body: return None
         return msgpack.unpackb(body, raw=False)
 
+    def set_kinematics(self, linear_speed=0, rotational_speed=0):
+        start = time.time()
+        self.send_dict({'action': 'kinematics', 'linear_speed': linear_speed, 'rotational_speed': rotational_speed})
+        if self.verbose: print(f"set_kinematics took {time.time() - start:.4f}s")
+
     def set_motors(self, left, right):
         start = time.time()
         self.send_dict({'action': 'motors', 'left': left, 'right': right})
         if self.verbose: print(f"set_motors took {time.time() - start:.4f}s")
 
-    def plot_data(self, data, rate, samples):
-        distance_axis = get_distance(rate, samples)
+    def stop(self):
+        self.set_motors(0, 0)
+
+    def plot_raw_sonar_data(self, data, rate, samples):
+        distance_axis = Utils.get_distance_axis(rate, samples)
         plt.plot(distance_axis, data)
         plt.title(self.name or self.host)
         plt.legend(['Emitter', 'Ch1', 'Ch2'])
@@ -63,11 +71,6 @@ class Client:
         self.send_dict({'action': 'ping', 'rate': rate, 'samples': samples})
         msg = self.receive_msgpack()
         self.send_dict({'action': 'acknowledge'})  # ack back
-
-        if msg is None or 'data' not in msg:
-            print("No data received.")
-            return None, None
-
         data = np.array(msg['data'], dtype=np.uint16).reshape((3, samples)).T
         timing_info = msg['timing_info']
 
@@ -76,9 +79,30 @@ class Client:
             for key in keys: print(key, timing_info[key])
             print(f"ping took {time.time() - start:.4f}s")
 
-        distance_axis = get_distance(rate, samples)
-        if plot: self.plot_data(data, rate, samples)
+        distance_axis = Utils.get_distance_axis(rate, samples)
+        if plot: self.plot_raw_sonar_data(data, rate, samples)
         return data, distance_axis, timing_info
 
-    def close(self):
-        self.sock.close()
+    def ping_process(self, rate, samples, plot=False):
+        data, distance_axis, timing_info = self.ping(rate, samples, False)
+        if data is None: return None
+        results = Process.process(data, self.baseline, plot=plot)
+        # if self.verbose:
+        #     print('Onset distance:', results['distance'])
+        #     print('Log integrals:', results['log_integrals'])
+        #     print('Inter-channel difference (IID):', results['iid'])
+        # return results
+
+    def load_baseline(self):
+        baseline_filename = f'baselines/baseline_{self.host.replace(".", "_")}.pck'
+        try:
+            with open(baseline_filename, 'rb') as f:
+                baseline_data = pickle.load(f)
+            return baseline_data
+        except FileNotFoundError:
+            print(f"Baseline file {baseline_filename} not found.")
+            return None
+        except Exception as e:
+            print(f"Error reading baseline file: {e}")
+            return None
+

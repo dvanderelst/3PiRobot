@@ -3,6 +3,26 @@ import time
 import array
 import settings  # Your custom settings file
 
+
+def pulse():
+    trigger_emitter = Pin(settings.trigger_emitter, Pin.OUT)
+    adc_emit  = ADC(settings.adc_emitter)
+    adc_recv1 = ADC(settings.adc_recv1)
+    adc_recv2 = ADC(settings.adc_recv2)
+
+    # Mute the receiver sensors by pulling their trigger pins low
+    Pin(settings.trigger_recv1, Pin.OUT).value(0)
+    Pin(settings.trigger_recv2, Pin.OUT).value(0)
+    # ───── Trigger Emitter ─────
+    trigger_emitter.value(0)
+    time.sleep_us(10)
+    trigger_emitter.value(1)
+    time.sleep_us(50)
+    trigger_emitter.value(0)
+
+    time.sleep_ms(10)
+    
+
 def measure(sample_rate, n_samples):
     # ───── Use pin assignments from settings ─────
     trigger_emitter = Pin(settings.trigger_emitter, Pin.OUT)

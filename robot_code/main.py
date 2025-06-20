@@ -57,19 +57,26 @@ toggle_interval = 500  # milliseconds
 command_queue = []
 display.write(0, 'Ready')
 
+# ────────── Just a few quick pulses ─────────
+
+for i in range(5):
+    led.set(5, 'red')
+    sonar.pulse()
+led.set(5, 'off')
+
 while True:
-    # 1. Check for new Wi-Fi commands
+    # Check for new Wi-Fi commands
     new_commands = bridge.read_messages()
     if new_commands: command_queue.extend(new_commands)
 
-    # 2. Read bumpers
+    # Read bumpers
     left, right = bump.read()
     if left or right:
         print("[BUMP] L:", left, "R:", right)
         display.write(3, f"BUMP L:{int(left)} R:{int(right)}")
         drive.set_speeds(0, 0)
 
-    # 3. Process incoming commands
+    # Process incoming commands
     if command_queue:
         commands = command_queue.copy()
         command_queue.clear()
@@ -81,6 +88,10 @@ while True:
             if action == 'motors':
                 display.write(0, action)
                 drive.set_speeds(cmd.get('left', 0), cmd.get('right', 0))
+                
+            if action == 'kinematics':
+                display.write(0, action)
+                drive.set_kinematics(cmd.get('linear_speed', 0), cmd.get('rotational_speed', 0))
 
             elif action == 'ping':
                 display.write(0, action)
@@ -93,7 +104,7 @@ while True:
             elif action == 'acknowledge':
                 if verbose: print('[Main] Acknowledgment received')
 
-    # 4. Blink LED 5 to indicate readiness
+    # Blink LED 5 to indicate readiness
     now = time.ticks_ms()
     if time.ticks_diff(now, last_toggle) >= toggle_interval:
         current_led_color = 'blue' if current_led_color == 'orange' else 'orange'
