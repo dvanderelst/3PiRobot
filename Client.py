@@ -5,6 +5,13 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 
+
+def get_distance(rate, samples):
+    max_d = (343 / 2) * (samples / rate)
+    distance_axis = np.linspace(0, max_d, samples)
+    return distance_axis
+
+
 class Client:
     def __init__(self, host, name=False):
         self.verbose = True
@@ -19,8 +26,7 @@ class Client:
         buf = b""
         while len(buf) < n:
             chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                return None
+            if not chunk: return None
             buf += chunk
         return buf
 
@@ -32,12 +38,10 @@ class Client:
     def receive_msgpack(self):
         # Read 2-byte prefix
         pre = self._recv_exact(2)
-        if not pre:
-            return None
+        if not pre: return None
         length = struct.unpack(">H", pre)[0]
         body = self._recv_exact(length)
-        if not body:
-            return None
+        if not body: return None
         return msgpack.unpackb(body, raw=False)
 
     def set_motors(self, left, right):
@@ -45,27 +49,14 @@ class Client:
         self.send_dict({'action': 'motors', 'left': left, 'right': right})
         if self.verbose: print(f"set_motors took {time.time() - start:.4f}s")
 
-
     def plot_data(self, data, rate, samples):
-        max_d = (343 / 2) * (samples / rate)
-        dist = np.linspace(0, max_d, samples)
-        plt.plot(dist, data)
+        distance_axis = get_distance(rate, samples)
+        plt.plot(distance_axis, data)
         plt.title(self.name or self.host)
-        plt.legend(['Emitter','Ch1','Ch2'])
+        plt.legend(['Emitter', 'Ch1', 'Ch2'])
         plt.xlabel("Distance (m)")
         plt.ylabel("Amplitude")
         plt.show()
-
-    def ping_robust(self, rate, samples, plot=False):
-        threshold_detection_delay = 0
-        attempts = 0
-        while threshold_detection_delay < 20000:
-            data, timing_info = self.ping(rate, samples)
-            threshold_detection_delay = timing_info.get('threshold detect (us)')
-            attempts = attempts + 1
-        timing_info['attempts'] = attempts
-        if plot: self.plot_data(data, rate, samples)
-        return data, timing_info
 
     def ping(self, rate, samples, plot=False):
         start = time.time()
@@ -78,7 +69,6 @@ class Client:
             return None, None
 
         data = np.array(msg['data'], dtype=np.uint16).reshape((3, samples)).T
-        #data -= data.min(axis=0)
         timing_info = msg['timing_info']
 
         if self.verbose:
@@ -86,8 +76,9 @@ class Client:
             for key in keys: print(key, timing_info[key])
             print(f"ping took {time.time() - start:.4f}s")
 
+        distance_axis = get_distance(rate, samples)
         if plot: self.plot_data(data, rate, samples)
-        return data, timing_info
+        return data, distance_axis, timing_info
 
     def close(self):
         self.sock.close()
