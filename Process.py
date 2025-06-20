@@ -36,7 +36,7 @@ def threshold_and_integrate_global(data, thresholds, distances=None, plot=False)
     if len(crossing_indices) == 0:
         if plot:
             print("No threshold crossing found.")
-        return len(thresholds), [0.0] * data.shape[1]
+        return len(thresholds) - 1, [0.0] * data.shape[1]
 
     onset = crossing_indices[0]
     end = min(onset + integration_window, data.shape[0])
