@@ -4,12 +4,14 @@ import settings
 
 class Motors:
     def __init__(self):
-        counts_per_rev = 909.72
-        wheel_diameter_mm = 31
         self.verbose = settings.verbose
-        self.max_mps = 0.4 #This comes from the specs. Probably conservative.
-        self.counts_per_rev = counts_per_rev
-        self.wheel_diameter_m = wheel_diameter_mm / 1000  # convert to meters
+        self.counts_per_rev = 
+        self.wheel_diameter_mm = 31
+        self.wheel_distance = 170
+        self.max_mps = 0.4 # m/s, This comes from the specs. Probably conservative.
+        self.counts_per_rev = 909.72
+        
+        self.wheel_diameter_m = self.wheel_diameter_mm / 1000  # convert to meters
         self.wheel_circumference_m = math.pi * self.wheel_diameter_m
         self.meters_per_count = self.wheel_circumference_m / self.counts_per_rev
         self.counts_per_meter = self.counts_per_rev / self.wheel_circumference_m
@@ -42,6 +44,21 @@ class Motors:
         right_cps = self.mps2cps(right_speed)
         self.motors.set_speeds(left_cps, right_cps)
         if self.verbose: print(f'[MTR] L {left_speed}, R {right_speed}')
+    
+    def kinematics(self, lin_speed=0, rot_speed=0):
+        omega = rot_speed * 0.0174533
+        # Standard differential drive inverse kinematics
+        left = lin_speed - (self.wheel_base_m / 2) * omega
+        right = lin_speed + (self.wheel_base_m / 2) * omega
+        # Clamp wheel speeds to max_mps
+        left = self.check_mps(left)
+        right = self.check_mps(right)
+        # Compute actual robot linear and angular speeds
+        v = (left + right) / 2
+        omega_deg = (right - left) / self.wheel_base_m / 0.0174533  # rad/s to deg/s
+        self.set_speeds(left, right)
+        if self.verbose: print(f'[MTR] V {v}, R {omega_deg}')
+        return left, right, v, omega_deg
     
     def stop(self):
         self.set_speeds(0)
