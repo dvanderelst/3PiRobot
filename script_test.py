@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 client = Client.Client('192.168.200.38')
 client.name = 'Robot01'
 client.verbose = True
-client.ping_process(rate=15000, samples=75, plot=True)
+result = client.ping_process(rate=15000, samples=75, plot=True)
 
 
 #

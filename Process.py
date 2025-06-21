@@ -39,17 +39,55 @@ def process(data, baseline_data, plot=False):
     data = preprocess(data)
     yrange = [int(np.min(data)) - 500, int(np.max(data)) + 2000]
 
-    plt.figure()
-    plt.subplot(211)
-    Utils.sonar_plot(data[:, 0], distance_axis, yrange=yrange)
-    plt.plot(distance_axis, threshold_left, color='red', linestyle='--')
+    left = data[:, 0]
+    right = data[:, 1]
+    above_threshold_left = left > threshold_left
+    above_threshold_right = right > threshold_right
+    crossing_mask = above_threshold_left | above_threshold_right
+    crossing_indices = np.where(crossing_mask)[0]
+    crossed = False
+    if len(crossing_indices) == 0:
+        onset = len(threshold_left) - 1
+        integrals = np.array([0.0, 0.0])
+    else:
+        crossed = True
+        onset = crossing_indices[0]
+        offset = min(onset + integration_window, data.shape[0])
+        integrals = np.array([float(np.sum(left[onset:offset])), float(np.sum(right[onset:offset]))])
 
-    plt.subplot(212)
-    Utils.sonar_plot(data[:, 1], distance_axis, yrange=yrange)
-    plt.plot(distance_axis, threshold_right, color='red', linestyle='--')
+    log_integrals = 20 * np.log10(integrals + 1e-6)
+    iid = float(log_integrals[1] - log_integrals[0])  # right - left, positive means right is louder
+    results = {}
+    results['thresholds'] = np.array([threshold_left, threshold_right])
+    results['data'] = data
+    results['distance_axis'] = distance_axis
+    results['index'] = int(onset)
+    results['distance'] = float(distance_axis[onset])
+    results['integrals'] = integrals
+    results['log_integrals'] = log_integrals
+    results['iid'] = iid
 
-    plt.tight_layout()
-    plt.show()
+    if plot:
+        plt.figure()
+        plt.subplot(211)
+        Utils.sonar_plot(data[:, 0], distance_axis, yrange=yrange)
+        plt.plot(distance_axis, threshold_left, color='red', linestyle='--')
+
+        if crossed:
+            plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
+            plt.axvline(distance_axis[onset], color='red', linestyle='--', label='Onset')
+
+        plt.subplot(212)
+        Utils.sonar_plot(data[:, 1], distance_axis, yrange=yrange)
+        plt.plot(distance_axis, threshold_right, color='red', linestyle='--')
+
+        if crossed:
+            plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
+            plt.axvline(distance_axis[onset], color='red', linestyle='--', label='Onset')
+
+        plt.tight_layout()
+        plt.show()
+        return results
 
 
     # crossing_mask = data > thresholds[:, None]

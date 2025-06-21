@@ -11,8 +11,8 @@ sample_rate = 15000
 samples = 75
 verbose = True
 max_index = 40
-right_shift = 3
-up_shift = 1000
+right_shift = 2
+up_shift = 500
 repeats = 10
 
 client = Client.Client(client_ip)

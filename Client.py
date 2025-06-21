@@ -87,11 +87,7 @@ class Client:
         data, distance_axis, timing_info = self.ping(rate, samples, False)
         if data is None: return None
         results = Process.process(data, self.baseline, plot=plot)
-        # if self.verbose:
-        #     print('Onset distance:', results['distance'])
-        #     print('Log integrals:', results['log_integrals'])
-        #     print('Inter-channel difference (IID):', results['iid'])
-        # return results
+        return results
 
     def load_baseline(self):
         baseline_filename = f'baselines/baseline_{self.host.replace(".", "_")}.pck'
