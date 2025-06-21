@@ -79,7 +79,7 @@ while True:
     if bump_left or bump_right:
         print(f"[BUMP] Left: {bump_left} | Right: {bump_right}")
         display.write(3, f"BUMP L:{int(bump_left)} R:{int(bump_right)}")
-        drive.set_speeds(0, 0)
+        drive.stop()
 
     # ── Command Processing ──
     if command_queue:
@@ -91,17 +91,22 @@ while True:
         for cmd in commands:
             action = cmd.get('action')
 
-            if action == 'motors':
-                display.write(0, 'motors')
-                motor_left = cmd.get('left', 0)
-                motor_right = cmd.get('right', 0)
-                drive.set_speeds(motor_left, motor_right)
-
-            elif action == 'kinematics':
+            if action == 'kinematics':
                 display.write(0, 'kinematics')
                 rotation_speed = cmd.get('rotation_speed')
                 linear_speed = cmd.get('linear_speed')
                 drive.set_kinematics(linear_speed, rotation_speed)
+            
+            elif action == 'parameter':
+                wheel_diameter_mm = cmd.get('wheel_diameter_mm', None)
+                wheel_base_mm = cmd.get('wheel_base_mm', None)
+                
+                if wheel_diameter_mm is not None:
+                    drive.set_wheel_diameter(wheel_diameter_mm)
+                    display.write(0, 'Set wheel diameter')
+                if wheel_base_mm is not None:
+                    drive.set_wheel_base(wheel_base_mm)
+                    display.write(0, 'Set wheel base')
 
             elif action == 'step':
                 display.write(0, 'step')
@@ -110,12 +115,12 @@ while True:
                 distance = cmd.get('distance', 0)
                 angle = cmd.get('angle', 0)
                 
-                if abs(angle) > 0 and  == 0: rotation_speed = 90
+                if abs(angle) > 0 and rotation_speed == 0: rotation_speed = 90
                 if abs(distance) > 0 and linear_speed == 0: linear_speed = 0.1
                             
-                drive.turn_angle(angle, rotation_speed)
-                time.sleep(0.1)
-                drive.drive_distance(distance, linear_speed)
+                if abs(angle) > 0: drive.turn_angle(angle, rotation_speed)
+                if abs(angle) > 0 and abs(distance) > 0: time.sleep(0.1)
+                if abs(distance) > 0: drive.drive_distance(distance, linear_speed)
 
             elif action == 'ping':
                 display.write(0, 'ping')

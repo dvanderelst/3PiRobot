@@ -11,10 +11,10 @@ import matplotlib.pyplot as plt
 
 class Client:
     def __init__(self, host, name=False):
-        self.name     = name
-        self.verbose  = True
-        self.host     = host
-        self.port     = 1234
+        self.name = name
+        self.verbose = True
+        self.host = host
+        self.port = 1234
 
         self.sock = socket.socket()
         self.sock.settimeout(5)
@@ -71,18 +71,16 @@ class Client:
         if self.verbose:
             print(f"set_kinematics took {time.time() - start:.4f}s")
 
-    def set_motors(self, left, right):
-        """
-        Directly set raw left/right motor speeds.
-        """
-        start = time.time()
-        self._send_dict({'action': 'motors', 'left': left, 'right': right})
-        if self.verbose:
-            print(f"set_motors took {time.time() - start:.4f}s")
-
     def stop(self):
         """Convenience shortcut."""
         self.set_motors(0, 0)
+
+    def change_settings(self, parameter, value):
+        """Change a setting on the robot."""
+        start = time.time()
+        parameter = str(parameter)
+        self._send_dict({'action': 'parameter', parameter: value})
+        if self.verbose: print(f"changed settings in {time.time() - start:.4f}s")
 
     def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0):
         start = time.time()
@@ -97,7 +95,7 @@ class Client:
         )
         # server does not send a reply for step → nothing to read
         if self.verbose:
-            print(f"step sent (d={distance}, a={angle}) in {time.time()-start:.4f}s")
+            print(f"step sent (d={distance}, a={angle}) in {time.time() - start:.4f}s")
 
     # ───────────────────────────── Sonar API ─────────────────────────────
 
@@ -132,12 +130,11 @@ class Client:
         distance_axis = Utils.get_distance_axis(rate, samples)
         return data, distance_axis, timing_info
 
-    def ping_process(self, rate, samples, plot=False):
+    def ping_process(self, rate, samples, fixed_onset=None, plot=False):
         """Ping and run downstream processing."""
         data, distance_axis, timing_info = self.ping(rate, samples, False)
-        if data is None:
-            return None
-        results = Process.process(data, self.baseline, plot=plot)
+        if data is None: return None
+        results = Process.process(data, self.baseline, fixed_onset=fixed_onset, plot=plot)
         return results
 
     # ───────────────────────────── Baseline handling ─────────────────────────────

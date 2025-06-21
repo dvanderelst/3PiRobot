@@ -19,7 +19,7 @@ def preprocess(data):
     data = data[:, [left_channel, right_channel]]
     return data
 
-def process(data, baseline_data, plot=False):
+def process(data, baseline_data, fixed_onset=None, plot=False):
     distance_axis = baseline_data['distance_axis']
     baseline_left = baseline_data['baseline_left']
     baseline_right = baseline_data['baseline_right']
@@ -42,14 +42,27 @@ def process(data, baseline_data, plot=False):
     crossing_indices = np.where(crossing_mask > 0)[0]
 
     crossed = False
-    if len(crossing_indices) == 0:
+
+    if fixed_onset is not None:
+        # Override: use fixed onset regardless of crossings
+        onset = fixed_onset
+        offset = min(onset + integration_window, data.shape[0])
+        left_integral = float(np.sum(left[onset:offset]))
+        right_integral = float(np.sum(right[onset:offset]))
+        integrals = np.array([left_integral, right_integral])
+
+    elif len(crossing_indices) > 0:
+        # Use first threshold crossing
+        onset = int(crossing_indices[0])
+        offset = min(onset + integration_window, data.shape[0])
+        left_integral = float(np.sum(left[onset:offset]))
+        right_integral = float(np.sum(right[onset:offset]))
+        integrals = np.array([left_integral, right_integral])
+        crossed = True
+    else:
+        # Fallback if no crossing and no fixed onset
         onset = len(threshold_left) - 1
         integrals = np.array([0.0, 0.0])
-    else:
-        crossed = True
-        onset = crossing_indices[0]
-        offset = min(onset + integration_window, data.shape[0])
-        integrals = np.array([float(np.sum(left[onset:offset])), float(np.sum(right[onset:offset]))])
 
     log_integrals = 20 * np.log10(integrals + 1e-6)
     iid = float(log_integrals[1] - log_integrals[0])  # right - left, positive means right is louder
@@ -62,6 +75,9 @@ def process(data, baseline_data, plot=False):
     results['integrals'] = integrals
     results['log_integrals'] = log_integrals
     results['iid'] = iid
+
+    onset_color = 'red'
+    if fixed_onset: onset_color = 'black'
 
     if plot:
         plt.figure()
@@ -79,14 +95,14 @@ def process(data, baseline_data, plot=False):
 
         if crossed:
             plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
-            plt.axvline(distance_axis[onset], color='red', linestyle='--', label='Onset')
+            plt.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
 
         plt.subplot(313)
         plt.plot(distance_axis, thresholded_left, label='Left', color='blue')
         plt.plot(distance_axis, thresholded_right, label='Right', color='red')
         if crossed:
             plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
-            plt.axvline(distance_axis[onset], color='red', linestyle='--', label='Onset')
+            plt.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
         plt.legend()
         plt.ylim(0, 20000)
         plt.title('Thresholded Signals')

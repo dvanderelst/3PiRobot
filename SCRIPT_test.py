@@ -6,7 +6,7 @@ import Client
 client = Client.Client('192.168.200.38')
 client.name = 'Robot01'
 client.verbose = True
-
+client.change_settings('wheel_base_mm', 80)
 # rotation_function = interp1d([0, 0.2, 0.5], [30, 20, 0], kind='linear', fill_value=(30, 0), bounds_error=False)
 #
 # while True:

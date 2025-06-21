@@ -26,6 +26,15 @@ def sonar_plot(data, distance_axis, color=None, title='', yrange=None):
     ax.grid(which='minor', color='gray', linestyle=':', linewidth=0.5)
     ax.grid(which='major', color='darkgray', linestyle='--', linewidth=0.8)
 
+    # Add indices
+    indices = np.arange(0, len(distance_axis), step=10)
+    tick_positions = distance_axis[indices]
+
+    ax_top = ax.secondary_xaxis('top')
+    ax_top.set_ticks(tick_positions)
+    ax_top.set_xticklabels([str(i) for i in indices])
+    ax_top.set_xlabel("Index")
+
     plt.xlabel('Distance [m]')
     plt.ylabel('Value [Arbitrary]')
     plt.title(title)
