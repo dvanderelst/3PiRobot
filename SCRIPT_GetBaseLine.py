@@ -7,12 +7,12 @@ import Process
 import time
 
 client_ip = '192.168.200.38'
-sample_rate = 15000
-samples = 75
+sample_rate = 20000
+samples = 100
 verbose = True
-max_index = 40
+max_index = 25
 right_shift = 2
-up_shift = 500
+up_shift = 1000
 repeats = 10
 
 client = Client.Client(client_ip)
@@ -33,31 +33,27 @@ right = data_collected[:, :, 1]
 left = np.transpose(left)
 right = np.transpose(right)
 
-average_left = np.mean(left, axis=1)
-average_right = np.mean(right, axis=1)
+baseline_left = np.mean(left, axis=1)
+baseline_right = np.mean(right, axis=1)
 
 overall_max = np.max(data) + up_shift + 500
-
-threshold_left = Utils.trace_back(average_left, max_index=max_index, right=right_shift, up=up_shift)
-threshold_right = Utils.trace_back(average_right, max_index=max_index, right=right_shift, up=up_shift)
 
 distance_axis = Utils.get_distance_axis(sample_rate, samples)
 
 plt.figure()
 plt.subplot(211)
-plt.plot(distance_axis, left, color='black', alpha=0.5)
-plt.plot(distance_axis, average_left, color='red')
-plt.plot(distance_axis, threshold_left, color='blue', linestyle='--')
+plt.plot(left, color='black', alpha=0.5)
+plt.plot(baseline_left, color='red')
 plt.ylim(-100, overall_max)
 plt.ylabel('Amplitude')
+plt.xlabel('Index')
 plt.title('Left')
 
 plt.subplot(212)
 plt.plot(distance_axis, right, color='black', alpha=0.5)
-plt.plot(distance_axis, average_right, color='red')
-plt.plot(distance_axis, threshold_right, color='blue', linestyle='--')
+plt.plot(distance_axis, baseline_right, color='red')
 plt.ylim(-100, overall_max)
-plt.xlabel('Sample Index')
+plt.xlabel('Distance')
 plt.ylabel('Amplitude')
 plt.title('Right')
 
@@ -68,17 +64,13 @@ plt.tight_layout()
 baseline_data = {
     'left': left,
     'right': right,
-    'average_left': average_left,
-    'average_right': average_right,
-    'threshold_left': threshold_left,
-    'threshold_right': threshold_right,
+    'baseline_left': baseline_left,
+    'baseline_right': baseline_right,
     'distance_axis': distance_axis,
     'client_ip': client_ip,
     'sample_rate': sample_rate,
     'samples': samples,
     'max_index': max_index,
-    'right_shift': right_shift,
-    'up_shift': up_shift
 }
 
 baseline_filename = f'baselines/baseline_{client_ip.replace(".", "_")}.pck'
