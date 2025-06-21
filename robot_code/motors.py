@@ -1,86 +1,135 @@
+# drive_base.py  – high-level motion helper for the Pololu 3pi+ 2040
 from pololu_3pi_2040_robot import robot
-import math
-import time
-import settings
+import math, time, settings
+
 
 class Motors:
-    def __init__(self):
-        self.verbose = settings.verbose
-        self.wheel_diameter_mm = 31
-        self.wheel_base_mm = 85
-        
-        self.max_mps = 0.4       # maximum linear wheel speed in m/s
-        self.MAX_PWM = 6000      # maximum PWM value (from motors.py)
-        self.MIN_PWM = 600       # minimum PWM to overcome static friction
-        
-        self.wheel_base_m = self.wheel_base_mm / 1000
-        self.wheel_diameter_m = self.wheel_diameter_mm / 1000  # convert to meters
-        self.wheel_circumference_m = math.pi * self.wheel_diameter_m
-        
-        self.motors = robot.Motors()
-    
-    def check_cps(self, cps):
-        if cps > self.max_cps: cps = self.max_cps
-        if cps < -self.max_cps: cps = -self.max_cps
-        return cps
-    
-    def check_mps(self, mps):
-        if mps > self.max_mps: mps = self.max_mps
-        if mps < -self.max_mps: mps = -self.max_mps
-        return mps
-    
-    def mps2pwm(self, mps):
-        mps = self.check_mps(mps)  # clamp to safe range
-        pwm = mps/self.max_mps * self.MAX_PWM
+    """
+    High-level motion helper that works in physical units (m, m/s, deg).
+    Internally it converts to PWM for the motors and *checks* progress
+    with the wheel encoders so moves stop exactly at the requested distance
+    or angle.
+    """
+
+    # ─────────── robot-specific constants  (edit for your edition) ────────────
+    GEAR_RATIO        = 75          # 30:1 Standard, 75:1 Turtle, 15:1 Hyper
+    COUNTS_PER_REV    = 12          # encoder counts per motor-shaft rev
+    WHEEL_DIAMETER_MM = 32          # measure yours!
+    WHEEL_BASE_MM     = 85          # centre-to-centre of wheels
+    MAX_WHEEL_MPS     = 0.40        # top speed you measured
+    MAX_PWM           = 6000        # from motors.py
+    MIN_PWM           = 600         # ≈ first PWM that makes wheels turn
+
+    # ───────────────────────── derived constants ─────────────────────────────
+    COUNTS_PER_WHEEL_REV = COUNTS_PER_REV * GEAR_RATIO
+    WHEEL_CIRCUMFERENCE  = math.pi * WHEEL_DIAMETER_MM / 1000          # m
+    COUNTS_PER_METER     = COUNTS_PER_WHEEL_REV / WHEEL_CIRCUMFERENCE
+    WHEEL_BASE_M         = WHEEL_BASE_MM / 1000
+
+    def __init__(self, verbose=True):
+        self.verbose  = verbose and getattr(settings, "verbose", True)
+        self.motors   = robot.Motors()
+        self.encoders = robot.Encoders()
+
+    # ───────────────────────── helpers ───────────────────────────────────────
+    @staticmethod
+    def _sgn(x): return 1 if x >= 0 else -1
+
+    def _mps_to_pwm(self, mps: float) -> int:
+        """Convert wheel speed (m/s) → PWM (−6000…+6000) with a dead-band."""
+        mps = max(-self.MAX_WHEEL_MPS, min(self.MAX_WHEEL_MPS, mps))
+        pwm = mps / self.MAX_WHEEL_MPS * self.MAX_PWM
         if 0 < abs(pwm) < self.MIN_PWM: pwm = math.copysign(self.MIN_PWM, pwm)
         return int(pwm)
-    
-    def set_speeds(self, left, right=None): #m/sec
-        if right is None: right = left * 1.0
-        left_speed = self.check_mps(left)
-        right_speed = self.check_mps(right)
-        left_pwm = self.mps2pwm(left_speed)
-        right_pwm = self.mps2pwm(right_speed)
-        self.motors.set_speeds(left_pwm, right_pwm)
-        if self.verbose: print(f'[MTR] LFT {left_speed}, RGT {right_speed}')
-    
-    def set_kinematics(self, lin_speed=0, rot_speed=0): #m/s and deg/sec
-        omega =  - rot_speed * 0.0174533 # This makes positive = right rotation
-        # Standard differential drive inverse kinematics
-        left = lin_speed - (self.wheel_base_m / 2) * omega
-        right = lin_speed + (self.wheel_base_m / 2) * omega
-        # Clamp wheel speeds to max_mps
-        left = self.check_mps(left)
-        right = self.check_mps(right)
-        # Compute actual robot linear and angular speeds
-        v = (left + right) / 2
-        omega_deg = (right - left) / self.wheel_base_m / 0.0174533  # rad/s to deg/s
-        self.set_speeds(left, right)
-        if self.verbose: print(f'[MTR] LIN {v}, ROT {omega_deg}')
-        return left, right, v, omega_deg
 
-    def drive_distance(self, meters, lin_speed=None):
-        lin_speed = self.check_mps(lin_speed or 0.2)
-        duration = abs(meters / lin_speed)
-        direction = 1 if meters >= 0 else -1
-        self.set_speeds(direction * lin_speed)
-        time.sleep(duration)
+    def _set_pwm(self, left_mps: float, right_mps: float) -> None:
+        l_cmd = self._mps_to_pwm(left_mps)
+        r_cmd = self._mps_to_pwm(right_mps)
+        self.motors.set_speeds(l_cmd, r_cmd)
+        if self.verbose: print(f"[PWM] L {left_mps:+.3f} m/s → {l_cmd:+4d} | R {right_mps:+.3f} m/s → {r_cmd:+4d}")
+
+    # ───────────────────── high-level velocity command ───────────────────────
+    def set_kinematics(self, lin_mps: float = 0.0, rot_dps: float = 0.0):
+        """
+        lin_mps : forward (+) or backward (−) linear speed in m/s
+        rot_dps : clockwise (+) or CCW (−) angular speed in deg/s
+        """
+        ω = -math.radians(rot_dps)                               # +CW
+        v_l = lin_mps - (self.WHEEL_BASE_M / 2) * ω
+        v_r = lin_mps + (self.WHEEL_BASE_M / 2) * ω
+        self._set_pwm(v_l, v_r)
+
+    # ───────────────────── drive exact distance (encoder) ────────────────────
+    def drive_distance(self, meters: float, speed: float = 0.20):
+        """
+        Drive `meters` forward (+) or backward (−) at up to `speed` (m/s),
+        stopping when the encoders say we've arrived.
+        """
+        speed   = min(abs(speed), self.MAX_WHEEL_MPS * 0.8)  # margin
+        counts  = abs(meters) * self.COUNTS_PER_METER
+        start_L, start_R = self.encoders.get_counts()
+        direction = self._sgn(meters)
+
+        self._set_pwm(direction * speed, direction * speed)
+
+        while True:
+            cur_L, cur_R = self.encoders.get_counts()
+            moved = ((cur_L - start_L) + (cur_R - start_R)) / 2
+            if moved >= counts: break
+            time.sleep(0.005)
+
         self.stop()
 
-    def turn_angle(self, angle_deg, rot_speed=None):
-        rot_speed = rot_speed or 90  # deg/sec
-        direction = 1 if angle_deg >= 0 else -1
-        duration = abs(angle_deg / rot_speed)
-        self.set_kinematics(0, direction * rot_speed)
-        time.sleep(duration)
+    # ───────────────────── rotate exact angle (encoder) ──────────────────────
+    def turn_angle(self, angle_deg: float, rot_speed_dps: float = 90.0):
+        """
+        Rotate by `angle_deg` (CW +, CCW −) at a given angular speed (deg/s),
+        using encoders for accuracy.
+        """
+        # Convert angular speed to wheel linear speed
+        omega_rad = math.radians(rot_speed_dps)
+        wheel_mps = abs(omega_rad * self.WHEEL_BASE_M / 2)
+        wheel_mps = min(wheel_mps, self.MAX_WHEEL_MPS * 0.6)
+
+        # Distance each wheel must travel for the requested angle
+        arc_m  = math.pi * self.WHEEL_BASE_M * abs(angle_deg) / 360
+        counts = arc_m * self.COUNTS_PER_METER
+
+        start_L, start_R = self.encoders.get_counts()
+        sign = self._sgn(angle_deg)
+
+        self._set_pwm(-sign * wheel_mps, sign * wheel_mps)
+
+        while True:
+            cur_L, cur_R = self.encoders.get_counts()
+            if (abs(cur_L - start_L) >= counts and
+                abs(cur_R - start_R) >= counts):
+                break
+            time.sleep(0.005)
+
         self.stop()
 
 
+    # ─────────────────────────── util ────────────────────────────────────────
     def stop(self):
-        self.set_speeds(0)
-        
+        self.motors.set_speeds(0, 0)
+        if self.verbose: print("[STOP]")
 
+# ─────────────────────────── demo ────────────────────────────────────────────
+if __name__ == "__main__":
+    settings.verbose = True
+    bot = Motors()
 
-d = Motors()
-d.turn_angle(45)
+    print("Rotate 90° clockwise …")
+    bot.turn_angle(90)
+
+    #time.sleep(1)
+
+    #bot.drive_distance(0.30)
+
+    #print("Rotate 45° CCW …")
+    #bot.turn_angle(-45)
+
+    #bot.stop()
+    #print("Done.")
 

@@ -84,7 +84,7 @@ class Client:
         """Convenience shortcut."""
         self.set_motors(0, 0)
 
-    def step(self, distance=0, angle=0, linear_speed=None, rotation_speed=None):
+    def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0):
         start = time.time()
         self._send_dict(
             {

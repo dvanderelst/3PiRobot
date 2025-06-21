@@ -105,10 +105,14 @@ while True:
 
             elif action == 'step':
                 display.write(0, 'step')
-                rotation_speed = cmd.get('rotation_speed')
-                linear_speed = cmd.get('linear_speed')
+                rotation_speed = cmd.get('rotation_speed', 0)
+                linear_speed = cmd.get('linear_speed', 0)
                 distance = cmd.get('distance', 0)
                 angle = cmd.get('angle', 0)
+                
+                if abs(angle) > 0 and  == 0: rotation_speed = 90
+                if abs(distance) > 0 and linear_speed == 0: linear_speed = 0.1
+                            
                 drive.turn_angle(angle, rotation_speed)
                 time.sleep(0.1)
                 drive.drive_distance(distance, linear_speed)
