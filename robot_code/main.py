@@ -124,9 +124,9 @@ while True:
 
             elif action == 'ping':
                 display.write(0, 'ping')
-                rate = cmd.get('rate')
+                sample_rate = cmd.get('sample_rate')
                 samples = cmd.get('samples')
-                buf0, buf1, buf2, timing_info = sonar.measure(rate, samples)
+                buf0, buf1, buf2, timing_info = sonar.measure(sample_rate, samples)
                 response = {
                     'action': 'ping_response',
                     'data': [list(buf0), list(buf1), list(buf2)],

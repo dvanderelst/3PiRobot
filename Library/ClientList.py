@@ -1,0 +1,31 @@
+from dataclasses import dataclass
+
+# Client configuration for a robotic system
+# These set the default parameters for the clients
+
+@dataclass
+class ClientConfig:
+    name: str
+    ip: str
+    verbose: int = 2
+    # Acquisition settings
+    sample_rate: int = 20000
+    samples: int = 100
+    emitter_channel: int = 0
+    left_channel: int = 2
+    right_channel: int = 1
+    # Processing parameters
+    baseline_extent: int = 40
+    baseline_shift_right: int = 0
+    baseline_shift_up: int = 2500
+    integration_window: int = 10
+    fixed_onset: int = 0
+
+
+client1 = ClientConfig(name="Robot01", ip="192.168.1.18")
+client2 = ClientConfig(name="Robot02", ip="192.168.1.19")
+
+client_list = [client1, client2]
+
+def get_config(index):
+    return client_list[index]

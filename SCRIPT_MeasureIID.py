@@ -18,7 +18,8 @@ for i in range(nr_of_steps):
     print(f"Rotating to {angle} degrees")
     client.step(angle=step_angle)
     time.sleep(1)  # Wait for the robot to reach the position
-    result = client.ping_process(rate=20000, samples=100, plot=True)
+    figure_file = 'plots/plot_' + str(i) + '.pdf'
+    result = client.ping_process(rate=20000, samples=100, plot=True, save_plot=figure_file)
     time.sleep(0.5)
 
 

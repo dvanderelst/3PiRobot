@@ -1,7 +1,21 @@
+import ipaddress
 import numpy as np
 from matplotlib import pyplot as plt
 
-def sonar_plot(data, distance_axis, color=None, title='', yrange=None):
+
+def is_valid_ip(s):
+    if not isinstance(s, str):
+        return False
+    try:
+        ipaddress.IPv4Address(s)
+        return True
+    except ipaddress.AddressValueError:
+        return False
+
+
+def sonar_plot(data, sample_rate, title='', yrange=None, color='black'):
+    samples = data.shape[0]
+    distance_axis = get_distance_axis(sample_rate, samples)
     x_max = float(distance_axis[-1])
     y_max = np.nanmax(data)
     if not np.isfinite(y_max): y_max = 1.0
@@ -10,10 +24,20 @@ def sonar_plot(data, distance_axis, color=None, title='', yrange=None):
     if yrange is not None:
         y_max = yrange[1]
         y_min = yrange[0]
-    if color is None: color = 'black'
     # Horizontal axis = distance (x)
     ax = plt.gca()
-    ax.plot(distance_axis, data)
+    dim = data.shape
+    labels_set = False
+    # assumes the order of the channels is: [emitter, left, right]
+    if len(dim) == 2 and dim[1] == 3:
+        ax.plot(distance_axis, data[:, 0], color='black', label='Emitter')
+        ax.plot(distance_axis, data[:, 1], color='blue', label='Left Channel')
+        ax.plot(distance_axis, data[:, 2], color='red', label='Right Channel')
+        labels_set = True
+    # makes no assumption about the number of channels
+    else:
+        ax.plot(distance_axis, data, color=color)
+
     ax.set_xticks(np.arange(0, x_max + 0.05, 0.05), minor=True)
     ax.set_xticks(np.arange(0, x_max + 0.25, 0.25))
     ax.set_xlim(left=0, right=x_max)  # clamp to data range
@@ -37,33 +61,11 @@ def sonar_plot(data, distance_axis, color=None, title='', yrange=None):
 
     plt.xlabel('Distance [m]')
     plt.ylabel('Value [Arbitrary]')
+    if labels_set: plt.legend()
     plt.title(title)
 
 
-
-def shift_right(arr, n):
-    if n <= 0:
-        return arr.copy()
-    shifted = np.empty_like(arr)
-    shifted[:n] = arr[0]
-    shifted[n:] = arr[:-n]
-    return shifted
-
-def trace_back(average, max_index=None, right=0, up=0):
-    if max_index is not None: average[max_index:] = np.min(average)
-    samples = len(average)
-    flipped = np.flip(average)
-    threshold = np.zeros(samples)
-    current_max = 0
-    for i in range(samples):
-        if flipped[i] > current_max: current_max = flipped[i]
-        threshold[i] = current_max
-    threshold = np.flip(threshold)
-    threshold = shift_right(threshold, right)
-    threshold += up
-    return threshold
-
-def get_distance_axis(rate, samples):
-    max_d = (343 / 2) * (samples / rate)
+def get_distance_axis(sample_rate, samples):
+    max_d = (343 / 2) * (samples / sample_rate)
     distance_axis = np.linspace(0, max_d, samples)
     return distance_axis

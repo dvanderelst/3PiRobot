@@ -1,79 +1,66 @@
-import Client
 import pickle
-import Utils
-import numpy as np
-import matplotlib.pyplot as plt
-import Process
 import time
+import numpy as np
+from Library import Client
+import matplotlib.pyplot as plt
 
-client_ip = '192.168.200.38'
-sample_rate = 20000
-samples = 100
-verbose = True
-max_index = 25
-right_shift = 2
-up_shift = 1000
+# ─── Baseline collection Settings ────
+client_nr = 0
 repeats = 10
+# ─────────────────────────────────────
 
-client = Client.Client(client_ip)
-client.verbose = verbose
+client = Client.Client(client_nr)
+robot_name = client.configuration.name
 
 data_collected = []
 for i in range(repeats):
     print(f"Ping {i + 1}/{repeats}...")
-    data, distance_axis, timing_info = client.ping(sample_rate, samples)
-    data = Process.preprocess(data)
+    data, distance_axis, timing_info = client.ping()
     data_collected.append(data)
     time.sleep(0.1)
 data_collected = np.array(data_collected)
 
-left = data_collected[:, :, 0]
-right = data_collected[:, :, 1]
+left_measurements = data_collected[:, :, 1]
+right_measurements = data_collected[:, :, 2]
 
-left = np.transpose(left)
-right = np.transpose(right)
+left_measurements = np.transpose(left_measurements)
+right_measurements = np.transpose(right_measurements)
 
-baseline_left = np.mean(left, axis=1)
-baseline_right = np.mean(right, axis=1)
+baseline_left = np.mean(left_measurements, axis=1)
+baseline_right = np.mean(right_measurements, axis=1)
 
-overall_max = np.max(data) + up_shift + 500
-
-distance_axis = Utils.get_distance_axis(sample_rate, samples)
+overall_max = np.max(data) + 500
+overall_min = np.min(data) - 500
 
 plt.figure()
 plt.subplot(211)
-plt.plot(left, color='black', alpha=0.5)
-plt.plot(baseline_left, color='red')
-plt.ylim(-100, overall_max)
+plt.plot(left_measurements, color='blue', alpha=0.5)
+plt.plot(baseline_left, color='black')
+plt.ylim(overall_min, overall_max)
 plt.ylabel('Amplitude')
 plt.xlabel('Index')
-plt.title('Left')
+plt.title(f'{robot_name}: Left')
 
 plt.subplot(212)
-plt.plot(distance_axis, right, color='black', alpha=0.5)
-plt.plot(distance_axis, baseline_right, color='red')
-plt.ylim(-100, overall_max)
+plt.plot(distance_axis, right_measurements, color='red', alpha=0.5)
+plt.plot(distance_axis, baseline_right, color='black')
+plt.ylim(overall_min, overall_max)
 plt.xlabel('Distance')
 plt.ylabel('Amplitude')
-plt.title('Right')
+plt.title(f'{robot_name}: Right')
 
 plt.tight_layout()
 
-# Save the data to a pck file as a dictionary
-
 baseline_data = {
-    'left': left,
-    'right': right,
+    'left_measurements': left_measurements,
+    'right_measurements': right_measurements,
     'baseline_left': baseline_left,
     'baseline_right': baseline_right,
     'distance_axis': distance_axis,
-    'client_ip': client_ip,
-    'sample_rate': sample_rate,
-    'samples': samples,
-    'max_index': max_index,
+    'client_configuration': client.configuration
 }
 
-baseline_filename = f'baselines/baseline_{client_ip.replace(".", "_")}.pck'
+baseline_filename = f'baselines/baseline_{robot_name}.pck'
 with open(baseline_filename, 'wb') as f: pickle.dump(baseline_data, f)
 
 plot_filename = baseline_filename.replace('.pck', '.png')
