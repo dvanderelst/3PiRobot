@@ -7,3 +7,7 @@ __pycache__/
 
 *passwords.py
 baselines/
+
+Library/acoustic_functions/plots/
+
+plots/
