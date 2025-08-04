@@ -2,8 +2,8 @@ import os
 import shutil
 from Library import Settings
 
-def get_iid_function_path(robot_name):
-    return os.path.join(Settings.iid_functions_folder, f'iid_function_{robot_name}.pck')
+def get_spatial_function_path(robot_name):
+    return os.path.join(Settings.spatial_functions_folder, f'spatial_function_{robot_name}.pck')
 
 def get_baseline_function_path(robot_name):
     return os.path.join(Settings.baseline_functions_folder, f'baseline_function_{robot_name}.pck')

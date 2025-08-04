@@ -4,9 +4,10 @@ from scipy.interpolate import (interp1d)
 from Library import Client
 
 client = Client.Client(0)
-for i in range(10):
-        result = client.ping_process(plot=False)
-        time.sleep(2)
+result = client.ping_process(plot=True)
+# for i in range(10):
+#         result = client.ping_process(plot=False)
+#         time.sleep(2)
 client.close()
 #client.ping()
 #client.change_settings('wheel_base_mm', 80)

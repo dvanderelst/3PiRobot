@@ -2,7 +2,6 @@ import numpy as np
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 from Library import Utils
-from Library import Settings
 
 def shift_right(arr, n):
     if n <= 0: return arr.copy()
@@ -93,7 +92,7 @@ def process_sonar_data(data, baseline_data, client_configuration):
     results['thresholded'] = np.array([thresholded_left, thresholded_right])
     results['distance_axis'] = distance_axis
 
-    results['distance'] = float(distance_axis[onset])
+    results['raw_distance'] = float(distance_axis[onset])
     results['integrals'] = integrals
     results['log_integrals'] = log_integrals
     results['iid'] = iid
@@ -155,7 +154,7 @@ def plot_processing(results, client_configuration, file_name=None,close_after=Fa
     if crossed:
         plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
         plt.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
-    plt.legend()
+        plt.legend()
     plt.title('Both Signals')
     plt.gca().set_facecolor('#f5f5dc')
     plt.xlabel('Distance [m]')

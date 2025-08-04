@@ -79,3 +79,21 @@ def get_distance_axis(sample_rate, samples):
     max_d = (343 / 2) * (samples / sample_rate)
     distance_axis = np.linspace(0, max_d, samples)
     return distance_axis
+
+def fit_linear_calibration(real_distance1, raw_distances1, real_distance2, raw_distances2):
+    raw_distances1 = np.asarray(raw_distances1)
+    raw_distances2 = np.asarray(raw_distances2)
+
+    # Combine raw distances and real values
+    x = np.concatenate([raw_distances1, raw_distances2])
+    y = np.array([real_distance1] * len(raw_distances1) +
+                 [real_distance2] * len(raw_distances2))
+
+    # Compute slope and intercept using least squares
+    x_mean = np.mean(x)
+    y_mean = np.mean(y)
+
+    a = np.sum((x - x_mean) * (y - y_mean)) / np.sum((x - x_mean) ** 2)
+    b = y_mean - a * x_mean
+
+    return a, b

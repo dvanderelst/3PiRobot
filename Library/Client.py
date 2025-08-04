@@ -20,7 +20,7 @@ class Client:
         self.sock.settimeout(5)
         self.sock.connect((self.configuration.ip, 1234))
         self.baseline_function = self.load_function('baseline')
-        self.iid_function = self.load_function('iid')
+        self.spatial_function = self.load_function('spatial')
 
     def print_message(self, message, category="INFO"):
         """Pretty‑print a log line with color and verbosity control."""
@@ -75,8 +75,8 @@ class Client:
     def load_function(self, function_name):
         filename = None
         robot_name = self.configuration.robot_name
-        if function_name == 'iid':
-            filename = FileOperations.get_iid_function_path(robot_name)
+        if function_name == 'spatial':
+            filename = FileOperations.get_spatial_function_path(robot_name)
         if function_name == 'baseline':
             filename = FileOperations.get_baseline_function_path(robot_name)
         if filename is None: return None
@@ -158,17 +158,27 @@ class Client:
         if plot: Process.plot_processing(results, self.configuration, file_name=file_name, close_after=close_after)
 
         reference_iid = 0
-        if self.iid_function is not None: reference_iid = self.iid_function['zero_iid']
+        coefficient = 1
+        intercept = 0
+        if self.spatial_function is not None:
+            reference_iid = self.spatial_function['reference_iid']
+            coefficient = self.spatial_function['coefficient']
+            intercept = self.spatial_function['intercept']
 
         iid = results['iid']
-        distance = results['distance']
+        raw_distance = results['raw_distance']
+        corrected_distance = intercept + coefficient * raw_distance
 
         iid_formatted = f"{iid:+.2f}"
         reference_iid_formatted = f"{reference_iid:+.2f}"
-        distance_formatted = f"{distance:.2f}"
+        raw_distance_formatted = f"{raw_distance:.2f}"
+        corrected_distance_formatted = f"{corrected_distance:.2f}"
 
-        side = 'L' if iid < reference_iid else 'R'
-        message = f"IID={iid_formatted} dB ({side}, Ref: {reference_iid_formatted}), Dist={distance_formatted} m"
+        side_code = 'L' if iid < reference_iid else 'R'
+        #iid_part = f"IID={iid_formatted} dB (Ref: {reference_iid_formatted}, {side_code})"
+        iid_part = f"IID={iid_formatted} dB ({side_code})"
+        distance_part = f"RDist={raw_distance_formatted}, CDist={corrected_distance_formatted} m"
+        message = f"{iid_part}, {distance_part}"
         self.print_message(message, category="INFO")
         return results
 
