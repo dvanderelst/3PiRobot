@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass
 class ClientConfig:
-    name: str
+    robot_name: str
     ip: str
     verbose: int = 2
     # Acquisition settings
@@ -16,14 +16,14 @@ class ClientConfig:
     right_channel: int = 1
     # Processing parameters
     baseline_extent: int = 40
-    baseline_shift_right: int = 0
+    baseline_shift_right: int = 1
     baseline_shift_up: int = 2500
-    integration_window: int = 10
+    integration_window: int = 5
     fixed_onset: int = 0
 
 
-client1 = ClientConfig(name="Robot01", ip="192.168.1.18")
-client2 = ClientConfig(name="Robot02", ip="192.168.1.19")
+client1 = ClientConfig(robot_name="Robot01", ip="192.168.1.18")
+client2 = ClientConfig(robot_name="Robot02", ip="192.168.1.19")
 
 client_list = [client1, client2]
 

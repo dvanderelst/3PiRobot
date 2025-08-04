@@ -44,10 +44,11 @@ def process_sonar_data(data, baseline_data, client_configuration):
 
     left = data[:, 1]
     right = data[:, 2]
-    thresholded_left = left - threshold
-    thresholded_right = right - threshold
-    thresholded_left[thresholded_left < 0] = 0
-    thresholded_right[thresholded_right < 0] = 0
+
+    thresholded_left = left * 1.0
+    thresholded_right = right * 1.0
+    thresholded_left[thresholded_left < threshold] = 0
+    thresholded_right[thresholded_right < threshold] = 0
 
     crossing_mask = np.maximum(thresholded_left, thresholded_right)
     crossing_indices = np.where(crossing_mask > 0)[0]
@@ -73,10 +74,13 @@ def process_sonar_data(data, baseline_data, client_configuration):
     else:
         # Fallback if no crossing and no fixed onset
         onset = len(threshold_left) - 1
+        offset = onset + integration_window
         integrals = np.array([0.0, 0.0])
 
     log_integrals = 20 * np.log10(integrals + 1e-6)
     iid = float(log_integrals[1] - log_integrals[0])  # right - left, positive means right is louder
+    if not crossed: iid = 0
+
     results = {}
 
     results['data'] = data
@@ -96,7 +100,7 @@ def process_sonar_data(data, baseline_data, client_configuration):
     return results
 
 
-def plot_processing(results, client_configuration):
+def plot_processing(results, client_configuration, file_name=None,close_after=False):
     # assumes order of data is: [emitter, left, right]
     onset_color = 'red'
     fixed_onset = client_configuration.fixed_onset
@@ -110,13 +114,14 @@ def plot_processing(results, client_configuration):
 
     threshold = results['threshold']
     thresholded = results['thresholded']
-    thresholded_left = thresholded[0]
-    thresholded_right = thresholded[1]
+    #thresholded_left = thresholded[0]
+    #thresholded_right = thresholded[1]
 
     sample_rate = client_configuration.sample_rate
 
     sonar_data = data[:,1:2]
     range_min = np.min(sonar_data) - 500
+    print('range_min', range_min)
     range_max = max(np.max(sonar_data), np.max(threshold)) + 500
 
     yrange = [range_min, range_max]
@@ -142,16 +147,21 @@ def plot_processing(results, client_configuration):
         plt.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
 
     plt.subplot(313)
-    plt.plot(distance_axis, thresholded_left, label='Left', color='blue')
-    plt.plot(distance_axis, thresholded_right, label='Right', color='red')
+    #plt.plot(distance_axis, thresholded_left, label='Left', color='blue')
+    #plt.plot(distance_axis, thresholded_right, label='Right', color='red')
+    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue')
+    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red')
+
     if crossed:
         plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
         plt.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
     plt.legend()
-    plt.ylim(0, 20000)
-    plt.title('Thresholded Signals')
+    plt.title('Both Signals')
     plt.gca().set_facecolor('#f5f5dc')
     plt.xlabel('Distance [m]')
-    #if save_plot: plt.savefig(save_plot, dpi=300)
     plt.tight_layout()
-    plt.show()
+    if file_name is not None: plt.savefig(file_name, dpi=300)
+    if close_after:
+        plt.close()
+    else:
+        plt.show()

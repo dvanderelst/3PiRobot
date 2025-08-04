@@ -12,6 +12,16 @@ def is_valid_ip(s):
     except ipaddress.AddressValueError:
         return False
 
+def compare_configurations(config1, config2):
+        sample_rate1 = config1.sample_rate
+        samples1 = config1.samples
+        sample_rate2 = config2.sample_rate
+        samples2 = config2.samples
+
+        sample_rate_same = sample_rate1 == sample_rate2
+        samples_same = samples1 == samples2
+        matches = sample_rate_same and samples_same
+        return matches
 
 def sonar_plot(data, sample_rate, title='', yrange=None, color='black'):
     samples = data.shape[0]
@@ -30,13 +40,13 @@ def sonar_plot(data, sample_rate, title='', yrange=None, color='black'):
     labels_set = False
     # assumes the order of the channels is: [emitter, left, right]
     if len(dim) == 2 and dim[1] == 3:
-        ax.plot(distance_axis, data[:, 0], color='black', label='Emitter')
-        ax.plot(distance_axis, data[:, 1], color='blue', label='Left Channel')
-        ax.plot(distance_axis, data[:, 2], color='red', label='Right Channel')
+        ax.plot(distance_axis, data[:, 0], color='black', marker='.', label='Emitter')
+        ax.plot(distance_axis, data[:, 1], color='blue', marker='.' , label='Left Channel')
+        ax.plot(distance_axis, data[:, 2], color='red', marker='.', label='Right Channel')
         labels_set = True
     # makes no assumption about the number of channels
     else:
-        ax.plot(distance_axis, data, color=color)
+        ax.plot(distance_axis, data, color=color, marker='.')
 
     ax.set_xticks(np.arange(0, x_max + 0.05, 0.05), minor=True)
     ax.set_xticks(np.arange(0, x_max + 0.25, 0.25))

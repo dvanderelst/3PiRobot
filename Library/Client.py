@@ -5,11 +5,12 @@ import numpy as np
 import time
 import pickle
 
+from os import path
+
 from Library import Process
 from Library import Utils
 from Library import ClientList
-
-
+from Library import FileOperations
 
 class Client:
     def __init__(self, index):
@@ -18,13 +19,12 @@ class Client:
         self.sock = socket.socket()
         self.sock.settimeout(5)
         self.sock.connect((self.configuration.ip, 1234))
-        self.baseline = self.load_baseline()
-
-    # ───────────────────────────── function to handle messages ─────────────────────────────
+        self.baseline_function = self.load_function('baseline')
+        self.iid_function = self.load_function('iid')
 
     def print_message(self, message, category="INFO"):
         """Pretty‑print a log line with color and verbosity control."""
-        robot_name = self.configuration.name
+        robot_name = self.configuration.robot_name
         verbose = self.configuration.verbose
 
         # --- configuration --------------------------------------------------
@@ -44,7 +44,6 @@ class Client:
         print(f"{NAME_STYLE}[{robot_name}]{RESET} "
               f"{cat_colour}[{category}]{RESET} {message}")
 
-    # ───────────────────────────── Low-level helpers ─────────────────────────────
     def close(self):
         self.sock.close()
 
@@ -73,46 +72,25 @@ class Client:
         if not body: return None
         return msgpack.unpackb(body, raw=False)
 
-    # ───────────────────────────── Baseline loader  ─────────────────────────────
-    def load_baseline(self):
-        name = self.configuration.name
-        filename = f'baselines/baseline_{name}.pck'
-        try:
-            with open(filename, 'rb') as f:
-                loaded = pickle.load(f)
-                self.print_message(f'File {filename} loaded')
-                return loaded
-
-        except FileNotFoundError:
-            print(f"[Baseline] File {filename} not found.")
+    def load_function(self, function_name):
+        filename = None
+        robot_name = self.configuration.robot_name
+        if function_name == 'iid':
+            filename = FileOperations.get_iid_function_path(robot_name)
+        if function_name == 'baseline':
+            filename = FileOperations.get_baseline_function_path(robot_name)
+        if filename is None: return None
+        file_exists = path.isfile(filename)
+        if not file_exists:
+            self.print_message(f'Function ({function_name}) not found', category="WARNING")
             return None
-        except Exception as e:
-            print(f"[Baseline] Error reading {filename}: {e}")
-            return None
-
-    def check_baseline_configuration(self):
-        baseline_configuration = self.baseline['client_configuration']
-        baseline_sample_rate = baseline_configuration.sample_rate
-        baseline_samples = baseline_configuration.samples
-
-        current_sample_rate = self.configuration.sample_rate
-        current_samples = self.configuration.samples
-
-        sample_rate_same = baseline_sample_rate == current_sample_rate
-        samples_same = baseline_samples == current_samples
-        matches = sample_rate_same and samples_same
-        if not sample_rate_same:
-            message = f"Sample rate mismatch: baseline {baseline_sample_rate}, current {current_sample_rate}"
-            self.print_message(message, category="ERROR")
-        if not samples_same:
-            message = f"Samples mismatch: baseline {baseline_samples}, current {current_samples}"
-            self.print_message(message, category="ERROR")
-        if matches:
-            message = "Baseline configuration matches current settings."
-            self.print_message(message, category="INFO")
-        return matches
-
-    # ───────────────────────────── Motor / movement API ──────────────────────────
+        # load function
+        with open(filename, 'rb') as f: loaded_function = pickle.load(f)
+        loaded_function_config = loaded_function['client_configuration']
+        # compare configurations
+        matches = Utils.compare_configurations(self.configuration, loaded_function_config)
+        self.print_message(f'Function ({function_name}) loaded (Matches: {matches})')
+        return loaded_function
 
     def set_kinematics(self, linear_speed=0, rotation_speed=0):
         """
@@ -140,8 +118,6 @@ class Client:
         self._send_dict(dictionary)
         self.print_message(f"step sent (d={distance}, a={angle}) in {time.time() - start:.4f}s")
 
-    # ───────────────────────────── Sonar API ─────────────────────────────
-
     def ping(self, plot=False):
         """Fire sonar, return (data, distance_axis, timing_info)."""
         start = time.time()
@@ -157,6 +133,7 @@ class Client:
         self._send_dict({'action': 'acknowledge'})  # send ack back
         data = np.array(msg['data'], dtype=np.uint16).reshape((3, samples)).T
         data = data[:, [emitter_channel, left_channel, right_channel]]  # reorder channels
+        data = data.astype(np.float32)  # convert to float32 for processing
         timing_info = msg['timing_info']
 
         # Prints all timing information - for debugging purposes
@@ -167,24 +144,31 @@ class Client:
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
         return data, distance_axis, timing_info
 
-    def ping_process(self, plot=False):
+    def ping_process(self, cutoff_index = None, plot=False, close_after=False):
         """Ping and run downstream processing."""
         data, distance_axis, timing_info = self.ping(plot=False)
+        if cutoff_index is not None: data[cutoff_index:, :] = 0
         # data has channels in order: [emitter, left, right]
-        self.check_baseline_configuration()
         if data is None: return None
-        results = Process.process_sonar_data(data, self.baseline, self.configuration)
+        results = Process.process_sonar_data(data, self.baseline_function, self.configuration)
         self.print_message('Data processed', category="INFO")
-        if plot: Process.plot_processing(results, self.configuration)
+
+        file_name = None
+        if isinstance(plot, str): file_name = plot
+        if plot: Process.plot_processing(results, self.configuration, file_name=file_name, close_after=close_after)
+
+        reference_iid = 0
+        if self.iid_function is not None: reference_iid = self.iid_function['zero_iid']
 
         iid = results['iid']
         distance = results['distance']
 
         iid_formatted = f"{iid:+.2f}"
+        reference_iid_formatted = f"{reference_iid:+.2f}"
         distance_formatted = f"{distance:.2f}"
 
-        side = 'L' if iid < 0 else 'R'
-        message = f"IID={iid_formatted} dB ({side}), Dist={distance_formatted} m"
+        side = 'L' if iid < reference_iid else 'R'
+        message = f"IID={iid_formatted} dB ({side}, Ref: {reference_iid_formatted}), Dist={distance_formatted} m"
         self.print_message(message, category="INFO")
         return results
 

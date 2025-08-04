@@ -4,10 +4,10 @@ from scipy.interpolate import (interp1d)
 from Library import Client
 
 client = Client.Client(0)
-result = client.ping_process(plot=True)
-iid = result['iid']
-print(iid)
-
+for i in range(10):
+        result = client.ping_process(plot=False)
+        time.sleep(2)
+client.close()
 #client.ping()
 #client.change_settings('wheel_base_mm', 80)
 # rotation_function = interp1d([0, 0.2, 0.5], [30, 20, 0], kind='linear', fill_value=(30, 0), bounds_error=False)
