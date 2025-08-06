@@ -24,8 +24,8 @@ def baseline_adjust(average, max_index=None, right=0, up=0):
     threshold += up
     return threshold
 
-def process_sonar_data(data, baseline_data, client_configuration):
-    # assumes order of data is: [emitter, left, right]
+def process_sonar_data(data, baseline_data, client_configuration, selection_mode='first'):
+    # assumes the order of data is: [emitter, left, right]
     distance_axis = baseline_data['distance_axis']
     baseline_left = baseline_data['baseline_left']
     baseline_right = baseline_data['baseline_right']
@@ -41,125 +41,125 @@ def process_sonar_data(data, baseline_data, client_configuration):
     threshold_right = baseline_adjust(baseline_right, baseline_extent, baseline_shift_right, baseline_shift_up)
     threshold = np.maximum(threshold_left, threshold_right)
 
-    left = data[:, 1]
-    right = data[:, 2]
+    # Threshold the channels, setting samples below the single threshold to 0
+    left_channel = data[:, 1]
+    right_channel = data[:, 2]
 
-    thresholded_left = left * 1.0
-    thresholded_right = right * 1.0
+    thresholded_left = left_channel * 1.0
+    thresholded_right = right_channel * 1.0
     thresholded_left[thresholded_left < threshold] = 0
     thresholded_right[thresholded_right < threshold] = 0
-
-    crossing_mask = np.maximum(thresholded_left, thresholded_right)
-    crossing_indices = np.where(crossing_mask > 0)[0]
+    # This is the maximum of the two channels, after they were thresholded
+    thresholded = np.maximum(thresholded_left, thresholded_right)
 
     crossed = False
+    onset = data.shape[0] - integration_window
+    offset = data.shape[0]
 
+    # Use fixed onset regardless of selection
     if fixed_onset > 0:
-        # Override: use fixed onset regardless of crossings
         onset = fixed_onset
         offset = min(onset + integration_window, data.shape[0])
-        left_integral = float(np.sum(left[onset:offset]))
-        right_integral = float(np.sum(right[onset:offset]))
-        integrals = np.array([left_integral, right_integral])
 
-    elif len(crossing_indices) > 0:
-        # Use first threshold crossing
-        onset = int(crossing_indices[0])
-        offset = min(onset + integration_window, data.shape[0])
-        left_integral = float(np.sum(left[onset:offset]))
-        right_integral = float(np.sum(right[onset:offset]))
-        integrals = np.array([left_integral, right_integral])
-        crossed = True
-    else:
-        # Fallback if no crossing and no fixed onset
-        onset = len(threshold_left) - 1
-        offset = onset + integration_window
-        integrals = np.array([0.0, 0.0])
+    elif selection_mode == 'first':
+        crossing_indices = np.where(thresholded > 0)[0]
+        if len(crossing_indices) > 0:
+            onset = int(crossing_indices[0])
+            offset = min(onset + integration_window, data.shape[0])
+            crossed = True
 
-    log_integrals = 20 * np.log10(integrals + 1e-6)
-    iid = float(log_integrals[1] - log_integrals[0])  # right - left, positive means right is louder
+    elif selection_mode == 'max':
+        max_idx = np.argmax(thresholded)
+        crossed = thresholded[max_idx] > threshold[max_idx]
+        if crossed:
+            half_window = integration_window // 2
+            onset = max(0, max_idx - half_window)
+            offset = min(onset + integration_window, data.shape[0])
+            onset = offset - integration_window  # re-adjust if cut short at end
+
+    # Integrate both channels over shared window
+    left_integral = float(np.sum(left_channel[onset:offset]))
+    right_integral = float(np.sum(right_channel[onset:offset]))
+    first_integrals = np.array([left_integral, right_integral])
+
+    log_integrals = 20 * np.log10(first_integrals + 1e-6)
+    iid = float(log_integrals[1] - log_integrals[0])
     if not crossed: iid = 0
 
-    results = {}
+    results = {
+        'data': data,
+        'onset': int(onset),
+        'offset': int(offset),
+        'crossed': crossed,
+        'selection_mode': selection_mode,  # ← added this line
+        'thresholds': np.array([threshold_left, threshold_right]),
+        'threshold': threshold,
+        'thresholded': np.array([thresholded_left, thresholded_right]),
+        'distance_axis': distance_axis,
+        'raw_distance': float(distance_axis[min(onset, len(distance_axis) - 1)]),
+        'integrals': first_integrals,
+        'log_integrals': log_integrals,
+        'iid': iid
+    }
 
-    results['data'] = data
-    results['onset'] = int(onset)
-    results['offset'] = int(offset)
-    results['crossed'] = crossed
-
-    results['thresholds'] = np.array([threshold_left, threshold_right])
-    results['threshold'] = threshold
-    results['thresholded'] = np.array([thresholded_left, thresholded_right])
-    results['distance_axis'] = distance_axis
-
-    results['raw_distance'] = float(distance_axis[onset])
-    results['integrals'] = integrals
-    results['log_integrals'] = log_integrals
-    results['iid'] = iid
     return results
 
 
-def plot_processing(results, client_configuration, file_name=None,close_after=False):
-    # assumes order of data is: [emitter, left, right]
-    onset_color = 'red'
+def plot_processing(results, client_configuration, file_name=None, close_after=False):
+    import matplotlib.pyplot as plt
+
+    # Get config values
     fixed_onset = client_configuration.fixed_onset
-    if fixed_onset >0: onset_color = 'black'
+    sample_rate = client_configuration.sample_rate
+
+    # Get processing results
 
     data = results['data']
     onset = results['onset']
     offset = results['offset']
     crossed = results['crossed']
     distance_axis = results['distance_axis']
-
     threshold = results['threshold']
-    thresholded = results['thresholded']
-    #thresholded_left = thresholded[0]
-    #thresholded_right = thresholded[1]
+    threshold_left, threshold_right = results['thresholds']
+    selection_mode = results['selection_mode']
+    cutoff_index = results['cutoff_index']
+    # thresholded = results['thresholded'] --> not needed
 
-    sample_rate = client_configuration.sample_rate
+    # Color for onset marker
+    onset_color = 'black' if fixed_onset > 0 else 'green'
 
-    sonar_data = data[:,1:2]
+    # Set y-axis range
+    sonar_data = data[:, 1:3]  # both left and right
     range_min = np.min(sonar_data) - 500
-    print('range_min', range_min)
     range_max = max(np.max(sonar_data), np.max(threshold)) + 500
-
     yrange = [range_min, range_max]
 
-    plt.figure(figsize=[8, 8])
-    onset_color = 'green'
-    if fixed_onset > 0: onset_color = 'black'
+    def draw_integration_window(ax):
+        ax.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
+        ax.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
 
-    plt.subplot(311)
-    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue')
-    plt.plot(distance_axis, threshold, color='black', linestyle='--')
+    def draw_cutoff_window(ax):
+        if cutoff_index is None: return
+        ax.axvspan(distance_axis[cutoff_index], distance_axis[-1], color='black', alpha=0.5, label='Cutoff window')
 
-    if crossed:
-        plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
-        plt.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
+    plt.figure(figsize=[12, 3])
+    ax1 = plt.subplot(111)
+    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue', label='Left')
+    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red', label='Right')
+    ax1.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
+    if crossed: draw_integration_window(ax1)
+    draw_cutoff_window(ax1)
+    ax1.set_facecolor('#f5f5dc')
+    ax1.set_xlabel('Raw Distance (not corrected) [m]')
+    ax1.set_ylabel("Amplitude")
+    ax1.set_title(f'Sonar processing\nselection mode: {selection_mode}')
+    ax1.legend(loc='upper right')
 
-    plt.subplot(312)
-    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red')
-    plt.plot(distance_axis, threshold, color='black', linestyle='--')
-
-    if crossed:
-        plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
-        plt.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
-
-    plt.subplot(313)
-    #plt.plot(distance_axis, thresholded_left, label='Left', color='blue')
-    #plt.plot(distance_axis, thresholded_right, label='Right', color='red')
-    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue')
-    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red')
-
-    if crossed:
-        plt.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
-        plt.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
-        plt.legend()
-    plt.title('Both Signals')
-    plt.gca().set_facecolor('#f5f5dc')
-    plt.xlabel('Distance [m]')
     plt.tight_layout()
-    if file_name is not None: plt.savefig(file_name, dpi=300)
+
+    if file_name is not None:
+        plt.savefig(file_name, dpi=300)
+
     if close_after:
         plt.close()
     else:

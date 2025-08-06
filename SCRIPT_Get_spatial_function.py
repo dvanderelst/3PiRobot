@@ -20,7 +20,7 @@ end_angle = -40
 step_angle = 10
 cutoff_index = 50 # values beyond this index will not be used for IID calculation
 real_distance1 = 0.30 #in meters
-real_distance2 = 0.40 #in meters
+real_distance2 = 0.50 #in meters
 
 # Compute number of steps
 nr_of_steps = int(abs(end_angle - start_angle) / step_angle) + 1

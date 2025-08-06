@@ -144,13 +144,14 @@ class Client:
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
         return data, distance_axis, timing_info
 
-    def ping_process(self, cutoff_index = None, plot=False, close_after=False):
+    def ping_process(self, cutoff_index = None, plot=False, close_after=False, selection_mode='first'):
         """Ping and run downstream processing."""
         data, distance_axis, timing_info = self.ping(plot=False)
-        if cutoff_index is not None: data[cutoff_index:, :] = 0
+        if cutoff_index is not None: data[cutoff_index:, :] = np.min(data)
         # data has channels in order: [emitter, left, right]
         if data is None: return None
-        results = Process.process_sonar_data(data, self.baseline_function, self.configuration)
+        results = Process.process_sonar_data(data, self.baseline_function, self.configuration, selection_mode=selection_mode)
+        results['cutoff_index'] = cutoff_index
         self.print_message('Data processed', category="INFO")
 
         file_name = None
@@ -180,6 +181,14 @@ class Client:
         distance_part = f"RDist={raw_distance_formatted}, CDist={corrected_distance_formatted} m"
         message = f"{iid_part}, {distance_part}"
         self.print_message(message, category="INFO")
+
+        results['message'] = message
+        results['side_code'] = side_code
+        results['reference_iid'] = reference_iid
+        results['coefficient'] = coefficient
+        results['intercept'] = intercept
+        results['corrected_distance'] = corrected_distance
+
         return results
 
 
