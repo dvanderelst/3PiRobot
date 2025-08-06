@@ -144,13 +144,13 @@ class Client:
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
         return data, distance_axis, timing_info
 
-    def ping_process(self, cutoff_index = None, plot=False, close_after=False):
+    def ping_process(self, cutoff_index = None, plot=False, close_after=False, selection='first'):
         """Ping and run downstream processing."""
         data, distance_axis, timing_info = self.ping(plot=False)
         if cutoff_index is not None: data[cutoff_index:, :] = 0
         # data has channels in order: [emitter, left, right]
         if data is None: return None
-        results = Process.process_sonar_data(data, self.baseline_function, self.configuration)
+        results = Process.process_sonar_data(data, self.baseline_function, self.configuration, selection=selection)
         self.print_message('Data processed', category="INFO")
 
         file_name = None
