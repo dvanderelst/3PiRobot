@@ -24,7 +24,7 @@ def baseline_adjust(average, max_index=None, right=0, up=0):
     threshold += up
     return threshold
 
-def process_sonar_data(data, baseline_data, client_configuration, selection='first'):
+def process_sonar_data(data, baseline_data, client_configuration, selection_mode='first'):
     # assumes the order of data is: [emitter, left, right]
     distance_axis = baseline_data['distance_axis']
     baseline_left = baseline_data['baseline_left']
@@ -61,14 +61,14 @@ def process_sonar_data(data, baseline_data, client_configuration, selection='fir
         onset = fixed_onset
         offset = min(onset + integration_window, data.shape[0])
 
-    elif selection == 'first':
+    elif selection_mode == 'first':
         crossing_indices = np.where(thresholded > 0)[0]
         if len(crossing_indices) > 0:
             onset = int(crossing_indices[0])
             offset = min(onset + integration_window, data.shape[0])
             crossed = True
 
-    elif selection == 'max':
+    elif selection_mode == 'max':
         max_idx = np.argmax(thresholded)
         crossed = thresholded[max_idx] > threshold[max_idx]
         if crossed:
@@ -91,7 +91,7 @@ def process_sonar_data(data, baseline_data, client_configuration, selection='fir
         'onset': int(onset),
         'offset': int(offset),
         'crossed': crossed,
-        'selection': selection,  # ← added this line
+        'selection_mode': selection_mode,  # ← added this line
         'thresholds': np.array([threshold_left, threshold_right]),
         'threshold': threshold,
         'thresholded': np.array([thresholded_left, thresholded_right]),
@@ -121,7 +121,7 @@ def plot_processing(results, client_configuration, file_name=None, close_after=F
     distance_axis = results['distance_axis']
     threshold = results['threshold']
     threshold_left, threshold_right = results['thresholds']
-    selection = results['selection']
+    selection_mode = results['selection_mode']
     cutoff_index = results['cutoff_index']
     # thresholded = results['thresholded'] --> not needed
 
@@ -142,40 +142,20 @@ def plot_processing(results, client_configuration, file_name=None, close_after=F
         if cutoff_index is None: return
         ax.axvspan(distance_axis[cutoff_index], distance_axis[-1], color='black', alpha=0.5, label='Cutoff window')
 
-    plt.figure(figsize=[10, 9])
-    plt.suptitle(f'Sonar Signal Processing (Selection: {selection})')
-
-    # --- Left channel ---
-    ax1 = plt.subplot(311)
-    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue')
+    plt.figure(figsize=[12, 3])
+    ax1 = plt.subplot(111)
+    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue', label='Left')
+    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red', label='Right')
     ax1.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
     if crossed: draw_integration_window(ax1)
     draw_cutoff_window(ax1)
-    ax1.legend()
-    ax1.set_ylabel("Amplitude (Left)")
+    ax1.set_facecolor('#f5f5dc')
+    ax1.set_xlabel('Raw Distance (not corrected) [m]')
+    ax1.set_ylabel("Amplitude")
+    ax1.set_title(f'Sonar processing\nselection mode: {selection_mode}')
+    ax1.legend(loc='upper right')
 
-    # --- Right channel ---
-    ax2 = plt.subplot(312)
-    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red')
-    ax2.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
-    if crossed: draw_integration_window(ax2)
-    draw_cutoff_window(ax2)
-    ax2.legend()
-    ax2.set_ylabel("Amplitude (Right)")
-
-    # --- Both channels together ---
-    ax3 = plt.subplot(313)
-    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue')
-    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red')
-    ax3.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
-    if crossed: draw_integration_window(ax3)
-    draw_cutoff_window(ax3)
-    ax3.set_facecolor('#f5f5dc')
-    ax3.set_xlabel('Distance [m]')
-    ax3.set_ylabel("Amplitude")
-    ax3.set_title('Both Signals')
-    ax3.legend()
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # make room for suptitle
+    plt.tight_layout()
 
     if file_name is not None:
         plt.savefig(file_name, dpi=300)

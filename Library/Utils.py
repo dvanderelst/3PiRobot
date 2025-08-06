@@ -23,7 +23,7 @@ def compare_configurations(config1, config2):
         matches = sample_rate_same and samples_same
         return matches
 
-def sonar_plot(data, sample_rate, title='', yrange=None, color='black'):
+def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=None):
     samples = data.shape[0]
     distance_axis = get_distance_axis(sample_rate, samples)
     x_max = float(distance_axis[-1])
@@ -46,7 +46,7 @@ def sonar_plot(data, sample_rate, title='', yrange=None, color='black'):
         labels_set = True
     # makes no assumption about the number of channels
     else:
-        ax.plot(distance_axis, data, color=color, marker='.')
+        ax.plot(distance_axis, data, color=color, marker='.', label=label)
 
     ax.set_xticks(np.arange(0, x_max + 0.05, 0.05), minor=True)
     ax.set_xticks(np.arange(0, x_max + 0.25, 0.25))

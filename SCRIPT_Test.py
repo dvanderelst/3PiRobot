@@ -4,7 +4,7 @@ from scipy.interpolate import (interp1d)
 from Library import Client
 
 client = Client.Client(0)
-result = client.ping_process(plot=True, selection='max', cutoff_index=70)
+result = client.ping_process(plot=True, selection_mode='first')
 # for i in range(10):
 #         result = client.ping_process(plot=False)
 #         time.sleep(2)
