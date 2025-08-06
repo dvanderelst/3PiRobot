@@ -147,10 +147,11 @@ class Client:
     def ping_process(self, cutoff_index = None, plot=False, close_after=False, selection='first'):
         """Ping and run downstream processing."""
         data, distance_axis, timing_info = self.ping(plot=False)
-        if cutoff_index is not None: data[cutoff_index:, :] = 0
+        if cutoff_index is not None: data[cutoff_index:, :] = np.min(data)
         # data has channels in order: [emitter, left, right]
         if data is None: return None
         results = Process.process_sonar_data(data, self.baseline_function, self.configuration, selection=selection)
+        results['cutoff_index'] = cutoff_index
         self.print_message('Data processed', category="INFO")
 
         file_name = None

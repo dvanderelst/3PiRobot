@@ -113,6 +113,7 @@ def plot_processing(results, client_configuration, file_name=None, close_after=F
     sample_rate = client_configuration.sample_rate
 
     # Get processing results
+
     data = results['data']
     onset = results['onset']
     offset = results['offset']
@@ -120,8 +121,9 @@ def plot_processing(results, client_configuration, file_name=None, close_after=F
     distance_axis = results['distance_axis']
     threshold = results['threshold']
     threshold_left, threshold_right = results['thresholds']
-    thresholded = results['thresholded']
-    selection = results.get('selection', 'first')
+    selection = results['selection']
+    cutoff_index = results['cutoff_index']
+    # thresholded = results['thresholded'] --> not needed
 
     # Color for onset marker
     onset_color = 'black' if fixed_onset > 0 else 'green'
@@ -136,38 +138,43 @@ def plot_processing(results, client_configuration, file_name=None, close_after=F
         ax.axvspan(distance_axis[onset], distance_axis[offset - 1], color='gray', alpha=0.3, label='Integration window')
         ax.axvline(distance_axis[onset], color=onset_color, linestyle='--', label='Onset')
 
+    def draw_cutoff_window(ax):
+        if cutoff_index is None: return
+        ax.axvspan(distance_axis[cutoff_index], distance_axis[-1], color='black', alpha=0.5, label='Cutoff window')
+
     plt.figure(figsize=[10, 9])
     plt.suptitle(f'Sonar Signal Processing (Selection: {selection})')
 
     # --- Left channel ---
     ax1 = plt.subplot(311)
     Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue')
-    ax1.plot(distance_axis, threshold_left, color='black', linestyle='--', label='Threshold (Left)')
-    if crossed:
-        draw_integration_window(ax1)
-        ax1.legend()
+    ax1.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
+    if crossed: draw_integration_window(ax1)
+    draw_cutoff_window(ax1)
+    ax1.legend()
     ax1.set_ylabel("Amplitude (Left)")
 
     # --- Right channel ---
     ax2 = plt.subplot(312)
     Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red')
-    ax2.plot(distance_axis, threshold_right, color='black', linestyle='--', label='Threshold (Right)')
-    if crossed:
-        draw_integration_window(ax2)
-        ax2.legend()
+    ax2.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
+    if crossed: draw_integration_window(ax2)
+    draw_cutoff_window(ax2)
+    ax2.legend()
     ax2.set_ylabel("Amplitude (Right)")
 
     # --- Both channels together ---
     ax3 = plt.subplot(313)
     Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue')
     Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red')
+    ax3.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
     if crossed: draw_integration_window(ax3)
+    draw_cutoff_window(ax3)
     ax3.set_facecolor('#f5f5dc')
     ax3.set_xlabel('Distance [m]')
     ax3.set_ylabel("Amplitude")
     ax3.set_title('Both Signals')
     ax3.legend()
-
     plt.tight_layout(rect=[0, 0, 1, 0.96])  # make room for suptitle
 
     if file_name is not None:
