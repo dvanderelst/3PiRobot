@@ -25,7 +25,7 @@ def baseline_adjust(average, max_index=None, right=0, up=0):
     return threshold
 
 def process_sonar_data(data, baseline_data, client_configuration, selection='first'):
-    # assumes order of data is: [emitter, left, right]
+    # assumes the order of data is: [emitter, left, right]
     distance_axis = baseline_data['distance_axis']
     baseline_left = baseline_data['baseline_left']
     baseline_right = baseline_data['baseline_right']
@@ -41,6 +41,7 @@ def process_sonar_data(data, baseline_data, client_configuration, selection='fir
     threshold_right = baseline_adjust(baseline_right, baseline_extent, baseline_shift_right, baseline_shift_up)
     threshold = np.maximum(threshold_left, threshold_right)
 
+    # Threshold the channels, setting samples below the single threshold to 0
     left_channel = data[:, 1]
     right_channel = data[:, 2]
 
@@ -48,63 +49,42 @@ def process_sonar_data(data, baseline_data, client_configuration, selection='fir
     thresholded_right = right_channel * 1.0
     thresholded_left[thresholded_left < threshold] = 0
     thresholded_right[thresholded_right < threshold] = 0
+    # This is the maximum of the two channels, after they were thresholded
+    thresholded = np.maximum(thresholded_left, thresholded_right)
 
     crossed = False
+    onset = data.shape[0] - integration_window
+    offset = data.shape[0]
 
+    # Use fixed onset regardless of selection
     if fixed_onset > 0:
-        # Use fixed onset regardless of selection
         onset = fixed_onset
         offset = min(onset + integration_window, data.shape[0])
 
     elif selection == 'first':
-        crossing_mask = np.maximum(thresholded_left, thresholded_right)
-        crossing_indices = np.where(crossing_mask > 0)[0]
-
+        crossing_indices = np.where(thresholded > 0)[0]
         if len(crossing_indices) > 0:
             onset = int(crossing_indices[0])
             offset = min(onset + integration_window, data.shape[0])
             crossed = True
-        else:
-            onset = len(threshold_left) - 1
-            offset = onset + integration_window
 
     elif selection == 'max':
-        # Find global maxima
-        max_left_idx = np.argmax(left_channel)
-        max_right_idx = np.argmax(right_channel)
-        max_left_val = left_channel[max_left_idx]
-        max_right_val = right_channel[max_right_idx]
-
-        # Check threshold crossings at maxima
-        crosses_left = max_left_val > threshold_left[max_left_idx]
-        crosses_right = max_right_val > threshold_right[max_right_idx]
-
-        if crosses_left or crosses_right:
-            if crosses_left and (not crosses_right or max_left_val >= max_right_val):
-                center = max_left_idx
-            else:
-                center = max_right_idx
-
+        max_idx = np.argmax(thresholded)
+        crossed = thresholded[max_idx] > threshold[max_idx]
+        if crossed:
             half_window = integration_window // 2
-            onset = max(0, center - half_window)
+            onset = max(0, max_idx - half_window)
             offset = min(onset + integration_window, data.shape[0])
             onset = offset - integration_window  # re-adjust if cut short at end
-            crossed = True
-        else:
-            onset = len(threshold_left) - 1
-            offset = onset + integration_window
-
-    else:
-        raise ValueError("Invalid selection mode. Use 'first' or 'max'.")
 
     # Integrate both channels over shared window
     left_integral = float(np.sum(left_channel[onset:offset]))
     right_integral = float(np.sum(right_channel[onset:offset]))
     first_integrals = np.array([left_integral, right_integral])
 
-    log_first_integrals = 20 * np.log10(first_integrals + 1e-6)
-    iid_first = float(log_first_integrals[1] - log_first_integrals[0])
-    if not crossed: iid_first = 0
+    log_integrals = 20 * np.log10(first_integrals + 1e-6)
+    iid = float(log_integrals[1] - log_integrals[0])
+    if not crossed: iid = 0
 
     results = {
         'data': data,
@@ -118,8 +98,8 @@ def process_sonar_data(data, baseline_data, client_configuration, selection='fir
         'distance_axis': distance_axis,
         'raw_distance': float(distance_axis[min(onset, len(distance_axis) - 1)]),
         'integrals': first_integrals,
-        'log_integrals': log_first_integrals,
-        'iid': iid_first
+        'log_integrals': log_integrals,
+        'iid': iid
     }
 
     return results
