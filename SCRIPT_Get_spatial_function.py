@@ -3,8 +3,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 import easygui
 import pickle
-import inspect
-import sys
 
 from Library import Client
 from Library import FileOperations
@@ -18,7 +16,7 @@ note = 'a note goes here'
 start_angle = 40
 end_angle = -40
 step_angle = 10
-cutoff_index = 50 # values beyond this index will not be used for IID calculation
+cutoff_index = 80 # values beyond this index will not be used for IID calculation
 real_distance1 = 0.30 #in meters
 real_distance2 = 0.50 #in meters
 
@@ -91,21 +89,21 @@ spatial_filename = FileOperations.get_spatial_function_path(robot_name)
 raw_distances1 = np.array([result['raw_distance'] for result in zero_measurements1])
 raw_distances2 = np.array([result['raw_distance'] for result in zero_measurements2])
 
-zeros1 = np.array([result['iid'] for result in zero_measurements1])
-zeros2 = np.array([result['iid'] for result in zero_measurements2])
+zeros1 = np.array([result['raw_iid'] for result in zero_measurements1])
+zeros2 = np.array([result['raw_iid'] for result in zero_measurements2])
 
 sweep_data = np.array([result['data'] for result in sweep_results])
 sweep_onsets = np.array([result['onset'] for result in sweep_results])
-sweep_iids = np.array([result['iid'] for result in sweep_results])
+sweep_iids = np.array([result['raw_iid'] for result in sweep_results])
 sweep_angles = np.array(sweep_angles)
 
 left_sweep_data = sweep_data[:, :, 1]
 right_sweep_data = sweep_data[:, :, 2]
 sweep_differences = left_sweep_data - right_sweep_data
 
-coefficient, intercept = Utils.fit_linear_calibration(real_distance1, raw_distances1, real_distance2, raw_distances2)
+distance_coefficient, distance_intercept = Utils.fit_linear_calibration(real_distance1, raw_distances1, real_distance2, raw_distances2)
 raw_distances_interpolated = np.linspace(0, 0.5, 100)
-fitted_real_distances = coefficient * raw_distances_interpolated + intercept
+fitted_real_distances = distance_coefficient * raw_distances_interpolated + distance_intercept
 
 plt.figure(figsize=(15, 6))
 
@@ -136,8 +134,8 @@ plt.plot([0] * 5, zeros1, marker='o', color='blue', alpha=0.5)
 plt.plot([0] * 5, zeros2, marker='o', color='green', alpha=0.5)
 plt.grid()
 plt.xlabel('Angle [degrees]')
-plt.ylabel('IID')
-plt.title('IID vs Angle')
+plt.ylabel('Raw IIDs')
+plt.title('Raw IID vs Angle')
 
 plt.subplot(235)
 plt.plot(raw_distances1, [real_distance1] * 5, marker='o', color='blue', alpha=0.5)
@@ -153,17 +151,17 @@ plt.savefig(plot_filename)
 plt.show()
 
 all_zeros = np.concatenate((zeros1, zeros2))
-reference_iid = np.mean(all_zeros)
+iid_correction = np.mean(all_zeros)
 
 spatial_data = {
     'robot_name': robot_name,
-    'angles': sweep_angles,
-    'iids': sweep_iids,
-    'zero_measurements': all_zeros,
+    'sweep_angles': sweep_angles,
+    'sweep_iids': sweep_iids,
+    'zero_iid': all_zeros,
     'client_configuration': client.configuration,
-    'reference_iid': reference_iid,
-    'coefficient': coefficient,
-    'intercept': intercept,
+    'iid_correction': iid_correction,
+    'distance_coefficient': distance_coefficient,
+    'distance_intercept': distance_intercept,
     'note': note
 }
 

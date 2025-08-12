@@ -158,36 +158,40 @@ class Client:
         if isinstance(plot, str): file_name = plot
         if plot: Process.plot_processing(results, self.configuration, file_name=file_name, close_after=close_after)
 
-        reference_iid = 0
-        coefficient = 1
-        intercept = 0
+        iid_correction = 0
+        distance_coefficient = 1
+        distance_intercept = 0
         if self.spatial_function is not None:
-            reference_iid = self.spatial_function['reference_iid']
-            coefficient = self.spatial_function['coefficient']
-            intercept = self.spatial_function['intercept']
+            iid_correction = self.spatial_function['iid_correction']
+            distance_coefficient = self.spatial_function['distance_coefficient']
+            distance_intercept = self.spatial_function['distance_intercept']
 
-        iid = results['iid']
+        raw_iid = results['raw_iid']
         raw_distance = results['raw_distance']
-        corrected_distance = intercept + coefficient * raw_distance
+        corrected_distance = distance_intercept + distance_coefficient * raw_distance
 
-        iid_formatted = f"{iid:+.2f}"
-        reference_iid_formatted = f"{reference_iid:+.2f}"
         raw_distance_formatted = f"{raw_distance:.2f}"
         corrected_distance_formatted = f"{corrected_distance:.2f}"
 
-        side_code = 'L' if iid < reference_iid else 'R'
-        #iid_part = f"IID={iid_formatted} dB (Ref: {reference_iid_formatted}, {side_code})"
-        iid_part = f"IID={iid_formatted} dB ({side_code})"
-        distance_part = f"RDist={raw_distance_formatted}, CDist={corrected_distance_formatted} m"
-        message = f"{iid_part}, {distance_part}"
+        iid_formatted = f"{raw_iid:+.2f}"
+
+        corrected_iid = raw_iid - iid_correction
+        side_code = 'L' if corrected_iid < 0 else 'R'
+        corrected_iid_formatted = f"{corrected_iid:+.2f}"
+
+        raw_message = f"Rdist: {raw_distance_formatted} m, Riid: {iid_formatted}"
+        corrected_message = f"Cdist: {corrected_distance_formatted} m, Ciid: {corrected_iid_formatted}, Side: {side_code}"
+        message = f"{raw_message} | {corrected_message}"
+
         self.print_message(message, category="INFO")
 
         results['message'] = message
         results['side_code'] = side_code
-        results['reference_iid'] = reference_iid
-        results['coefficient'] = coefficient
-        results['intercept'] = intercept
+        results['distance_coefficient'] = distance_coefficient
+        results['distance_intercept'] = distance_intercept
+        results['iid_correction'] = iid_correction
         results['corrected_distance'] = corrected_distance
+        results['corrected_iid'] = corrected_iid
 
         return results
 

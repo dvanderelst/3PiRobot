@@ -22,7 +22,7 @@ class ClientConfig:
     fixed_onset: int = 0
 
 
-client1 = ClientConfig(robot_name="Robot01", ip="192.168.1.18")
+client1 = ClientConfig(robot_name="Robot01", ip="192.168.1.12")
 client2 = ClientConfig(robot_name="Robot02", ip="192.168.1.19")
 
 client_list = [client1, client2]
