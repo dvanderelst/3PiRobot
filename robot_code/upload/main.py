@@ -7,6 +7,7 @@ import wifi
 import settings
 import bumpers
 
+
 # ───────────────────── Initialization ─────────────────────
 print('[Main] Initializing systems...')
 
@@ -50,17 +51,17 @@ display.write(0, 'Server up')
 # ───────────────────── Initial LED Blink ─────────────────────
 print("[Main] Performing startup pulses...")
 for i in range(5):
-    led.set(5, 'red')
+    led.set(2, 'red')
     sonar.pulse()
     time.sleep(0.05)
-    led.set(5, 'off')
+    led.set(2, 'off')
     time.sleep(0.05)
 
 # ───────────────────── Main Loop ─────────────────────
 print('[Main] Entering main loop...')
 loop_nr = 0
 current_led_color = 'blue'
-led.set(5, current_led_color)
+led.set(2, current_led_color)
 
 last_toggle = time.ticks_ms()
 toggle_interval = 500  # milliseconds
@@ -76,11 +77,10 @@ while True:
 
     # ── Bumper Check ──
     bump_left, bump_right = bump.read()
-    if bump_left or bump_right:
-        print(f"[BUMP] Left: {bump_left} | Right: {bump_right}")
-        display.write(3, f"BUMP L:{int(bump_left)} R:{int(bump_right)}")
-        drive.stop()
-
+    if bump_left or bump_right: drive.stop()
+    led.set(5, 'red') if bump_left else led.set(5, 'black')
+    led.set(3, 'red') if bump_right else led.set(3, 'black')
+        
     # ── Command Processing ──
     if command_queue:
         commands = command_queue.copy()
@@ -142,7 +142,7 @@ while True:
     now = time.ticks_ms()
     if time.ticks_diff(now, last_toggle) >= toggle_interval:
         current_led_color = 'blue' if current_led_color == 'orange' else 'orange'
-        led.set(5, current_led_color)
+        led.set(2, current_led_color)
         last_toggle = now
 
     time.sleep(0.01)

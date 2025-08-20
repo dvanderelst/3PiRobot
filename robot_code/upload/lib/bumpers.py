@@ -10,7 +10,7 @@ class Bumpers:
     def read(self):
         """Read the bump sensors and return a (left, right) tuple of booleans."""
         self._bump.read()
-        return (self.left(), self.right())
+        return self.left(), self.right()
 
     def left(self):
         """Return True if the left bump sensor is pressed."""

@@ -92,5 +92,4 @@ class Motors:
 
     def stop(self):
         self.motors.set_speeds(0, 0)
-        if self.verbose:
-            print("[STOP]")
+        if self.verbose: print("[STOP]")
