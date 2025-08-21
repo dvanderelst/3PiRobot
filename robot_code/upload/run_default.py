@@ -26,6 +26,7 @@ bridge = wifi.WifiServer()
 bridge.setup()
 
 available_networks = bridge.scan_presets()
+print("[WiFi] Available networks:", available_networks)
 selected_ssid = available_networks[0]
 
 print("[WiFi] Connecting...")
