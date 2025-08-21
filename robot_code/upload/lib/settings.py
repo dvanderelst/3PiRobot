@@ -1,14 +1,10 @@
 import passwords
-
 verbose = 2
-ssid_index = 1  # Choose which known SSID to connect to
 
-
-ssid_list = [
-    ('batnet', passwords.password0),
-    ('ZyXEL39940', passwords.password1),
-    # Add more if needed
-]
+ssid_list = {
+    'batnet': passwords.password0,
+    'ZyXEL39940': passwords.password1
+}
 
 split_char = ','
 end_char = '*'

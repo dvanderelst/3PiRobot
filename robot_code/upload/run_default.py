@@ -25,20 +25,23 @@ print("[WiFi] Preparing module...")
 bridge = wifi.WifiServer()
 bridge.setup()
 
+available_networks = bridge.scan_presets()
+selected_ssid = available_networks[0]
+
 print("[WiFi] Connecting...")
-ssid, password = settings.ssid_list[settings.ssid_index]
-join_response = bridge.connect_wifi(ssid, password)
+password = settings.ssid_list[selected_ssid]
+join_response = bridge.connect_wifi(selected_ssid, password)
 
 if "ERROR" in join_response:
-    print(f"[WiFi] [FAIL] Could not join network '{ssid}'")
+    print(f"[WiFi] [FAIL] Could not join network '{selected_ssid}'")
 else:
-    print(f"[WiFi] [OK] Connected to '{ssid}'")
+    print(f"[WiFi] [OK] Connected to '{selected_ssid}'")
     print("        → IP info:")
     print(join_response)
 
     ip = bridge.get_ip()
     display.write(0, 'Connected')
-    display.write(1, ssid)
+    display.write(1, selected_ssid)
     display.write(2, ip)
     led.set(0, 'green')
 

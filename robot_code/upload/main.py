@@ -1,13 +1,8 @@
 import run_tests
+do_run_tests = False
 
-# Specify the tests to run
-# 0 = WiFi Test
-# 1 = LED Test
-# 2 = Screen Test
-# 3 = Bumper Test
-# 4 = Sonar Test
-# 5 = Drive Test
+while do_run_tests:
+    selected_tests = run_tests.select_tests()
+    run_tests.run_tests(selected_tests)
 
-tests = [1]
-run_tests.run_tests(tests)
-if len(tests) == 0: import run_default
+import run_default

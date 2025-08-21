@@ -22,6 +22,45 @@ class WifiServer:
         self.send_cmd('ATE0')
         self.send_cmd('AT+CWMODE=1')
 
+    def scan_presets(self, ssids=None, timeout_ms=8000, details=False):
+        """
+        Scan for a set of preset SSIDs.
+        Returns:
+          - if details=True → list of dicts [{'ssid':..., 'rssi':..., 'ecn':..., 'mac':..., 'ch':...}]
+          - if details=False → list of SSID strings found
+        """
+        if ssids is None: ssids = settings.ssid_list.keys()
+        self.send_cmd('AT+CWMODE=1')
+        found = []
+        for ssid in ssids:
+            q = ssid.replace('"', '\\"')
+            if self.verbose:
+                print(f"[ESP] Probing SSID: {ssid}")
+
+            self.uart.write(f'AT+CWLAP="{q}"\r\n')
+            start = time.ticks_ms()
+            buf = b""
+            while True:
+                if self.uart.any():
+                    buf += self.uart.read()
+                    if b"\r\nOK\r\n" in buf or b"\r\nERROR\r\n" in buf:
+                        break
+                if time.ticks_diff(time.ticks_ms(), start) > timeout_ms:
+                    if self.verbose:
+                        print("[ESP] CWLAP filter timeout:", ssid)
+                    break
+            try: txt = buf.decode()
+            except: txt = ''.join(chr(b) for b in buf if 32 <= b <= 126 or b in (10, 13))
+            nets = cwlapparse(txt)  # <-- use your shared parser
+            for n in nets:
+                if n['ssid'] == ssid:
+                    found.append(n)
+            time.sleep(0.2)
+        found.sort(key=lambda d: d.get('rssi', -999), reverse=True)
+        if details:
+            return found
+        else:
+            return [n['ssid'] for n in found]
     def disable(self):
         if self.verbose: print("[ESP] OFF")
         self.en_pin.value(0)
@@ -165,3 +204,35 @@ class WifiServer:
             print(f"[ESP] Data sent in {chunk_id} chunk(s), total {total_len} bytes")
 
         return success
+
+
+def cwlapparse(text):
+    nets = []
+    for ln in text.splitlines():
+        if not ln.startswith('+CWLAP:'):
+            continue
+        try: inner = ln[ln.index('(') + 1:ln.rindex(')')]
+        except ValueError: continue
+        # split respecting quotes
+        parts, cur, inq = [], [], False
+        for ch in inner:
+            if ch == '"' and (not cur or cur[-1] != '\\'):
+                inq = not inq;
+                continue
+            if ch == ',' and not inq:
+                parts.append(''.join(cur));
+                cur = []
+            else:
+                cur.append(ch)
+        parts.append(''.join(cur))
+        if len(parts) >= 3:
+            try:
+                ecn = int(parts[0])
+                ssid = parts[1]
+                rssi = int(parts[2])
+            except:
+                continue
+            mac = parts[3] if len(parts) >= 4 and parts[3] else None
+            ch = int(parts[4]) if len(parts) >= 5 and parts[4].isdigit() else None
+            nets.append({'ssid': ssid, 'rssi': rssi, 'ecn': ecn, 'mac': mac, 'ch': ch})
+    return nets

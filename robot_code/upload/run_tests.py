@@ -7,6 +7,23 @@ import wifi
 import settings
 import bumpers
 
+
+def select_tests():
+    print('==================== Test Selection ==================')
+    print("Select tests to run:")
+    print("0: WiFi Test")
+    print("1: LED Test")
+    print("2: Screen Test")
+    print("3: Bumper Test")
+    print("4: Motor Test")
+    print("5: Sonar Test")
+    print("Enter test numbers separated by commas (e.g., 0,2,4): ")
+
+    user_input = input()
+    selected_tests = [int(x) for x in user_input.split(',') if x.isdigit() and 0 <= int(x) <= 5]
+
+    return selected_tests
+
 def run_tests(selected_tests):
     if 0 in selected_tests:
         # ───────────────────── Wifi Test ─────────────────────
@@ -64,20 +81,9 @@ def run_tests(selected_tests):
             if elapsed_time > 10000: break
 
     if 4 in selected_tests:
-        # ───────────────────── Sonar Test ─────────────────────
-        print('[Sonar] Running sonar test...')
-        for i in range(5):
-            buf0, buf1, buf2, timing_info = sonar.measure(10000, 200)
-            max_buf0 = max(buf0) # Maximum value of emitter
-            max_buf1 = max(buf1) # Maximum value of receiver 1
-            max_buf2 = max(buf2) # Maximum value of receiver 2
-            print(f'Pulse {i} => Max values: EMIT={max_buf0}, RCV1={max_buf1}, RCV2={max_buf2}')
-            time.sleep(0.5)
-        print('[Sonar] Sonar test completed.')
-
-    if 5 in selected_tests:
         # ───────────────────── Motors Test ─────────────────────
         print('[Motors] Running motors test...')
+        print('Make sure the robot is switched on! Blue led on left side should be lit.')
         drive = motors.Motors()
         for i in range(5):
             drive.turn_angle(-10)
@@ -85,3 +91,16 @@ def run_tests(selected_tests):
             drive.turn_angle(10)
             time.sleep(1)
         print('[Motors] Motors test completed.')
+
+    if 5 in selected_tests:
+        # ───────────────────── Sonar Test ─────────────────────
+        print('[Sonar] Running sonar test...')
+        for i in range(100):
+            buf0, buf1, buf2, timing_info = sonar.measure(10000, 200)
+            max_buf0 = max(buf0) # Maximum value of emitter
+            max_buf1 = max(buf1) # Maximum value of receiver 1
+            max_buf2 = max(buf2) # Maximum value of receiver 2
+            print(f'Pulse {i} => Max values: EMIT={max_buf0}, RCV1={max_buf1}, RCV2={max_buf2}')
+            time.sleep(0.6)
+        print('[Sonar] Sonar test completed.')
+
