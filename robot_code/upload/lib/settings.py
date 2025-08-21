@@ -1,7 +1,7 @@
 import passwords
 
 verbose = 2
-ssid_index = 0  # Choose which known SSID to connect to
+ssid_index = 1  # Choose which known SSID to connect to
 
 
 ssid_list = [
