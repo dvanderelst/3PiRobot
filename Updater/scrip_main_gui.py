@@ -144,10 +144,8 @@ class ProgressUI:
 
                 # Send break to stop running app (so rshell can connect)
                 self.message_queue.put(("log", f"[{port}] sending break"))
-                try:
-                    tools.force_break(port)
-                except Exception as e:
-                    self.message_queue.put(("log", f"[{port}] break error: {e}"))
+                try: tools.force_break(port)
+                except Exception as e: self.message_queue.put(("log", f"[{port}] break error: {e}"))
 
                 # 2) Optional pre-delete staged paths
                 if predelete:
@@ -163,6 +161,7 @@ class ProgressUI:
                 # 3) Upload
                 if self.cancel: break
                 self.message_queue.put(("status", f"[{port}] uploading"))
+                self.message_queue.put(("log", f"[{port}] uploading"))
                 try:
                     rshell.upload(port, staging_folder, mirror=full_update)  # mirror when full update
                 except Exception as e:
