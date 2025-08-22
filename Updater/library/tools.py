@@ -2,8 +2,6 @@ import serial
 import serial.tools.list_ports as lp
 import time
 
-from docutils.nodes import description
-
 
 def force_break(port, baud=115200):
     with serial.Serial(port, baud, timeout=0.3) as s:

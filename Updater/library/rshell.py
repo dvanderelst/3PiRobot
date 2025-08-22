@@ -1,14 +1,16 @@
 import shutil, os
 import subprocess
+from library import settings
 from pathlib import Path
+import time
 
-excludes = ['__pycache__', 'pololu_3pi_2040_robot', 'umsgpack']
-
-def make_staging_copy(source_dir, dest_dir='staging'):
-    """
-    Copy source_dir into dest_dir, excluding any files/folders listed in excludes.
-    Excludes are matched against directory or file names (not globs).
-    """
+def make_staging_copy(source_dir, dest_dir='staging', full=False):
+    clock_skew_sec = 5
+    ts = time.time() + max(0, clock_skew_sec)
+    excluded_folders = settings.excluded_folders
+    fixed_library_folders = settings.fixed_library_folders
+    excludes = set(excluded_folders)
+    if not full: excludes.update(fixed_library_folders)
     src = Path(source_dir).resolve()
     dst = Path(dest_dir).resolve()
     # Clear staging dir
@@ -22,11 +24,13 @@ def make_staging_copy(source_dir, dest_dir='staging'):
         dst_root = dst / rel_root
         dst_root.mkdir(parents=True, exist_ok=True)
         # copy files except excluded
-        for f in files:
-            if f in excludes: continue
-            shutil.copy2(Path(root) / f, dst_root / f)
+        for fname in files:
+            if fname in excludes: continue
+            src_file = Path(root) / fname
+            dst_file = dst_root / fname
+            shutil.copy2(src_file, dst_file)
+            os.utime(dst_file, (ts, ts))
     return dst
-
 
 def remove_same(port, staged_root, show=True):
     batch_size = 50
