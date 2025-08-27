@@ -6,7 +6,7 @@ b = beeps.Beeper()
 b.play("robot_start")
 menu_items = ['0: WiFi Test', '1: Motors Test', '2: Bumpers Test', '3: Sonar Test']
 key_pressed = menu.msg_wait('Press B for test menu', expect='B', timeout=3)
-print(key_pressed)
+print('button press:', key_pressed)
 if key_pressed == 'B':
     m = menu.Menu(items=menu_items)
     selected = m.show()

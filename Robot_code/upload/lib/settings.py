@@ -2,7 +2,7 @@ import passwords
 verbose = 2
 
 ssid_list = {
-    'batnet': passwords.password0,
+    'batnet_robotlab': passwords.password0,
     'ZyXEL39940': passwords.password1
 }
 
