@@ -40,73 +40,61 @@ class LEDs:
     def __init__(self):
         self.leds = robot.RGBLEDs()
         self.num_leds = 6
-        self.colors = [[0, 0, 0]] * self.num_leds
+        # IMPORTANT: make *independent* lists
+        self.colors = [[0, 0, 0] for _ in range(self.num_leds)]
         self.leds.set_brightness(5)
 
-    def set_brightness(self, level):
-        """Set global brightness (0–31)."""
-        self.leds.set_brightness(level)
+    def set_brightness(self, level): self.leds.set_brightness(level)
 
     def set(self, index, color):
         """Set a single LED by index to a color (name or [R,G,B]), then show."""
-        rgb = self._resolve_color(color)
         if 0 <= index < self.num_leds:
-            self.colors[index] = rgb
-            self.leds.set(index, rgb)
+            rgb = self._resolve_color(color)
+            # store a copy so no external list can alias our state
+            self.colors[index] = [rgb[0], rgb[1], rgb[2]]
+            self.leds.set(index, self.colors[index])
             self.show()
 
     def set_all(self, color):
         """Set all LEDs to a color (name or [R,G,B]), then show."""
         rgb = self._resolve_color(color)
+        self.colors = [[rgb[0], rgb[1], rgb[2]] for _ in range(self.num_leds)]
         for i in range(self.num_leds):
-            self.colors[i] = rgb
-            self.leds.set(i, rgb)
+            self.leds.set(i, self.colors[i])
         self.show()
 
-    def clear(self):
-        """Turn off all LEDs."""
-        self.set_all("off")
-
-    def show(self):
-        """Update LED hardware with stored colors."""
-        self.leds.show()
+    def clear(self): self.set_all("off")
+    def show(self):  self.leds.show()
 
     def flash(self, color, delay_ms=200):
-        """Flash all LEDs briefly with a given color."""
-        self.set_all(color)
-        time.sleep_ms(delay_ms)
-        self.clear()
+        self.set_all(color); time.sleep_ms(delay_ms); self.clear()
 
     def set_gradient(self, index, value, domain=(0, 1), cmap="blue_red"):
-        """
-        Set LED color using interpolated color from a colormap.
-
-        - index: which LED to set (0–5)
-        - value: scalar input
-        - domain: (min, max) range for mapping
-        - cmap: name of colormap to use (must be in COLORMAPS)
-        """
         colors = self.COLORMAPS.get(cmap, ["blue", "red"])
         vmin, vmax = domain
-        if vmax == vmin:
-            t = 0.0
-        else:
-            t = max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
-
+        t = 0.0 if vmax == vmin else max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
         n = len(colors) - 1
         segment = min(int(t * n), n - 1)
         local_t = (t * n) - segment
-
         c1 = self._resolve_color(colors[segment])
         c2 = self._resolve_color(colors[segment + 1])
         rgb = [int(c1[i] + (c2[i] - c1[i]) * local_t) for i in range(3)]
-
         self.set(index, rgb)
 
     def _resolve_color(self, color):
         """Convert a named or RGB color to RGB with green brightness scaled."""
         if isinstance(color, str):
-            rgb = self.COLORS.get(color.lower(), [0, 0, 0])
+            base = self.COLORS.get(color.lower(), [0, 0, 0])
         else:
-            rgb = color
-        return [rgb[0], rgb[1] // 3, rgb[2]]  # dim green for visual balance
+            base = color
+        # return a NEW list each time; scale green for balance
+        return [base[0], base[1] // 3, base[2]]
+
+    # --- Debug helper ---
+    def probe(self, dwell=0.6):
+        """Light each index alone so you can see which LED is which."""
+        for i in range(self.num_leds):
+            self.set_all("off")
+            self.set(i, "white")
+            time.sleep(dwell)
+        self.clear()

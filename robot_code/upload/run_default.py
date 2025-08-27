@@ -6,50 +6,32 @@ import motors
 import wifi
 import settings
 import bumpers
+import beeps
+
+beeper = beeps.Beeper()
 
 # ───────────────────── Initialization ─────────────────────
+beeper.play('startup_proc')
 print('[Main] Initializing systems...')
 
 verbose = settings.verbose
 
 led = leds.LEDs()
 display = screen.Screen()
-bump = bumpers.Bumpers()
+bump = bumpers.Bumpers(leds=led)
 drive = motors.Motors()
 
 display.write(0, 'Systems up')
 led.set_all('off')
 
 # ───────────────────── Wi-Fi Setup ─────────────────────
-print("[WiFi] Preparing module...")
-bridge = wifi.WifiServer()
-bridge.setup()
-
-available_networks = bridge.scan_presets()
-print("[WiFi] Available networks:", available_networks)
-selected_ssid = available_networks[0]
-
-print("[WiFi] Connecting...")
-password = settings.ssid_list[selected_ssid]
-join_response = bridge.connect_wifi(selected_ssid, password)
-
-if "ERROR" in join_response:
-    print(f"[WiFi] [FAIL] Could not join network '{selected_ssid}'")
-else:
-    print(f"[WiFi] [OK] Connected to '{selected_ssid}'")
-    print("        → IP info:")
-    print(join_response)
-
-    ip = bridge.get_ip()
-    display.write(0, 'Connected')
-    display.write(1, selected_ssid)
-    display.write(2, ip)
-    led.set(0, 'green')
-
-# ───────────────────── Server Setup ─────────────────────
-print("[Main] Starting command server...")
-bridge.start_server(1234)
-display.write(0, 'Server up')
+bridge, ip, ssid = wifi.setup_wifi()
+if bridge is None: beeper.play('error')
+if bridge is not None: beeper.play('wifi_connected'); led.set(0, 'green')
+display.clear()
+display.write(0, 'Connected')
+display.write(1, ssid)
+display.write(2, ip)
 
 # ───────────────────── Initial LED Blink ─────────────────────
 print("[Main] Performing startup pulses...")
@@ -62,6 +44,7 @@ for i in range(5):
 
 # ───────────────────── Main Loop ─────────────────────
 print('[Main] Entering main loop...')
+
 loop_nr = 0
 current_led_color = 'blue'
 led.set(2, current_led_color)
@@ -70,26 +53,23 @@ last_toggle = time.ticks_ms()
 toggle_interval = 500  # milliseconds
 
 command_queue = []
+
 display.write(0, 'Ready')
+beeper.play('main_loop')
 
 while True:
-    # ── Wi-Fi Commands ──
+    # # ── Wi-Fi Commands ──
     new_commands = bridge.read_messages()
     if new_commands: command_queue.extend(new_commands)
-
-    # ── Bumper Check ──
+    # # ── Bumper Check ──
     bump_left, bump_right = bump.read()
     if bump_left or bump_right: drive.stop()
-    led.set(5, 'red') if bump_left else led.set(5, 'black')
-    led.set(3, 'red') if bump_right else led.set(3, 'black')
-
     # ── Command Processing ──
     if command_queue:
         commands = command_queue.copy()
         command_queue.clear()
         if verbose:
             print(f"[Main] Received: {commands}")
-
         for cmd in commands:
             action = cmd.get('action')
 
@@ -102,7 +82,6 @@ while True:
             elif action == 'parameter':
                 wheel_diameter_mm = cmd.get('wheel_diameter_mm', None)
                 wheel_base_mm = cmd.get('wheel_base_mm', None)
-
                 if wheel_diameter_mm is not None:
                     drive.set_wheel_diameter(wheel_diameter_mm)
                     display.write(0, 'Set wheel diameter')
@@ -137,8 +116,7 @@ while True:
                 bridge.send_data(response)
 
             elif action == 'acknowledge':
-                if verbose:
-                    print('[Main] Acknowledgment received')
+                if verbose: print('[Main] Acknowledgment received')
 
     # ── LED Blinking Indicator ──
     now = time.ticks_ms()
