@@ -13,7 +13,8 @@ from Library import ClientList
 from Library import FileOperations
 
 class Client:
-    def __init__(self, index):
+    def __init__(self, robot_number=0):
+        index = robot_number - 1
         configuration = ClientList.get_config(index)
         self.configuration = configuration
         self.sock = socket.socket()

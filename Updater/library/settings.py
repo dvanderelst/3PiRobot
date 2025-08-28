@@ -1,4 +1,4 @@
-origin_folder = '/home/dieter/Dropbox/PythonRepos/3PiRobot/robot_code/upload'
+origin_folder = '/home/dieter/Dropbox/PythonRepos/3PiRobot/Robot_code/upload'
 staging_folder = 'staging'
 
 excluded_folders = ['__pycache__']
