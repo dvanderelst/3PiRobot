@@ -11,6 +11,7 @@ from Library import Process
 from Library import Utils
 from Library import ClientList
 from Library import FileOperations
+from Library import Logging
 
 class Client:
     def __init__(self, robot_number=0):
@@ -24,26 +25,8 @@ class Client:
         self.spatial_function = self.load_function('spatial')
 
     def print_message(self, message, category="INFO"):
-        """Pretty‑print a log line with color and verbosity control."""
         robot_name = self.configuration.robot_name
-        verbose = self.configuration.verbose
-
-        # --- configuration --------------------------------------------------
-        LEVEL_THRESHOLD = {"ERROR": 0, "WARNING": 1, "INFO": 2}  # required verbose level
-        COLOUR = {
-            "ERROR":   "\033[91m",   # bright red
-            "WARNING": "\033[93m",   # bright yellow
-            "INFO":    "\033[94m",   # bright blue
-        }
-        NAME_STYLE   = "\033[1;96m"   # bold bright‑cyan
-        RESET        = "\033[0m"
-        # --------------------------------------------------------------------
-        category = category.upper()
-        # Skip if current verbosity is too low
-        if verbose < LEVEL_THRESHOLD.get(category, 2): return
-        cat_colour = COLOUR.get(category, "")
-        print(f"{NAME_STYLE}[{robot_name}]{RESET} "
-              f"{cat_colour}[{category}]{RESET} {message}")
+        Logging.print_message(robot_name, message, category)
 
     def close(self):
         self.sock.close()

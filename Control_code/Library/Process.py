@@ -50,6 +50,7 @@ def process_sonar_data(data, baseline_data, client_configuration, selection_mode
     thresholded_right[thresholded_right < threshold] = 0
     # This is the maximum of the two channels, after they were thresholded
     thresholded = np.maximum(thresholded_left, thresholded_right)
+    amount_above_threshold = np.maximum(thresholded_left - threshold, thresholded_right - threshold)
 
     crossed = False
     onset = data.shape[0] - integration_window
@@ -68,7 +69,7 @@ def process_sonar_data(data, baseline_data, client_configuration, selection_mode
             crossed = True
 
     elif selection_mode == 'max':
-        max_idx = np.argmax(thresholded)
+        max_idx = np.argmax(amount_above_threshold)
         crossed = thresholded[max_idx] > threshold[max_idx]
         if crossed:
             half_window = integration_window // 2

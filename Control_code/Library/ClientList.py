@@ -7,7 +7,6 @@ from dataclasses import dataclass
 class ClientConfig:
     robot_name: str
     ip: str
-    verbose: int = 2
     # Acquisition settings
     sample_rate: int = 20000
     samples: int = 100
