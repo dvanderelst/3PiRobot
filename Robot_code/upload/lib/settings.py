@@ -22,3 +22,5 @@ trigger_recv2 = 24 # used to pull down and avoid these triggering
 
 adc_emitter = 0 # used for emission detection
 trigger_emitter = 22
+
+free_run_ping_interval = 100  # milliseconds

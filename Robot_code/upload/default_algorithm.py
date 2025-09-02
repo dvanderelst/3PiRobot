@@ -8,6 +8,7 @@ import settings
 import bumpers
 import beeps
 
+
 beeper = beeps.Beeper()
 
 # ───────────────────── Initialization ─────────────────────
@@ -56,6 +57,11 @@ command_queue = []
 
 display.write(0, 'Ready')
 beeper.play('main_loop')
+
+# Set the the free run ping interval
+last_ping = time.ticks_ms()
+ping_interval = settings
+
 
 while True:
     # # ── Wi-Fi Commands ──
@@ -107,7 +113,10 @@ while True:
                 display.write(0, 'ping')
                 sample_rate = cmd.get('sample_rate')
                 samples = cmd.get('samples')
+                last_ping = time.ticks_ms()
+                led.set(0, 'red')
                 buf0, buf1, buf2, timing_info = sonar.measure(sample_rate, samples)
+                led.set(0, 'green')
                 response = {
                     'action': 'ping_response',
                     'data': [list(buf0), list(buf1), list(buf2)],
@@ -118,9 +127,18 @@ while True:
             elif action == 'acknowledge':
                 if verbose: print('[Main] Acknowledgment received')
 
-    # ── LED Blinking Indicator ──
     now = time.ticks_ms()
-    if time.ticks_diff(now, last_toggle) >= toggle_interval:
+    # ── Free running pulsing ──
+    difference = time.ticks_diff(now, last_ping)
+    if difference > settings.free_run_ping_interval:
+        led.set(0, 'red')
+        sonar.pulse()
+        led.set(0, 'green')
+        last_ping = now
+
+    # ── LED Blinking Indicator ──
+    difference = time.ticks_diff(now, last_toggle)
+    if difference >= toggle_interval:
         current_led_color = 'blue' if current_led_color == 'orange' else 'orange'
         led.set(2, current_led_color)
         last_toggle = now

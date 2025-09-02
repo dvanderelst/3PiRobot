@@ -18,4 +18,4 @@ if key_pressed == 'B':
     if selected_nr == 3: testing.sonar_test()
 else:
     print('No button pressed, skipping test menu.')
-    import run_default
+    import default_algorithm
