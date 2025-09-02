@@ -58,9 +58,9 @@ command_queue = []
 display.write(0, 'Ready')
 beeper.play('main_loop')
 
-# Set the the free run ping interval
+# Set the free run ping interval
 last_ping = time.ticks_ms()
-ping_interval = settings
+free_ping_interval = 0 # milliseconds, 0 = disabled
 
 
 while True:
@@ -88,12 +88,16 @@ while True:
             elif action == 'parameter':
                 wheel_diameter_mm = cmd.get('wheel_diameter_mm', None)
                 wheel_base_mm = cmd.get('wheel_base_mm', None)
+                new_free_ping_interval = cmd.get('free_ping_interval', None)
                 if wheel_diameter_mm is not None:
                     drive.set_wheel_diameter(wheel_diameter_mm)
-                    display.write(0, 'Set wheel diameter')
+                    display.write(0, 'Set wheel diam')
                 if wheel_base_mm is not None:
                     drive.set_wheel_base(wheel_base_mm)
                     display.write(0, 'Set wheel base')
+                if new_free_ping_interval is not None:
+                    free_ping_interval = new_free_ping_interval
+                    display.write(4, 'Set free intv')
 
             elif action == 'step':
                 display.write(0, 'step')
@@ -130,7 +134,7 @@ while True:
     now = time.ticks_ms()
     # ── Free running pulsing ──
     difference = time.ticks_diff(now, last_ping)
-    if difference > settings.free_run_ping_interval:
+    if difference > free_ping_interval > 0:
         led.set(0, 'red')
         sonar.pulse()
         led.set(0, 'green')

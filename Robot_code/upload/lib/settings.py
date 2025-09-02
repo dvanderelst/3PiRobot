@@ -1,9 +1,16 @@
 import passwords
 verbose = 2
 
+# ssid_list = {
+#     'batnet_robotlab': passwords.password0,
+#     'batnet': passwords.password1,
+#     'ZyXEL39940': passwords.password2
+# }
+
+
 ssid_list = {
-    'batnet_robotlab': passwords.password0,
-    'ZyXEL39940': passwords.password1
+    'batnet': passwords.password1,
+    'ZyXEL39940': passwords.password2
 }
 
 split_char = ','
@@ -22,5 +29,3 @@ trigger_recv2 = 24 # used to pull down and avoid these triggering
 
 adc_emitter = 0 # used for emission detection
 trigger_emitter = 22
-
-free_run_ping_interval = 100  # milliseconds

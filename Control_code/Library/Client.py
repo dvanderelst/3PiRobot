@@ -14,15 +14,16 @@ from Library import FileOperations
 from Library import Logging
 
 class Client:
-    def __init__(self, robot_number=0):
+    def __init__(self, robot_number=0, ip=None):
         index = robot_number - 1
         configuration = ClientList.get_config(index)
         self.configuration = configuration
+        self.ip = self.configuration.ip
+        if ip is not None: self.ip = ip
         self.sock = socket.socket()
         self.sock.settimeout(5)
-        self.sock.connect((self.configuration.ip, 1234))
-        self.baseline_function = self.load_function('baseline')
-        self.spatial_function = self.load_function('spatial')
+        self.sock.connect((self.ip, 1234))
+        self.calibration = self.load_calibration()
 
     def print_message(self, message, category="INFO"):
         robot_name = self.configuration.robot_name
@@ -56,25 +57,22 @@ class Client:
         if not body: return None
         return msgpack.unpackb(body, raw=False)
 
-    def load_function(self, function_name):
-        filename = None
-        robot_name = self.configuration.robot_name
-        if function_name == 'spatial':
-            filename = FileOperations.get_spatial_function_path(robot_name)
-        if function_name == 'baseline':
-            filename = FileOperations.get_baseline_function_path(robot_name)
-        if filename is None: return None
-        file_exists = path.isfile(filename)
-        if not file_exists:
-            self.print_message(f'Function ({function_name}) not found', category="WARNING")
-            return None
-        # load function
-        with open(filename, 'rb') as f: loaded_function = pickle.load(f)
-        loaded_function_config = loaded_function['client_configuration']
-        # compare configurations
-        matches = Utils.compare_configurations(self.configuration, loaded_function_config)
-        self.print_message(f'Function ({function_name}) loaded (Matches: {matches})')
-        return loaded_function
+    def load_calibration(self):
+        pass
+        # todo: load and compare calibration
+        # robot_name = self.configuration.robot_name
+        # filename = FileOperations.get_calibration_file(robot_name)
+        # file_exists = path.isfile(filename)
+        # if not file_exists:
+        #     self.print_message(f'Calibration file not found', category="WARNING")
+        #     return None
+        # # load calibration
+        # with open(filename, 'rb') as f: calibration = pickle.load(f)
+        # calibration_config = calibration['client_configuration']
+        # # compare configurations
+        # matches = Utils.compare_configurations(self.configuration, calibration_config)
+        # self.print_message(f'Calibration file loaded (Matches: {matches})')
+        # return calibration
 
     def set_kinematics(self, linear_speed=0, rotation_speed=0):
         """
@@ -96,8 +94,13 @@ class Client:
         self._send_dict({'action': 'parameter', parameter: value})
         self.print_message(f"Changed settings in {time.time() - start:.4f}s")
 
+    def change_free_ping_interval(self, interval):
+        """Change the free ping interval on the robot."""
+        self.change_robot_setting('free_ping_interval', interval)
+
     def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0):
         start = time.time()
+        angle = int(angle)
         dictionary = {'action': 'step', 'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
         self._send_dict(dictionary)
         self.print_message(f"step sent (d={distance}, a={angle}) in {time.time() - start:.4f}s")
@@ -119,9 +122,6 @@ class Client:
         data = data[:, [emitter_channel, left_channel, right_channel]]  # reorder channels
         data = data.astype(np.float32)  # convert to float32 for processing
         timing_info = msg['timing_info']
-
-        # Prints all timing information - for debugging purposes
-        #for k, v in timing_info.items(): print(f"{k}: {v}")
 
         self.print_message(f"Ping took {time.time() - start:.4f}s")
         if plot: Utils.sonar_plot(data, sample_rate)
