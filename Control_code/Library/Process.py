@@ -24,7 +24,7 @@ def baseline2threshold(baseline, extent=None, right=0, up=0):
     threshold += up
     return threshold
 
-def process_sonar_data(client, data, calibration, selection_mode='first'):
+def locate_echo(client, data, calibration, selection_mode='first'):
     # This function processes sonar data using the baseline
     # in the calibration dictionary, and integrates the signal
     # to find the echo onset, based on the selection mode.
@@ -112,7 +112,7 @@ def process_sonar_data(client, data, calibration, selection_mode='first'):
 
 
 
-def plot_process_sonar_data(raw_results, file_name=None, close_after=False):
+def plot_locate_echo(raw_results, file_name=None, close_after=False):
     # Get config values
     configuration = raw_results['client_configuration']
     sample_rate = configuration.sample_rate
@@ -160,3 +160,22 @@ def plot_process_sonar_data(raw_results, file_name=None, close_after=False):
     if file_name is not None: plt.savefig(file_name, dpi=300)
     if close_after: plt.close()
     else: plt.show()
+
+
+def create_messages(results):
+    raw_distance = results.get('raw_distance', 'None')
+    raw_iid = results.get('raw_iid', 'None')
+    corrected_distance = results.get('corrected_distance', 'None')
+    corrected_iid = results.get('corrected_iid', 'None')
+    side_code = results.get('side_code', 'None')
+
+    if raw_distance is not None: raw_distance = f"{raw_distance:.2f}"
+    if raw_iid is not None: raw_iid = f"{raw_iid:.2f}"
+    if corrected_distance is not None: corrected_distance = f"{corrected_distance:.2f}"
+    if corrected_iid is not None: corrected_iid = f"{corrected_iid:.2f}"
+
+    raw_message = f"Rdist: {raw_distance} m, Riid: {raw_iid}"
+    corrected_message = f"Cdist: {corrected_distance} m, Ciid: {corrected_iid}, Side: {side_code}"
+    full_message = f"{raw_message} | {corrected_message}"
+    messages = {'raw_message': raw_message, 'corrected_message': corrected_message, 'full_message': full_message}
+    return messages

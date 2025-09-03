@@ -13,6 +13,7 @@ from Library import ClientList
 from Library import FileOperations
 from Library import Logging
 
+
 class Client:
     def __init__(self, robot_number=0, ip=None):
         index = robot_number - 1
@@ -58,21 +59,10 @@ class Client:
         return msgpack.unpackb(body, raw=False)
 
     def load_calibration(self):
-        pass
-        # todo: load and compare calibration
-        # robot_name = self.configuration.robot_name
-        # filename = FileOperations.get_calibration_file(robot_name)
-        # file_exists = path.isfile(filename)
-        # if not file_exists:
-        #     self.print_message(f'Calibration file not found', category="WARNING")
-        #     return None
-        # # load calibration
-        # with open(filename, 'rb') as f: calibration = pickle.load(f)
-        # calibration_config = calibration['client_configuration']
-        # # compare configurations
-        # matches = Utils.compare_configurations(self.configuration, calibration_config)
-        # self.print_message(f'Calibration file loaded (Matches: {matches})')
-        # return calibration
+        """Load the calibration file for this robot."""
+        robot_name = self.configuration.robot_name
+        calibration = FileOperations.load_calibration(robot_name)
+        return calibration
 
     def set_kinematics(self, linear_speed=0, rotation_speed=0):
         """
@@ -106,7 +96,6 @@ class Client:
         self.print_message(f"step sent (d={distance}, a={angle}) in {time.time() - start:.4f}s")
 
     def ping(self, plot=False):
-        """Fire sonar, return (data, distance_axis, timing_info)."""
         start = time.time()
         sample_rate = self.configuration.sample_rate
         samples = self.configuration.samples
@@ -128,56 +117,54 @@ class Client:
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
         return data, distance_axis, timing_info
 
-    def ping_process(self, cutoff_index = None, plot=False, close_after=False, selection_mode='first'):
-        """Ping and run downstream processing."""
+    def ping_process(self, plot=False, close_after=False, selection_mode='first'):
+        results = {}
+        calibration = self.calibration
         data, distance_axis, timing_info = self.ping(plot=False)
-        if cutoff_index is not None: data[cutoff_index:, :] = np.min(data)
-        # data has channels in order: [emitter, left, right]
-        if data is None: return None
-        results = Process.process_sonar_data(data, self.baseline_function, self.configuration, selection_mode=selection_mode)
-        results['cutoff_index'] = cutoff_index
-        self.print_message('Data processed', category="INFO")
+        results['data'] = data
+        results['distance_axis'] = distance_axis
+        results['timing_info'] = timing_info
+        # In case no calibration is loaded, return unprocessed data
+        if calibration == {}:
+            message = "No calibration loaded. Returning unprocessed data."
+            self.print_message(message, category='WARNING')
+            return results
 
+        # Detect the echo and get raw results
         file_name = None
         if isinstance(plot, str): file_name = plot
-        if plot: Process.plot_processing(results, self.configuration, file_name=file_name, close_after=close_after)
+        raw_results = Process.locate_echo(self, data, calibration, selection_mode)
+        if plot: Process.plot_locate_echo(raw_results, file_name, close_after)
+        results.update(raw_results)
 
-        iid_correction = 0
-        distance_coefficient = 1
-        distance_intercept = 0
-        if self.spatial_function is not None:
-            iid_correction = self.spatial_function['iid_correction']
-            distance_coefficient = self.spatial_function['distance_coefficient']
-            distance_intercept = self.spatial_function['distance_intercept']
+        # Try to correct the results based on the calibration
 
-        raw_iid = results['raw_iid']
-        raw_distance = results['raw_distance']
-        corrected_distance = distance_intercept + distance_coefficient * raw_distance
+        # Distance calibration
+        distance_present = calibration.get('distance_present', False)
+        if distance_present:
+            distance_coefficient = calibration['distance_coefficient']
+            distance_intercept = calibration['distance_intercept']
+            raw_distance = raw_results['raw_distance']
+            corrected_distance = distance_intercept + distance_coefficient * raw_distance
+            results['corrected_distance'] = corrected_distance
+        else:
+            message = "No distance calibration present. Not correcting distance."
+            self.print_message(message, category='WARNING')
 
-        raw_distance_formatted = f"{raw_distance:.2f}"
-        corrected_distance_formatted = f"{corrected_distance:.2f}"
-
-        iid_formatted = f"{raw_iid:+.2f}"
-
-        corrected_iid = raw_iid - iid_correction
-        side_code = 'L' if corrected_iid < 0 else 'R'
-        corrected_iid_formatted = f"{corrected_iid:+.2f}"
-
-        raw_message = f"Rdist: {raw_distance_formatted} m, Riid: {iid_formatted}"
-        corrected_message = f"Cdist: {corrected_distance_formatted} m, Ciid: {corrected_iid_formatted}, Side: {side_code}"
-        message = f"{raw_message} | {corrected_message}"
-
-        self.print_message(message, category="INFO")
-
-        results['message'] = message
-        results['side_code'] = side_code
-        results['distance_coefficient'] = distance_coefficient
-        results['distance_intercept'] = distance_intercept
-        results['iid_correction'] = iid_correction
-        results['corrected_distance'] = corrected_distance
-        results['corrected_iid'] = corrected_iid
-
+        # IID calibration
+        iid_present = calibration.get('iid_present', False)
+        if iid_present:
+            zero_iids = calibration['zero_iids']
+            mean_zero_iids = np.mean(zero_iids)
+            raw_iid = raw_results['raw_iid']
+            corrected_iid = raw_iid - mean_zero_iids
+            side_code = 'L' if corrected_iid < 0 else 'R'
+            results['corrected_iid'] = corrected_iid
+            results['side_code'] = side_code
+        else:
+            message = "No IID calibration present. Not correcting IID"
+            self.print_message(message, category='WARNING')
+        messages = Process.create_messages(results)
+        results.update(messages)
         return results
-
-
 

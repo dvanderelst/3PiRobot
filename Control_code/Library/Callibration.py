@@ -6,6 +6,8 @@ from Library import Logging
 from Library import Process
 from Library import Utils
 
+
+
 def angles2steps(angles):
     angles = np.array(angles)
     steps = np.diff(angles)
@@ -87,8 +89,8 @@ def get_distance_data(client, calibration, real_distance, nr_repeats=10):
         message = f"Distance data: {i + 1}/{nr_repeats}..."
         Logging.print_message('Baseline', message, category='INFO')
         data, _, _ = client.ping()
-        raw_result = Process.process_sonar_data(client, data, calibration, selection_mode='first')
-        Process.plot_process_sonar_data(raw_result, file_name=file_name, close_after=close_after)
+        raw_result = Process.locate_echo(client, data, calibration, selection_mode='first')
+        Process.plot_locate_echo(raw_result, file_name=file_name, close_after=close_after)
         raw_results.append(raw_result)
         raw_results.append(raw_result)
         time.sleep(0.25)
@@ -136,13 +138,12 @@ def get_sweep_data(client, calibration, sweep_angles):
     all_sweep_data = []
     for index, step in enumerate(sweep_steps):
         current_angle = sweep_angles[index]
-
         message = f"Measuring at {current_angle} degrees, step {index + 1}/{nr_of_steps}"
         Logging.print_message('Sweep', message, category='INFO')
         client.step(angle=int(step))
         time.sleep(1.5)
         data, _, _ = client.ping()
-        raw_result = Process.process_sonar_data(client, data, calibration, selection_mode='first')
+        raw_result = Process.locate_echo(client, data, calibration, selection_mode='first')
         all_sweep_data.append(raw_result)
 
     sweep_data = np.array([result['data'] for result in all_sweep_data])
@@ -155,11 +156,14 @@ def get_sweep_data(client, calibration, sweep_angles):
     results['sweep_data'] = sweep_data
     results['sweep_onsets'] = sweep_onsets
     results['sweep_iids'] = sweep_iids
-
     return results
 
 
-def plot_sweep_data(robot_name, sweep_results):
+def plot_sweep_data(robot_name, sweep_results, calibration=None):
+    if calibration is None: calibration = {}
+
+    zero_iids = calibration.get('zero_iids', [])
+    zeros = [0] * len(zero_iids)
 
     sweep_data =  sweep_results['sweep_data']
     sweep_onsets = sweep_results['sweep_onsets']
@@ -171,9 +175,9 @@ def plot_sweep_data(robot_name, sweep_results):
     right_sweep_data = sweep_data[:, :, 2]
     sweep_differences = left_sweep_data - right_sweep_data
 
+    plot_filename = FileOperations.get_calibration_plot(robot_name, 'sweep_results')
 
     plt.figure(figsize=(15, 6))
-
     plt.subplot(221)
     plt.imshow(left_sweep_data, aspect='auto')
     plt.colorbar()
@@ -196,12 +200,12 @@ def plot_sweep_data(robot_name, sweep_results):
     plt.title('Data Differences')
 
     plt.subplot(224)
-    plt.plot(sweep_angles, sweep_iids, marker='o', linestyle='-', color='red')
+    plt.plot(sweep_angles, sweep_iids, marker='o', linestyle='-', color='red', label='Sweep IIDs', alpha=0.5)
+    plt.plot(zeros, zero_iids, marker='o', linestyle='', color='blue', label='IIDs from distance calibration', alpha=0.5)
     plt.grid()
     plt.xlabel('Angle [degrees]')
     plt.ylabel('Raw IIDs')
     plt.title('Raw IID vs Angle')
-
-    plot_filename = FileOperations.get_calibration_plot(robot_name, 'sweep_results')
+    plt.legend(loc='lower left')
     plt.savefig(plot_filename)
     plt.show()
