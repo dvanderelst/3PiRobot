@@ -160,10 +160,11 @@ def get_sweep_data(client, calibration, sweep_angles):
 
 
 def plot_sweep_data(robot_name, sweep_results):
-    sweep_data = np.array([result['data'] for result in sweep_results])
-    sweep_onsets = np.array([result['onset'] for result in sweep_results])
-    sweep_iids = np.array([result['raw_iid'] for result in sweep_results])
-    sweep_angles = np.array(sweep_results['sweep_angles'])
+
+    sweep_data =  sweep_results['sweep_data']
+    sweep_onsets = sweep_results['sweep_onsets']
+    sweep_iids = sweep_results['sweep_iids']
+    sweep_angles = sweep_results['sweep_angles']
     nr_of_steps = len(sweep_angles)
 
     left_sweep_data = sweep_data[:, :, 1]

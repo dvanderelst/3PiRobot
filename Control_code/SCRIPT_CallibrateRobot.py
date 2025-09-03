@@ -55,10 +55,16 @@ if collect_distance_calibration:
     FileOperations.save_calibration(robot_name, calibration)
 
 
+# Sweep data collection does not contribute to calibration but
+# is useful for visualizing the robot's sonar transfer function
 if collect_sweep_data:
     easygui.msgbox(f"Press ok to start the sweep.")
     sweep_results = Callibration.get_sweep_data(client, calibration, angles)
     Callibration.plot_sweep_data(robot_name, sweep_results)
+    # We save the sweep data as well because it might be useful for later plotting
+    calibration['sweep_data'] =  sweep_results['sweep_data']
+    calibration['sweep_onsets'] = sweep_results['sweep_onsets']
+    calibration['sweep_iids'] = sweep_results['sweep_iids']
+    calibration['sweep_angles'] = sweep_results['sweep_angles']
+    FileOperations.save_calibration(robot_name, calibration)
 
-    #todo: test the plot sweep data function
-    #todo: doubble check to logic of this new implementation
