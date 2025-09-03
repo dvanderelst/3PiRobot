@@ -5,7 +5,7 @@ import struct
 import umsgpack as msgpack  # MicroPython-compatible
 
 
-def setup_wifi():
+def setup_wifi(ssids=None):
     """Return (bridge, ip, ssid) or (None, None, None) on failure."""
     print("[WiFi] Preparing module...")
     bridge = WifiServer()
@@ -13,7 +13,7 @@ def setup_wifi():
 
     # Robust scan (one wide scan + filter), with a quick retry
     for attempt in range(2):
-        nets = bridge.scan_presets()
+        nets = bridge.scan_presets(ssids=ssids)
         print("[WiFi] Available networks:", nets)
         if nets:
             break

@@ -1,14 +1,9 @@
 import passwords
 verbose = 2
 
-# ssid_list = {
-#     'batnet_robotlab': passwords.password0,
-#     'batnet': passwords.password1,
-#     'ZyXEL39940': passwords.password2
-# }
-
 
 ssid_list = {
+    'batnet_robotlab': passwords.password0,
     'batnet': passwords.password1,
     'ZyXEL39940': passwords.password2
 }
