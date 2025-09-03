@@ -7,7 +7,6 @@ from dataclasses import dataclass
 class ClientConfig:
     robot_name: str
     ip: str
-    verbose: int = 2
     # Acquisition settings
     sample_rate: int = 20000
     samples: int = 100
@@ -19,7 +18,6 @@ class ClientConfig:
     baseline_shift_right: int = 1
     baseline_shift_up: int = 2500
     integration_window: int = 5
-    fixed_onset: int = 0
 
 
 client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101")

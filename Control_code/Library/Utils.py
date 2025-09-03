@@ -1,7 +1,7 @@
 import ipaddress
 import numpy as np
 from matplotlib import pyplot as plt
-
+import matplotlib.patches as patches
 
 def is_valid_ip(s):
     if not isinstance(s, str):
@@ -97,3 +97,29 @@ def fit_linear_calibration(real_distance1, raw_distances1, real_distance2, raw_d
     b = y_mean - a * x_mean
 
     return a, b
+
+
+def draw_integration_box(ax, bounds, color='gray', alpha=0.3, onset_color='red'):
+    if not 2 <= len(bounds) <= 4:
+        raise ValueError("bounds must have 2 to 4 elements: (x_min, x_max[, y_min, y_max])")
+    x_min, x_max = bounds[0], bounds[1]
+    # Handle y bounds
+    if len(bounds) >= 4:
+        y_min, y_max = bounds[2], bounds[3]
+    else:
+        ymin, ymax = ax.get_ylim()
+        y_min = bounds[2] if len(bounds) == 3 else ymin
+        y_max = ymax
+    # Draw shaded rectangle
+    rect = patches.Rectangle(
+        (x_min, y_min),
+        x_max - x_min,  # width
+        y_max - y_min,  # height
+        linewidth=0,
+        facecolor=color,
+        alpha=alpha,
+        label='Integration Extent'
+    )
+    ax.add_patch(rect)
+    # Draw onset line
+    ax.axvline(x_min, color=onset_color, linestyle='--', label='Onset')

@@ -11,39 +11,24 @@ from Library import Process
 from Library import Utils
 from Library import ClientList
 from Library import FileOperations
+from Library import Logging
+
 
 class Client:
-    def __init__(self, robot_number=0):
+    def __init__(self, robot_number=0, ip=None):
         index = robot_number - 1
         configuration = ClientList.get_config(index)
         self.configuration = configuration
+        self.ip = self.configuration.ip
+        if ip is not None: self.ip = ip
         self.sock = socket.socket()
         self.sock.settimeout(5)
-        self.sock.connect((self.configuration.ip, 1234))
-        self.baseline_function = self.load_function('baseline')
-        self.spatial_function = self.load_function('spatial')
+        self.sock.connect((self.ip, 1234))
+        self.calibration = self.load_calibration()
 
     def print_message(self, message, category="INFO"):
-        """Pretty‑print a log line with color and verbosity control."""
         robot_name = self.configuration.robot_name
-        verbose = self.configuration.verbose
-
-        # --- configuration --------------------------------------------------
-        LEVEL_THRESHOLD = {"ERROR": 0, "WARNING": 1, "INFO": 2}  # required verbose level
-        COLOUR = {
-            "ERROR":   "\033[91m",   # bright red
-            "WARNING": "\033[93m",   # bright yellow
-            "INFO":    "\033[94m",   # bright blue
-        }
-        NAME_STYLE   = "\033[1;96m"   # bold bright‑cyan
-        RESET        = "\033[0m"
-        # --------------------------------------------------------------------
-        category = category.upper()
-        # Skip if current verbosity is too low
-        if verbose < LEVEL_THRESHOLD.get(category, 2): return
-        cat_colour = COLOUR.get(category, "")
-        print(f"{NAME_STYLE}[{robot_name}]{RESET} "
-              f"{cat_colour}[{category}]{RESET} {message}")
+        Logging.print_message(robot_name, message, category)
 
     def close(self):
         self.sock.close()
@@ -73,25 +58,11 @@ class Client:
         if not body: return None
         return msgpack.unpackb(body, raw=False)
 
-    def load_function(self, function_name):
-        filename = None
+    def load_calibration(self):
+        """Load the calibration file for this robot."""
         robot_name = self.configuration.robot_name
-        if function_name == 'spatial':
-            filename = FileOperations.get_spatial_function_path(robot_name)
-        if function_name == 'baseline':
-            filename = FileOperations.get_baseline_function_path(robot_name)
-        if filename is None: return None
-        file_exists = path.isfile(filename)
-        if not file_exists:
-            self.print_message(f'Function ({function_name}) not found', category="WARNING")
-            return None
-        # load function
-        with open(filename, 'rb') as f: loaded_function = pickle.load(f)
-        loaded_function_config = loaded_function['client_configuration']
-        # compare configurations
-        matches = Utils.compare_configurations(self.configuration, loaded_function_config)
-        self.print_message(f'Function ({function_name}) loaded (Matches: {matches})')
-        return loaded_function
+        calibration = FileOperations.load_calibration(robot_name)
+        return calibration
 
     def set_kinematics(self, linear_speed=0, rotation_speed=0):
         """
@@ -113,14 +84,18 @@ class Client:
         self._send_dict({'action': 'parameter', parameter: value})
         self.print_message(f"Changed settings in {time.time() - start:.4f}s")
 
+    def change_free_ping_interval(self, interval):
+        """Change the free ping interval on the robot."""
+        self.change_robot_setting('free_ping_interval', interval)
+
     def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0):
         start = time.time()
+        angle = int(angle)
         dictionary = {'action': 'step', 'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
         self._send_dict(dictionary)
         self.print_message(f"step sent (d={distance}, a={angle}) in {time.time() - start:.4f}s")
 
     def ping(self, plot=False):
-        """Fire sonar, return (data, distance_axis, timing_info)."""
         start = time.time()
         sample_rate = self.configuration.sample_rate
         samples = self.configuration.samples
@@ -137,64 +112,59 @@ class Client:
         data = data.astype(np.float32)  # convert to float32 for processing
         timing_info = msg['timing_info']
 
-        # Prints all timing information - for debugging purposes
-        #for k, v in timing_info.items(): print(f"{k}: {v}")
-
         self.print_message(f"Ping took {time.time() - start:.4f}s")
         if plot: Utils.sonar_plot(data, sample_rate)
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
         return data, distance_axis, timing_info
 
-    def ping_process(self, cutoff_index = None, plot=False, close_after=False, selection_mode='first'):
-        """Ping and run downstream processing."""
+    def ping_process(self, plot=False, close_after=False, selection_mode='first'):
+        results = {}
+        calibration = self.calibration
         data, distance_axis, timing_info = self.ping(plot=False)
-        if cutoff_index is not None: data[cutoff_index:, :] = np.min(data)
-        # data has channels in order: [emitter, left, right]
-        if data is None: return None
-        results = Process.process_sonar_data(data, self.baseline_function, self.configuration, selection_mode=selection_mode)
-        results['cutoff_index'] = cutoff_index
-        self.print_message('Data processed', category="INFO")
+        results['data'] = data
+        results['distance_axis'] = distance_axis
+        results['timing_info'] = timing_info
+        # In case no calibration is loaded, return unprocessed data
+        if calibration == {}:
+            message = "No calibration loaded. Returning unprocessed data."
+            self.print_message(message, category='WARNING')
+            return results
 
+        # Detect the echo and get raw results
         file_name = None
         if isinstance(plot, str): file_name = plot
-        if plot: Process.plot_processing(results, self.configuration, file_name=file_name, close_after=close_after)
+        raw_results = Process.locate_echo(self, data, calibration, selection_mode)
+        if plot: Process.plot_locate_echo(raw_results, file_name, close_after)
+        results.update(raw_results)
 
-        iid_correction = 0
-        distance_coefficient = 1
-        distance_intercept = 0
-        if self.spatial_function is not None:
-            iid_correction = self.spatial_function['iid_correction']
-            distance_coefficient = self.spatial_function['distance_coefficient']
-            distance_intercept = self.spatial_function['distance_intercept']
+        # Try to correct the results based on the calibration
 
-        raw_iid = results['raw_iid']
-        raw_distance = results['raw_distance']
-        corrected_distance = distance_intercept + distance_coefficient * raw_distance
+        # Distance calibration
+        distance_present = calibration.get('distance_present', False)
+        if distance_present:
+            distance_coefficient = calibration['distance_coefficient']
+            distance_intercept = calibration['distance_intercept']
+            raw_distance = raw_results['raw_distance']
+            corrected_distance = distance_intercept + distance_coefficient * raw_distance
+            results['corrected_distance'] = corrected_distance
+        else:
+            message = "No distance calibration present. Not correcting distance."
+            self.print_message(message, category='WARNING')
 
-        raw_distance_formatted = f"{raw_distance:.2f}"
-        corrected_distance_formatted = f"{corrected_distance:.2f}"
-
-        iid_formatted = f"{raw_iid:+.2f}"
-
-        corrected_iid = raw_iid - iid_correction
-        side_code = 'L' if corrected_iid < 0 else 'R'
-        corrected_iid_formatted = f"{corrected_iid:+.2f}"
-
-        raw_message = f"Rdist: {raw_distance_formatted} m, Riid: {iid_formatted}"
-        corrected_message = f"Cdist: {corrected_distance_formatted} m, Ciid: {corrected_iid_formatted}, Side: {side_code}"
-        message = f"{raw_message} | {corrected_message}"
-
-        self.print_message(message, category="INFO")
-
-        results['message'] = message
-        results['side_code'] = side_code
-        results['distance_coefficient'] = distance_coefficient
-        results['distance_intercept'] = distance_intercept
-        results['iid_correction'] = iid_correction
-        results['corrected_distance'] = corrected_distance
-        results['corrected_iid'] = corrected_iid
-
+        # IID calibration
+        iid_present = calibration.get('iid_present', False)
+        if iid_present:
+            zero_iids = calibration['zero_iids']
+            mean_zero_iids = np.mean(zero_iids)
+            raw_iid = raw_results['raw_iid']
+            corrected_iid = raw_iid - mean_zero_iids
+            side_code = 'L' if corrected_iid < 0 else 'R'
+            results['corrected_iid'] = corrected_iid
+            results['side_code'] = side_code
+        else:
+            message = "No IID calibration present. Not correcting IID"
+            self.print_message(message, category='WARNING')
+        messages = Process.create_messages(results)
+        results.update(messages)
         return results
-
-
 
