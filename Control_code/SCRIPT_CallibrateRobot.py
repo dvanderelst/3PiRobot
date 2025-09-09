@@ -17,7 +17,7 @@ collect_sweep_data = True
 # ─────────────────────────────────────
 
 client = Client.Client(robot_nr)
-client.change_free_ping_interval(0) #To ensure no free pings are done during callibration
+client.change_free_ping_period(0) #To ensure no free pings are done during callibration
 
 robot_name = client.configuration.robot_name
 
