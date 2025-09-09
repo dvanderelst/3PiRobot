@@ -83,9 +83,9 @@ class Client:
         self._send_dict({'action': 'parameter', parameter: value})
         self.print_message(f"Changed settings in {time.time() - start:.4f}s")
 
-    def change_free_ping_interval(self, interval):
-        """Change the free ping interval on the robot."""
-        self.change_robot_setting('free_ping_interval', interval)
+    def change_free_ping_period(self, period):
+        """Change the free ping period on the robot."""
+        self.change_robot_setting('free_ping_period', period)
 
     def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0):
         start = time.time()
@@ -94,7 +94,7 @@ class Client:
         self._send_dict(dictionary)
         self.print_message(f"step sent (d={distance}, a={angle}) in {time.time() - start:.4f}s")
 
-    def measure(self, action, plot=False):
+    def acquire(self, action, plot=False):
         # assure that action is either 'ping' or 'listen'
         error_message = f"Invalid action '{action}'. Action must be either 'ping' or 'listen'."
         if action not in ['ping', 'listen']: raise ValueError(error_message)
@@ -122,11 +122,11 @@ class Client:
         return data, distance_axis, timing_info
 
     def listen(self, plot=False):
-        data, distance_axis, timing_info = self.measure(action='listen', plot=plot)
+        data, distance_axis, timing_info = self.acquire(action='listen', plot=plot)
         return data, distance_axis, timing_info
 
     def ping(self, plot=False):
-        data, distance_axis, timing_info = self.measure(action='ping', plot=plot)
+        data, distance_axis, timing_info = self.acquire(action='ping', plot=plot)
         return data, distance_axis, timing_info
 
     def ping_process(self, plot=False, close_after=False, selection_mode='first'):

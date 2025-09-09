@@ -69,7 +69,7 @@ def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=No
     ax_top.set_xticklabels([str(i) for i in indices])
     ax_top.set_xlabel("Index")
 
-    plt.xlabel('Distance [m]')
+    plt.xlabel('Raw Distance [m]')
     plt.ylabel('Value [Arbitrary]')
     if labels_set: plt.legend()
     plt.title(title)

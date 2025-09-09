@@ -1,85 +1,106 @@
 from machine import Pin, ADC
 import time
 import array
-import settings  # Your custom settings file
+import settings
 
+# ─────────────────────────────────────────────
+# unified acquisition
+# ─────────────────────────────────────────────
 
-def pulse():
+def emit_pulse(pin):
+    pin.value(0)
+    time.sleep_us(10)
+    pin.value(1)
+    time.sleep_us(50)
+    pin.value(0)
+
+def acquire(mode, sample_rate=10000, n_samples=100):
+    """
+    mode: 'ping' | 'pulse' | 'listen'
+    sample_rate (Hz): used for 'ping' and 'listen'
+    n_samples: number of samples for 'ping' and 'listen'
+
+    Returns (buf0, buf1, buf2, timing_info)
+      - buf0 : ADC settings.adc_recv1
+      - buf1 : ADC settings.adc_recv2
+      - buf2 : ADC settings.adc_emitter  (emitter monitor channel)
+      - timing_info: dict with timestamps/diagnostics
+      - For 'pulse': buf0, buf1, buf2 are all None
+    """
+    timeout_us = 100_000
+    post_emit_settle_us = 20
+    threshold = settings.pulse_threshold
+
+    mode = str(mode).lower()
+
+    # Emitter pin
     trigger_emitter = Pin(settings.trigger_emitter, Pin.OUT)
-    # Mute the receiver sensors by pulling their trigger pins low
+    # Keep MaxBotix receivers in receive-only mode
     Pin(settings.trigger_recv1, Pin.OUT).value(0)
     Pin(settings.trigger_recv2, Pin.OUT).value(0)
-    # ───── Trigger Emitter ─────
-    trigger_emitter.value(0)
-    time.sleep_us(10)
-    trigger_emitter.value(1)
-    time.sleep_us(50)
-    trigger_emitter.value(0)
 
-
-def measure(sample_rate, n_samples, wait_for_emission=True):
-    # ───── Use pin assignments from settings ─────
-    trigger_emitter = Pin(settings.trigger_emitter, Pin.OUT)
-    adc_emit  = ADC(settings.adc_emitter)
+    # ADCs
+    adc_emit  = ADC(settings.adc_emit)
     adc_recv1 = ADC(settings.adc_recv1)
     adc_recv2 = ADC(settings.adc_recv2)
 
-    # Mute the receiver sensors by pulling their trigger pins low
-    Pin(settings.trigger_recv1, Pin.OUT).value(0)
-    Pin(settings.trigger_recv2, Pin.OUT).value(0)
+    timing_info = {}
+    t_start = time.ticks_us()
 
-    delay_us = int(1_000_000 / sample_rate)
-    pulse_threshold = settings.pulse_threshold
+    # ── Mode: pulse ──
+    if mode == 'pulse':
+        emit_pulse(trigger_emitter)
+        timing_info['mode'] = 'pulse'
+        timing_info['total_duration_us'] = time.ticks_diff(time.ticks_us(), t_start)
+        return None, None, None, timing_info
 
-    # ───── Buffers ─────
-    buf0 = array.array("H", [0] * n_samples)
-    buf1 = array.array("H", [0] * n_samples)
-    buf2 = array.array("H", [0] * n_samples)
+    # ── For capture modes ──
+    if not sample_rate or sample_rate <= 0:
+        raise ValueError("sample_rate must be > 0 for 'ping' and 'listen'")
+    if not n_samples or n_samples <= 0:
+        raise ValueError("n_samples must be > 0 for 'ping' and 'listen'")
 
-    # ───── Timing t0: Before triggering ─────
-    t0 = time.ticks_us()
+    buf0 = array.array('H', (0 for _ in range(n_samples)))  # recv1
+    buf1 = array.array('H', (0 for _ in range(n_samples)))  # recv2
+    buf2 = array.array('H', (0 for _ in range(n_samples)))  # emitter monitor
 
-    # ───── Trigger Emitter ─────
-    if wait_for_emission:
-        trigger_emitter.value(0)
-        time.sleep_us(10)
-        trigger_emitter.value(1)
-        time.sleep_us(50)
-        trigger_emitter.value(0)
+    if mode == 'ping':
+        emit_pulse(trigger_emitter)
+        time.sleep_us(post_emit_settle_us)
+        t_wait_start = time.ticks_us()
+        while True:
+            if adc_emit.read_u16() > threshold:
+                timing_info['timeout'] = False
+                break
+            if time.ticks_diff(time.ticks_us(), t_wait_start) > timeout_us:
+                timing_info['timeout'] = True
+                break
 
-    # ───── Timing t1: After trigger ─────
-    t1 = time.ticks_us()
+        t_gate = time.ticks_us()
+        timing_info['mode'] = 'ping'
+        timing_info['threshold_detect_us'] = time.ticks_diff(t_gate, t_start)
+        timing_info['threshold_wait_us']   = time.ticks_diff(t_gate, t_wait_start)
 
-    # ───── Wait for Emission Pulse ─────
-    start_wait = time.ticks_us()
-    timeout_us = 100_000  # Max wait time: 100 ms
-    while True:
-        val = adc_emit.read_u16()
-        if val > pulse_threshold: break
-        if time.ticks_diff(time.ticks_us(), start_wait) > timeout_us:
-            print("Timeout waiting for pulse")
-            break
+    else:  # mode == 'listen'
+        t_gate = time.ticks_us()
+        timing_info['mode'] = 'listen'
+        timing_info['threshold_detect_us'] = 0
 
-    # ───── Timing t2: After threshold detected ─────
-    t2 = time.ticks_us()
+    # ── Timed sampling loop (absolute schedule) ──
+    period_us = int(1_000_000 // int(sample_rate))
+    if period_us <= 0: raise ValueError("sample_rate too high for microsecond scheduling")
 
-    # ───── Sampling Loop ─────
+    next_due = t_gate
     for i in range(n_samples):
+        while time.ticks_diff(time.ticks_us(), next_due) < 0: pass
+        # Read receivers and emitter monitor each sample tick
         buf0[i] = adc_emit.read_u16()
         buf1[i] = adc_recv1.read_u16()
         buf2[i] = adc_recv2.read_u16()
-        time.sleep_us(delay_us)
+        next_due = time.ticks_add(next_due, period_us)
 
-    # ───── Timing t3: After sampling ─────
-    t3 = time.ticks_us()
-
-    # ───── Timing Info ─────
-    timing_info = {
-        'triggering duration':       time.ticks_diff(t1, t0),
-        'threshold detect (us)':     time.ticks_diff(t2, t1),
-        'sampling duration (us)':    time.ticks_diff(t3, t2),
-        'total duration (us)':       time.ticks_diff(t3, t0),
-    }
+    t_end = time.ticks_us()
+    timing_info['sampling_duration_us'] = time.ticks_diff(t_end, t_gate)
+    timing_info['total_duration_us']    = time.ticks_diff(t_end, t_start)
 
     return buf0, buf1, buf2, timing_info
-
