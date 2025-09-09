@@ -3,6 +3,8 @@ from matplotlib import pyplot as plt
 from Library import Utils
 from Library.Utils import draw_integration_box
 
+
+
 def shift2right(arr, n):
     if n <= 0: return arr.copy()
     shifted = np.empty_like(arr)
@@ -112,20 +114,31 @@ def locate_echo(client, data, calibration, selection_mode='first'):
 
 
 
-def plot_locate_echo(raw_results, file_name=None, close_after=False):
+def plot_locate_echo(raw_results, file_name=None, close_after=False, calibration=None):
     # Get config values
     configuration = raw_results['client_configuration']
     sample_rate = configuration.sample_rate
 
-    # Get processing results
+    # If a configuration is provided, we can try to correct the distance axis
+    if calibration is None: calibration = {}
+    distance_coefficient = calibration.get('distance_coefficient', None)
+    distance_intercept = calibration.get('distance_intercept', None)
 
+    # Get processing results
     data = raw_results['data']
     onset = raw_results['onset']
     offset = raw_results['offset']
     crossed = raw_results['crossed']
-    raw_distance_axis = raw_results['raw_distance_axis']
     threshold = raw_results['threshold']
     selection_mode = raw_results['selection_mode']
+
+    distance_axis = raw_results['raw_distance_axis']
+    use_corrected_distance_axis = False
+    xlabel = 'Raw Distance (not corrected) [m]'
+    if distance_coefficient is not None:
+        use_corrected_distance_axis = True
+        distance_axis = distance_intercept + distance_coefficient * distance_axis
+        xlabel = 'Corrected Distance [m]'
 
     # Color for onset marker
     fixed_onset = isinstance(selection_mode, int)
@@ -139,21 +152,21 @@ def plot_locate_echo(raw_results, file_name=None, close_after=False):
 
     plt.figure(figsize=(12, 3))
     ax1 = plt.subplot(111)
-    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue', label='Left')
-    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red', label='Right')
-    ax1.plot(raw_distance_axis, threshold, color='black', linestyle='--', label='Threshold')
+    Utils.sonar_plot(data[:, 1], sample_rate=sample_rate, yrange=yrange, color='blue', label='Left', distance_axis=distance_axis)
+    Utils.sonar_plot(data[:, 2], sample_rate=sample_rate, yrange=yrange, color='red', label='Right', distance_axis=distance_axis)
+    ax1.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
 
     min_in_window = np.min(data[onset:offset, :])
     max_in_window = np.max(data[onset:offset, :])
-    window_start = raw_distance_axis[onset]
-    window_end = raw_distance_axis[offset - 1]
+    window_start = distance_axis[onset]
+    window_end = distance_axis[offset - 1]
     box_extent = [window_start, window_end, min_in_window, max_in_window]
     if crossed: draw_integration_box(ax1, box_extent, color='gray', alpha=0.3, onset_color=onset_color)
 
     ax1.set_facecolor('#f5f5dc')
-    ax1.set_xlabel('Raw Distance (not corrected) [m]')
+    ax1.set_xlabel(xlabel)
     ax1.set_ylabel("Amplitude")
-    ax1.set_title(f'Sonar processing\nselection mode: {selection_mode}')
+    ax1.set_title(f'Plot Locate Echo\nselection mode: {selection_mode}')
     ax1.legend(loc='upper right')
 
     plt.tight_layout()

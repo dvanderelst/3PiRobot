@@ -1,8 +1,11 @@
 import shutil, os
 import subprocess
+import sys
 from library import settings
 from pathlib import Path
 import time
+
+prepend = []
 
 def make_staging_copy(source_dir, dest_dir='staging', full=False):
     clock_skew_sec = 5
@@ -50,11 +53,12 @@ def remove_same(port, staged_root, show=True):
     removed, failed = 0, 0
     for i in range(0, len(files), batch_size):
         chunk = files[i:i+batch_size]
-        cmd = ["rshell", "-p", port, "rm"] + chunk
+        cmd = prepend + ["rshell", "-p", port, "rm"] + chunk
         if show: print(f"[{port}] rm batch {i//batch_size+1} ({len(chunk)} files)")
         try:
             if stream:
                 subprocess.run(cmd, check=True, text=True)
+
             else:
                 res = subprocess.run(cmd, check=True, text=True, capture_output=True)
                 if show and res.stdout.strip(): print(res.stdout, end="")
@@ -70,12 +74,12 @@ def remove_same(port, staged_root, show=True):
 
 def upload(port, local_dir, baud=115200, mirror=True):
     local_dir = Path(local_dir).resolve().as_posix() + "/"
-    rsync_cmd = ["rshell", "-p", port, "-b", str(baud), "rsync"]
+    rsync_cmd = prepend + ["rshell", "-p", port, "-b", str(baud), "rsync"]
     if mirror: rsync_cmd.append("-m")  # delete extras on board
     rsync_cmd.extend([local_dir, "/pyboard/"])
     print(f"\n=== Uploading to {port} ===")
     print(" ".join(rsync_cmd))
     subprocess.run(rsync_cmd, check=True)
-    ls_cmd = ["rshell", "-p", port, "-b", str(baud), "ls", "/pyboard"]
+    ls_cmd = prepend + ["rshell", "-p", port, "-b", str(baud), "ls", "/pyboard"]
     print("\n=== Contents of /pyboard on", port, "===")
     subprocess.run(ls_cmd, check=True)
