@@ -134,7 +134,7 @@ class Client:
         file_name = None
         if isinstance(plot, str): file_name = plot
         raw_results = Process.locate_echo(self, data, calibration, selection_mode)
-        if plot: Process.plot_locate_echo(raw_results, file_name, close_after)
+        if plot: Process.plot_locate_echo(raw_results, file_name, close_after,calibration)
         results.update(raw_results)
 
         # Try to correct the results based on the calibration

@@ -23,9 +23,9 @@ def compare_configurations(config1, config2):
         matches = sample_rate_same and samples_same
         return matches
 
-def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=None):
+def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=None, distance_axis=None):
     samples = data.shape[0]
-    distance_axis = get_distance_axis(sample_rate, samples)
+    if distance_axis is None: distance_axis = get_distance_axis(sample_rate, samples)
     x_max = float(distance_axis[-1])
     y_max = np.nanmax(data)
     if not np.isfinite(y_max): y_max = 1.0

@@ -92,7 +92,6 @@ def get_distance_data(client, calibration, real_distance, nr_repeats=10):
         raw_result = Process.locate_echo(client, data, calibration, selection_mode='first')
         Process.plot_locate_echo(raw_result, file_name=file_name, close_after=close_after)
         raw_results.append(raw_result)
-        raw_results.append(raw_result)
         time.sleep(0.25)
     raw_distances = np.array([result['raw_distance'] for result in raw_results])
     zeros = np.array([result['raw_iid'] for result in raw_results])
@@ -133,8 +132,6 @@ def distance_fit(robot_name, distance1, distance2, raw_distances1, raw_distances
 def get_sweep_data(client, calibration, sweep_angles):
     nr_of_steps = len(sweep_angles)
     sweep_steps = angles2steps(sweep_angles)
-    print(sweep_steps)
-
     all_sweep_data = []
     for index, step in enumerate(sweep_steps):
         current_angle = sweep_angles[index]

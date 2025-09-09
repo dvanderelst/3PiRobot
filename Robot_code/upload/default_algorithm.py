@@ -27,7 +27,7 @@ def main(selected_ssid=None):
     led.set_all('off')
 
     # ───────────────────── Wi-Fi Setup ─────────────────────
-    bridge, ip, ssid = wifi.setup_wifi()
+    bridge, ip, ssid = wifi.setup_wifi(ssids=selected_ssid)
     if bridge is None: beeper.play('error')
     if bridge is not None: beeper.play('wifi_connected'); led.set(0, 'green')
     display.clear()

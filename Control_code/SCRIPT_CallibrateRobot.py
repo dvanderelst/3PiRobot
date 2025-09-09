@@ -2,23 +2,21 @@ from Library import Client
 from Library import FileOperations
 from Library import Callibration
 from Library import Process
-from os import path
 import  easygui
-import plots
 import numpy as np
 
 # ─── Baseline collection Settings ────
-robot_nr = 1
-repeats = 3
+robot_nr = 2
+repeats = 10
 real_distance1 = 0.3 # meters
 real_distance2 = 0.5 # meters
 angles = [-40, -30, -20, -10, 0, 10, 20, 30, 40]
-collect_baseline = False
+collect_baseline = True
 collect_distance_calibration = True
 collect_sweep_data = True
 # ─────────────────────────────────────
 
-client = Client.Client(robot_nr, ip='192.168.1.13')
+client = Client.Client(robot_nr)
 client.change_free_ping_interval(0) #To ensure no free pings are done during callibration
 
 robot_name = client.configuration.robot_name
@@ -74,3 +72,5 @@ if collect_sweep_data:
     calibration['sweep_angles'] = sweep_results['sweep_angles']
     FileOperations.save_calibration(robot_name, calibration)
 
+print(calibration['distance_intercept'])
+print(calibration['distance_coefficient'])
