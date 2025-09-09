@@ -24,3 +24,5 @@ trigger_recv2 = 24 # used to pull down and avoid these triggering
 
 adc_emitter = 0 # used for emission detection
 trigger_emitter = 22
+
+measure_guard_ms = 50 #wait at least this long after last free-run pulse before measuring in ping mode to avoid catching own pulse

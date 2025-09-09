@@ -88,6 +88,7 @@ def main(selected_ssid=None):
         'display': display,
     }
     set_free_run(0, state)  # start disabled
+    measure_guard_ms = settings.measure_guard_ms
 
     while True:
         # ── Wi-Fi commands ──
@@ -143,11 +144,20 @@ def main(selected_ssid=None):
                     if abs(distance) > 0: drive.drive_distance(distance, linear_speed)
 
                 elif action in ['ping', 'listen']:
-                    wait_for_emission = True
-                    if action == 'listen': wait_for_emission = False
+                    wait_for_emission = (action != 'listen')
                     display.write(0, action)
                     sample_rate = cmd.get('sample_rate')
                     samples = cmd.get('samples')
+
+                    # If this is an explicit 'ping' AND free-run is active,
+                    # wait 'measure_guard_ms' after the last free-run pulse
+                    # to avoid catching your own pulse in the recording.
+                    if action == 'ping' and state['period'] > 0 and state['last_mark'] is not None:
+                        since_last = ticks_diff(ticks_ms(), state['last_mark'])
+                        if since_last < measure_guard_ms:
+                            to_wait = measure_guard_ms - since_last
+                            # precise ms sleep; avoids busy spin
+                            time.sleep_ms(int(to_wait))
 
                     led.set(0, 'red')
                     buf0, buf1, buf2, timing_info = sonar.measure(sample_rate, samples, wait_for_emission)

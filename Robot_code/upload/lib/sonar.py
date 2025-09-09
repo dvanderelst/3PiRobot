@@ -40,11 +40,12 @@ def measure(sample_rate, n_samples, wait_for_emission=True):
     t0 = time.ticks_us()
 
     # ───── Trigger Emitter ─────
-    trigger_emitter.value(0)
-    time.sleep_us(10)
-    trigger_emitter.value(1)
-    time.sleep_us(50)
-    trigger_emitter.value(0)
+    if wait_for_emission:
+        trigger_emitter.value(0)
+        time.sleep_us(10)
+        trigger_emitter.value(1)
+        time.sleep_us(50)
+        trigger_emitter.value(0)
 
     # ───── Timing t1: After trigger ─────
     t1 = time.ticks_us()
@@ -53,7 +54,6 @@ def measure(sample_rate, n_samples, wait_for_emission=True):
     start_wait = time.ticks_us()
     timeout_us = 100_000  # Max wait time: 100 ms
     while True:
-        if not wait_for_emission: break
         val = adc_emit.read_u16()
         if val > pulse_threshold: break
         if time.ticks_diff(time.ticks_us(), start_wait) > timeout_us:

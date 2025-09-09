@@ -4,6 +4,7 @@ import msgpack
 import numpy as np
 import time
 
+from matplotlib import pyplot as plt
 
 from Library import Process
 from Library import Utils
@@ -114,7 +115,9 @@ class Client:
         timing_info = msg['timing_info']
 
         self.print_message(f"Ping took {time.time() - start:.4f}s")
-        if plot: Utils.sonar_plot(data, sample_rate)
+        if plot:
+            Utils.sonar_plot(data, sample_rate)
+            plt.show()
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
         return data, distance_axis, timing_info
 

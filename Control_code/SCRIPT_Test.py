@@ -4,7 +4,6 @@ from Library import Client
 from matplotlib import pyplot as plt
 
 
-
 client = Client.Client(robot_number=2)
 client.change_free_ping_interval(0)
 
