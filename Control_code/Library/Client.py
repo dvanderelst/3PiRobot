@@ -3,9 +3,7 @@ import struct
 import msgpack
 import numpy as np
 import time
-import pickle
 
-from os import path
 
 from Library import Process
 from Library import Utils
@@ -95,7 +93,10 @@ class Client:
         self._send_dict(dictionary)
         self.print_message(f"step sent (d={distance}, a={angle}) in {time.time() - start:.4f}s")
 
-    def ping(self, plot=False):
+    def measure(self, action, plot=False):
+        # assure that action is either 'ping' or 'listen'
+        error_message = f"Invalid action '{action}'. Action must be either 'ping' or 'listen'."
+        if action not in ['ping', 'listen']: raise ValueError(error_message)
         start = time.time()
         sample_rate = self.configuration.sample_rate
         samples = self.configuration.samples
@@ -104,7 +105,7 @@ class Client:
         left_channel = self.configuration.left_channel
         right_channel = self.configuration.right_channel
 
-        self._send_dict({'action': 'ping', 'sample_rate': sample_rate, 'samples': samples})
+        self._send_dict({'action': action, 'sample_rate': sample_rate, 'samples': samples})
         msg = self._recv_msgpack()
         self._send_dict({'action': 'acknowledge'})  # send ack back
         data = np.array(msg['data'], dtype=np.uint16).reshape((3, samples)).T
@@ -115,6 +116,14 @@ class Client:
         self.print_message(f"Ping took {time.time() - start:.4f}s")
         if plot: Utils.sonar_plot(data, sample_rate)
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
+        return data, distance_axis, timing_info
+
+    def listen(self, plot=False):
+        data, distance_axis, timing_info = self.measure(action='listen', plot=plot)
+        return data, distance_axis, timing_info
+
+    def ping(self, plot=False):
+        data, distance_axis, timing_info = self.measure(action='ping', plot=plot)
         return data, distance_axis, timing_info
 
     def ping_process(self, plot=False, close_after=False, selection_mode='first'):
