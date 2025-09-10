@@ -29,11 +29,9 @@ def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=No
     x_max = float(distance_axis[-1])
     y_max = np.nanmax(data)
     if not np.isfinite(y_max): y_max = 1.0
-    y_max = min(y_max, 50000)
     y_min = np.min(data)
-    if yrange is not None:
-        y_max = yrange[1]
-        y_min = yrange[0]
+    y_max = min(y_max, 50000)
+    if yrange is not None: y_max = yrange[1]; y_min = yrange[0]
     # Horizontal axis = distance (x)
     ax = plt.gca()
     dim = data.shape
@@ -61,7 +59,7 @@ def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=No
     ax.grid(which='major', color='darkgray', linestyle='--', linewidth=0.8)
 
     # Add indices
-    indices = np.arange(0, len(distance_axis), step=50)
+    indices = np.arange(0, len(distance_axis), step=100)
     tick_positions = distance_axis[indices]
 
     ax_top = ax.secondary_xaxis('top')
@@ -73,7 +71,6 @@ def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=No
     plt.ylabel('Value [Arbitrary]')
     if labels_set: plt.legend()
     plt.title(title)
-
 
 def get_distance_axis(sample_rate, samples):
     max_d = (343 / 2) * (samples / sample_rate)
