@@ -2,6 +2,7 @@ from machine import Pin, ADC
 import time
 import array
 import settings
+import struct
 
 def now():
     ticks = time.ticks_us()

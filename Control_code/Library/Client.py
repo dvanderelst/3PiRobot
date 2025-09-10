@@ -114,7 +114,10 @@ class Client:
         self._send_dict({'action': 'acknowledge'})  # send ack back
 
         # Reshape and reorder data
-        data = np.array(msg['data'], dtype=np.uint16).reshape((3, samples)).T
+        raw = msg['data']  # the single byte blob
+        arr = np.frombuffer(raw, dtype='<u2')  # length = 3*samples
+        a0, a1, a2 = np.split(arr, [samples, 2 * samples])
+        data = np.column_stack([a0, a1, a2])  # shape: (samples, 3), same as before
         data = data[:, [emitter_channel, left_channel, right_channel]]  # reorder channels
         data = data.astype(np.float32)  # convert to float32 for processing
         timing_info = msg['timing_info']

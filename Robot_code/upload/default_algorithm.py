@@ -166,19 +166,16 @@ def main(selected_ssid=None):
                     # ── Do the acquisition ──
                     display.write(0, action)
                     buf0, buf1, buf2, timing_info = snr.acquire(action, sample_rate, samples)
-                    # ── Resume free-run (re-grid from "now") ──
-                    if prev_period > 0: set_free_run(prev_period, state)
-                    # ── Respond to client ──
-                    if buf0 is not None: buf0 = list(buf0)
-                    if buf1 is not None: buf1 = list(buf1)
-                    if buf2 is not None: buf2 = list(buf2)
-                    data = [buf0, buf1, buf2]
+                    packed = bytes(buf0) + bytes(buf1) + bytes(buf2)
 
                     response = {}
-                    response['data'] = data
+                    response['data'] = packed
                     response['timing_info'] = timing_info
                     response['mode'] = action
+                    print(f'[{action}] {timing_info}')
                     bridge.send_data(response)
+
+                    if prev_period > 0: set_free_run(prev_period, state)
 
                 elif action == 'acknowledge':
                     if verbose: print('[Main] Acknowledgment received')

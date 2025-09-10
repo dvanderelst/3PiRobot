@@ -51,7 +51,7 @@ class WifiServer:
         self.rx_pin = Pin(settings.rx_pin)
         self.en_pin = Pin(settings.en_pin, Pin.OUT)
         self.boot_baud = 74880
-        self.baudrate = 115200
+        self.baudrate = 921600
         self.uart = UART(1, baudrate=self.baudrate, tx=self.tx_pin, rx=self.rx_pin)
         self.verbose = settings.verbose
         self._buf = b""
@@ -294,7 +294,7 @@ class WifiServer:
 
             index += chunk_len
             chunk_id += 1
-            time.sleep(0.05)  # small pause for ESP
+            time.sleep(0.005)  # small pause for ESP
 
         if self.verbose:
             print(f"[ESP] Data sent in {chunk_id} chunk(s), total {total_len} bytes")
