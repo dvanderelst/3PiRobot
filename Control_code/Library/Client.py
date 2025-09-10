@@ -107,17 +107,27 @@ class Client:
         right_channel = self.configuration.right_channel
 
         self._send_dict({'action': action, 'sample_rate': sample_rate, 'samples': samples})
+        start = time.time()
         msg = self._recv_msgpack()
+        end = time.time()
+        print(end - start)
         self._send_dict({'action': 'acknowledge'})  # send ack back
+
+        # Reshape and reorder data
         data = np.array(msg['data'], dtype=np.uint16).reshape((3, samples)).T
         data = data[:, [emitter_channel, left_channel, right_channel]]  # reorder channels
         data = data.astype(np.float32)  # convert to float32 for processing
         timing_info = msg['timing_info']
 
-        self.print_message(f"Ping took {time.time() - start:.4f}s")
-        if plot:
-            Utils.sonar_plot(data, sample_rate)
-            plt.show()
+        # Create messages and plot
+        current_time = time.time()
+        window = 1000 * (samples/sample_rate)
+        duration = current_time - start
+        listen_msg = f"Listening for {window:.1f}ms took {duration:.4f}s"
+        ping_msg = f"Ping (Recording {window:.1f}ms) took {duration:.4f}s"
+        if action == 'listen': self.print_message(listen_msg)
+        if action == 'ping': self.print_message(ping_msg)
+        if plot: Utils.sonar_plot(data, sample_rate);plt.show()
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
         return data, distance_axis, timing_info
 

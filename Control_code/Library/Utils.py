@@ -48,8 +48,8 @@ def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=No
     else:
         ax.plot(distance_axis, data, color=color, marker='.', label=label)
 
-    ax.set_xticks(np.arange(0, x_max + 0.05, 0.05), minor=True)
-    ax.set_xticks(np.arange(0, x_max + 0.25, 0.25))
+    ax.set_xticks(np.arange(0, x_max + 0.25, 0.5), minor=True)
+    ax.set_xticks(np.arange(0, x_max + 0.5, 1))
     ax.set_xlim(left=0, right=x_max)  # clamp to data range
 
     # Vertical axis = signal values (y)
@@ -61,7 +61,7 @@ def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=No
     ax.grid(which='major', color='darkgray', linestyle='--', linewidth=0.8)
 
     # Add indices
-    indices = np.arange(0, len(distance_axis), step=10)
+    indices = np.arange(0, len(distance_axis), step=50)
     tick_positions = distance_axis[indices]
 
     ax_top = ax.secondary_xaxis('top')
