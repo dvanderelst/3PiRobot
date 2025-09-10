@@ -63,10 +63,10 @@ class Client:
         t3 = time.perf_counter()
 
         header_time = f'{1000 * (t1 - t0):.1f}'
-        body_time  = f'{1000 * (t2 - t1):.1f}'
+        body_time   = f'{1000 * (t2 - t1):.1f}'
         unpack_time = f'{1000 * (t3 - t2):.1f}'
         total_time  = f'{1000 * (t3 - t0):.1f}'
-        diagnostic = f"[recv timings ms] h={header_time} b={body_time} u={unpack_time} t={total_time}"
+        diagnostic  = f"[recv timings ms] h={header_time} b={body_time} u={unpack_time} t={total_time}"
         self.print_message(diagnostic)
         return msg
 
