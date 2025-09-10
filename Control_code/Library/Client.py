@@ -49,13 +49,26 @@ class Client:
         self.sock.sendall(prefix + packed)
 
     def _recv_msgpack(self):
-        """Receive a single prefixed msgpack message (or None on error)."""
+        t0 = time.perf_counter()
         pre = self._recv_exact(2)
         if not pre: return None
+        t1 = time.perf_counter()
+
         length = struct.unpack(">H", pre)[0]
         body = self._recv_exact(length)
         if not body: return None
-        return msgpack.unpackb(body, raw=False)
+        t2 = time.perf_counter()
+
+        msg = msgpack.unpackb(body, raw=False)
+        t3 = time.perf_counter()
+
+        header_time = f'{1000 * (t1 - t0):.1f}'
+        body_time  = f'{1000 * (t2 - t1):.1f}'
+        unpack_time = f'{1000 * (t3 - t2):.1f}'
+        total_time  = f'{1000 * (t3 - t0):.1f}'
+        diagnostic = f"[recv timings ms] h={header_time} b={body_time} u={unpack_time} t={total_time}"
+        self.print_message(diagnostic)
+        return msg
 
     def load_calibration(self):
         """Load the calibration file for this robot."""

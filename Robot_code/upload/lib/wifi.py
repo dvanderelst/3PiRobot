@@ -247,7 +247,8 @@ class WifiServer:
                 # skip bad packet and continue
         return msgs
 
-    def send_data(self, obj, conn_id=0, max_chunk_size=1024):
+    def send_data(self, obj, conn_id=0, max_chunk_size=1460):
+        start_time = time.ticks_ms()
         """Send a msgpack-encoded object in chunks with 2-byte length prefix per chunk."""
         try:
             packed = msgpack.dumps(obj)
@@ -294,10 +295,13 @@ class WifiServer:
 
             index += chunk_len
             chunk_id += 1
-            time.sleep(0.005)  # small pause for ESP
+            time.sleep(0.0001)  # small pause for ESP
 
+        end_time = time.ticks_ms()
+        difference = time.ticks_diff(end_time, start_time)
         if self.verbose:
             print(f"[ESP] Data sent in {chunk_id} chunk(s), total {total_len} bytes")
+            print(f"[ESP] Data send time: {difference}")
 
         return success
 
