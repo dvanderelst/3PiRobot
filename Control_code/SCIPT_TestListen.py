@@ -9,7 +9,6 @@ client2.change_free_ping_period(100)
 time.sleep(1)
 print('Go.....')
 data, distance_axis, timing_info = client1.listen(plot=True)
-print(timing_info)
 
 client1.close()
 client2.close()

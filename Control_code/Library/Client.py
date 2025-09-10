@@ -3,7 +3,7 @@ import struct
 import msgpack
 import numpy as np
 import time
-
+import select
 from matplotlib import pyplot as plt
 
 from Library import Process
@@ -32,15 +32,34 @@ class Client:
     def close(self):
         self.sock.close()
 
-    def _recv_exact(self, n):
-        """Receive exactly *n* bytes (or None on socket close)."""
-        buf = b""
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                return None
-            buf += chunk
-        return buf
+    def _recv_exact_timed(self, n: int):
+        buf = bytearray(n)
+        mv = memoryview(buf)
+        got = 0
+        wait_s = 0.0
+        read_s = 0.0
+        timeout = self.sock.gettimeout()
+        while got < n:
+            t0 = time.perf_counter()
+            r, _, _ = select.select([self.sock], [], [], timeout)
+            wait_s += (time.perf_counter() - t0)
+            if not r: return None, wait_s, read_s
+            t1 = time.perf_counter()
+            rcvd = self.sock.recv_into(mv[got:])
+            read_s += (time.perf_counter() - t1)
+            if rcvd == 0: return None, wait_s, read_s
+            got += rcvd
+
+        return mv, wait_s, read_s
+
+    # def _recv_exact(self, n):
+    #     """Receive exactly *n* bytes (or None on socket close)."""
+    #     buf = b""
+    #     while len(buf) < n:
+    #         chunk = self.sock.recv(n - len(buf))
+    #         if not chunk: return None
+    #         buf += chunk
+    #     return buf
 
     def _send_dict(self, dct):
         """Prefix-frame a msgpack dict and send it."""
@@ -50,24 +69,31 @@ class Client:
 
     def _recv_msgpack(self):
         t0 = time.perf_counter()
-        pre = self._recv_exact(2)
+        # 1) Header (2 bytes)
+        pre, wait_h, read_h = self._recv_exact_timed(2)
         if not pre: return None
         t1 = time.perf_counter()
-
         length = struct.unpack(">H", pre)[0]
-        body = self._recv_exact(length)
+        # 2) Body (length bytes)
+        body, wait_b, read_b = self._recv_exact_timed(length)
         if not body: return None
         t2 = time.perf_counter()
-
+        # 3) Unpack
         msg = msgpack.unpackb(body, raw=False)
         t3 = time.perf_counter()
 
-        header_time = f'{1000 * (t1 - t0):.1f}'
-        body_time   = f'{1000 * (t2 - t1):.1f}'
-        unpack_time = f'{1000 * (t3 - t2):.1f}'
-        total_time  = f'{1000 * (t3 - t0):.1f}'
-        diagnostic  = f"[recv timings ms] h={header_time} b={body_time} u={unpack_time} t={total_time}"
-        self.print_message(diagnostic)
+        # # Diagnostics --> This code allows to see where time is spent
+        # first_byte_wait_ms = 1000.0 * wait_h  # time until ANY data arrived
+        # idle_wait_ms = 1000.0 * (wait_h + wait_b)  # total time waiting for readability
+        # read_ms = 1000.0 * (read_h + read_b)  # actual socket read time
+        # unpack_ms = 1000.0 * (t3 - t2)
+        # total_ms = 1000.0 * (t3 - t0)
+        # diagnostic = (
+        #     f"[recv timings ms] first_byte_wait={first_byte_wait_ms:.1f} "
+        #     f"idle_wait={idle_wait_ms:.1f} read={read_ms:.1f} "
+        #     f"unpack={unpack_ms:.1f} total={total_ms:.1f} len={length}"
+        # )
+        # self.print_message(diagnostic)
         return msg
 
     def load_calibration(self):
@@ -120,10 +146,7 @@ class Client:
         right_channel = self.configuration.right_channel
 
         self._send_dict({'action': action, 'sample_rate': sample_rate, 'samples': samples})
-        start = time.time()
         msg = self._recv_msgpack()
-        end = time.time()
-        print(end - start)
         self._send_dict({'action': 'acknowledge'})  # send ack back
 
         # Reshape and reorder data
@@ -133,8 +156,7 @@ class Client:
         data = np.column_stack([a0, a1, a2])  # shape: (samples, 3), same as before
         data = data[:, [emitter_channel, left_channel, right_channel]]  # reorder channels
         data = data.astype(np.float32)  # convert to float32 for processing
-        timing_info = msg['timing_info']
-
+        robot_timing_info = msg['timing_info'] # This is a dict with timing info from the robot
         # Create messages and plot
         current_time = time.time()
         window = 1000 * (samples/sample_rate)
@@ -145,7 +167,7 @@ class Client:
         if action == 'ping': self.print_message(ping_msg)
         if plot: Utils.sonar_plot(data, sample_rate);plt.show()
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
-        return data, distance_axis, timing_info
+        return data, distance_axis, robot_timing_info
 
     def listen(self, plot=False):
         data, distance_axis, timing_info = self.acquire(action='listen', plot=plot)
