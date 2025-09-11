@@ -2,105 +2,103 @@ from machine import Pin, ADC
 import time
 import array
 import settings
+import struct
 
-# ─────────────────────────────────────────────
-# unified acquisition
-# ─────────────────────────────────────────────
+def now():
+    ticks = time.ticks_us()
+    return ticks
 
-def emit_pulse(pin):
-    pin.value(0)
-    time.sleep_us(10)
-    pin.value(1)
-    time.sleep_us(50)
-    pin.value(0)
+def time_since(previous_time):
+    current_time = time.ticks_us()
+    difference = time.ticks_diff(current_time , previous_time)
+    return difference
 
-def acquire(mode, sample_rate=10000, n_samples=100):
-    """
-    mode: 'ping' | 'pulse' | 'listen'
-    sample_rate (Hz): used for 'ping' and 'listen'
-    n_samples: number of samples for 'ping' and 'listen'
+class Sonar:
+    def __init__(self, n_samples=0):
+        self.n_samples = n_samples
+        self.buf0 = None
+        self.buf1 = None
+        self.buf2 = None
+        
+        self.create_buffers()
+        
+        self.adc_emit  = ADC(settings.adc_emit)
+        self.adc_recv1 = ADC(settings.adc_recv1)
+        self.adc_recv2 = ADC(settings.adc_recv2)
+        
+        self.tgr_emit = Pin(settings.trigger_emitter, Pin.OUT)
+        self.tgr_recv1 = Pin(settings.trigger_recv1, Pin.OUT)
+        self.tgr_recv2 = Pin(settings.trigger_recv2, Pin.OUT)
+        
+        self.tgr_emit.value(0)
+        self.tgr_recv1.value(0)
+        self.tgr_recv2.value(0)
+        
+        self.timeout_us = 100_000
+        self.post_emit_settle_us = 20
+        
+    def emit(self):
+        self.tgr_recv1.value(0)
+        self.tgr_recv2.value(0)
+        self.tgr_emit.value(1)
+        time.sleep_us(75)
+        self.tgr_emit.value(0)
+            
+    def create_buffers(self):
+        n_samples = self.n_samples
+        self.buf0 = array.array('H', (0 for _ in range(n_samples)))  
+        self.buf1 = array.array('H', (0 for _ in range(n_samples)))  
+        self.buf2 = array.array('H', (0 for _ in range(n_samples)))
+        
+    def update_buffers(self, n_samples):
+        if n_samples is None: return
+        if not n_samples == self.n_samples:
+            self.n_samples = n_samples
+            self.create_buffers()
+            
+    def fill_buffers(self, sample_rate):
+        sample_period = int(1_000_000 // int(sample_rate)) #in usecs
+        n_samples = self.n_samples
+        next_sample_due = now()
+        for i in range(n_samples):
+            while time.ticks_diff(time.ticks_us(), next_sample_due) < 0: pass
+            self.buf0[i] = self.adc_emit.read_u16()
+            self.buf1[i] = self.adc_recv1.read_u16()
+            self.buf2[i] = self.adc_recv2.read_u16()
+            next_sample_due = time.ticks_add(next_sample_due, sample_period)
 
-    Returns (buf0, buf1, buf2, timing_info)
-      - buf0 : ADC settings.adc_recv1
-      - buf1 : ADC settings.adc_recv2
-      - buf2 : ADC settings.adc_emitter  (emitter monitor channel)
-      - timing_info: dict with timestamps/diagnostics
-      - For 'pulse': buf0, buf1, buf2 are all None
-    """
-    timeout_us = 100_000
-    post_emit_settle_us = 20
-    threshold = settings.pulse_threshold
-
-    mode = str(mode).lower()
-
-    # Emitter pin
-    trigger_emitter = Pin(settings.trigger_emitter, Pin.OUT)
-    # Keep MaxBotix receivers in receive-only mode
-    Pin(settings.trigger_recv1, Pin.OUT).value(0)
-    Pin(settings.trigger_recv2, Pin.OUT).value(0)
-
-    # ADCs
-    adc_emit  = ADC(settings.adc_emit)
-    adc_recv1 = ADC(settings.adc_recv1)
-    adc_recv2 = ADC(settings.adc_recv2)
-
-    timing_info = {}
-    t_start = time.ticks_us()
-
-    # ── Mode: pulse ──
-    if mode == 'pulse':
-        emit_pulse(trigger_emitter)
-        timing_info['mode'] = 'pulse'
-        timing_info['total_duration_us'] = time.ticks_diff(time.ticks_us(), t_start)
-        return None, None, None, timing_info
-
-    # ── For capture modes ──
-    if not sample_rate or sample_rate <= 0:
-        raise ValueError("sample_rate must be > 0 for 'ping' and 'listen'")
-    if not n_samples or n_samples <= 0:
-        raise ValueError("n_samples must be > 0 for 'ping' and 'listen'")
-
-    buf0 = array.array('H', (0 for _ in range(n_samples)))  # recv1
-    buf1 = array.array('H', (0 for _ in range(n_samples)))  # recv2
-    buf2 = array.array('H', (0 for _ in range(n_samples)))  # emitter monitor
-
-    if mode == 'ping':
-        emit_pulse(trigger_emitter)
-        time.sleep_us(post_emit_settle_us)
-        t_wait_start = time.ticks_us()
+    def wait_for_emission(self):
+        threshold = settings.pulse_threshold
+        timeout_us = self.timeout_us
+        start_of_wait = now()
         while True:
-            if adc_emit.read_u16() > threshold:
-                timing_info['timeout'] = False
-                break
-            if time.ticks_diff(time.ticks_us(), t_wait_start) > timeout_us:
-                timing_info['timeout'] = True
-                break
+            if self.adc_emit.read_u16() > threshold: return True
+            if time_since(start_of_wait) > timeout_us: return False
+            time.sleep_us(1)
+     
+    def acquire(self, mode, sample_rate=None, n_samples=None):
+        mode = mode.lower()
+        start_acquire = now()
+        timing_info = {}
+        # ── Mode: pulse ──
+        if mode == 'pulse':
+            self.emit()
+            timing_info['mode'] = 'pulse'
+            timing_info['total_duration_us'] = time_since(start_acquire)
+            return None, None, None, timing_info
+        
+        # ── Modes: pulse or ping──
+        self.update_buffers(n_samples)
 
-        t_gate = time.ticks_us()
-        timing_info['mode'] = 'ping'
-        timing_info['threshold_detect_us'] = time.ticks_diff(t_gate, t_start)
-        timing_info['threshold_wait_us']   = time.ticks_diff(t_gate, t_wait_start)
+        if mode == 'ping':
+            timing_info['emission_delay_us'] = time_since(start_acquire)
+            self.emit()
+            time.sleep_us(self.post_emit_settle_us)
+            emission_detected = self.wait_for_emission()
+            timing_info['emission_detected'] = emission_detected
+        
+        if mode in ['ping', 'listen']: self.fill_buffers(sample_rate)
+        timing_info['total_duration_us'] = time_since(start_acquire)
+        timing_info['mode'] = mode
+        return self.buf0, self.buf1, self.buf2, timing_info
 
-    else:  # mode == 'listen'
-        t_gate = time.ticks_us()
-        timing_info['mode'] = 'listen'
-        timing_info['threshold_detect_us'] = 0
-
-    # ── Timed sampling loop (absolute schedule) ──
-    period_us = int(1_000_000 // int(sample_rate))
-    if period_us <= 0: raise ValueError("sample_rate too high for microsecond scheduling")
-
-    next_due = t_gate
-    for i in range(n_samples):
-        while time.ticks_diff(time.ticks_us(), next_due) < 0: pass
-        # Read receivers and emitter monitor each sample tick
-        buf0[i] = adc_emit.read_u16()
-        buf1[i] = adc_recv1.read_u16()
-        buf2[i] = adc_recv2.read_u16()
-        next_due = time.ticks_add(next_due, period_us)
-
-    t_end = time.ticks_us()
-    timing_info['sampling_duration_us'] = time.ticks_diff(t_end, t_gate)
-    timing_info['total_duration_us']    = time.ticks_diff(t_end, t_start)
-
-    return buf0, buf1, buf2, timing_info

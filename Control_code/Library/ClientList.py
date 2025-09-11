@@ -8,8 +8,8 @@ class ClientConfig:
     robot_name: str
     ip: str
     # Acquisition settings
-    sample_rate: int = 20000
-    samples: int = 100
+    sample_rate: int = 10000
+    samples: int = 1000
     emitter_channel: int = 0
     left_channel: int = 2
     right_channel: int = 1

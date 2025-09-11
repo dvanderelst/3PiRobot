@@ -9,9 +9,40 @@ from tkinter.scrolledtext import ScrolledText
 from library import tools
 from library import rshell
 from library import settings
+import subprocess
+import time
 
 origin_folder = settings.origin_folder
 staging_folder = settings.staging_folder
+
+# --- streaming rshell helpers (prevents stdout/stderr pipe blocking) ---
+def _stream_to_queue(pipe, q, tag="log"):
+    try:
+        for line in iter(pipe.readline, ''):
+            q.put((tag, line.rstrip("\n")))
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
+def run_rshell_streaming(cmd_list, q):
+    # Launch rshell and stream stdout/stderr into the GUI message queue.
+    # Returns the process return code (int).
+    p = subprocess.Popen(
+        cmd_list,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
+    )
+    t_out = threading.Thread(target=_stream_to_queue, args=(p.stdout, q, "log"), daemon=True)
+    t_err = threading.Thread(target=_stream_to_queue, args=(p.stderr, q, "log"), daemon=True)
+    t_out.start(); t_err.start()
+    rc = p.wait()
+    q.put(("log", f"[rshell] exit {rc}"))
+    return rc
+# ----------------------------------------------------------------------
 
 def count_files(d):
     p = Path(d)
@@ -159,11 +190,36 @@ class ProgressUI:
                     self.message_queue.put(("tick", 1))
 
                 # 3) Upload
-                if self.cancel: break
+                if self.cancel:
+                    break
                 self.message_queue.put(("status", f"[{port}] uploading"))
                 self.message_queue.put(("log", f"[{port}] uploading"))
                 try:
-                    rshell.upload(port, staging_folder, mirror=full_update)  # mirror when full update
+                    baud = getattr(settings, "baud", 115200)
+                    buffer_size = str(getattr(settings, "rshell_buffer_size", 512))
+                    _staging = str(staging_folder)
+                    if not _staging.endswith("/"):
+                        _staging += "/"
+                    cmd = [
+                        "rshell",
+                        "--buffer-size", buffer_size,
+                        "-p", port,
+                        "-b", str(baud),
+                        "rsync",
+                    ]
+                    if full_update:
+                        cmd.append("--mirror")
+                    cmd += [_staging, "/pyboard/"]
+
+                    cmd_str = " ".join(cmd)
+                    self.message_queue.put(("log", f"[cmd] {cmd_str}"))
+
+                    t0 = time.perf_counter()
+                    rc = run_rshell_streaming(cmd, self.message_queue)
+                    t1 = time.perf_counter()
+                    self.message_queue.put(("log", f"[timing] rsync took {t1 - t0:.2f}s (rc={rc})"))
+                    if rc != 0:
+                        self.message_queue.put(("log", f"[{port}] upload error: rshell exit {rc}"))
                 except Exception as e:
                     self.message_queue.put(("log", f"[{port}] upload error: {e}"))
                 self.message_queue.put(("tick", 1))

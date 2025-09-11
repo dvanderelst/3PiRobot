@@ -46,13 +46,24 @@ def setup_wifi(ssids=None):
 
 
 class WifiServer:
+    """
+    ESP AT Wi‑Fi bridge with robust baud negotiation and chunked send.
+    - Captures boot log at 74,880.
+    - Probes current AT baud, then attempts session-only switch to target.
+    - Uses buffered wait for '>' prompt.
+    - Sends MsgPack frames with a 2‑byte big‑endian length prefix.
+    """
+
     def __init__(self):
         self.tx_pin = Pin(settings.tx_pin)
         self.rx_pin = Pin(settings.rx_pin)
         self.en_pin = Pin(settings.en_pin, Pin.OUT)
+
         self.boot_baud = 74880
-        self.baudrate = 115200
-        self.uart = UART(1, baudrate=self.baudrate, tx=self.tx_pin, rx=self.rx_pin)
+        self.baudrate = 115200     # target baud when available
+        # Create UART; exact baud will be set via _open_uart()
+        self.uart = UART(1, baudrate=self.boot_baud, tx=self.tx_pin, rx=self.rx_pin)
+
         self.verbose = settings.verbose
         self._buf = b""
 
@@ -63,8 +74,49 @@ class WifiServer:
             if self.uart.any():
                 _ = self.uart.read()
 
+    def _open_uart(self, baud):
+        """Re-init UART at a specific baud and flush boot noise."""
+        self.uart.init(baudrate=baud, tx=self.tx_pin, rx=self.rx_pin)
+        self._flush_uart()
+
     def _ok(self, cmd, wait=0.2):
         return "OK" in self.send_cmd(cmd, wait=wait)
+
+    # ---------- baud helpers ----------
+    def _probe_baud(self, candidates=(921600, 115200, 74880, 57600, 38400, 9600)):
+        """Find a baud where 'AT' returns OK."""
+        for b in candidates:
+            self._open_uart(b)
+            resp = self.send_cmd('AT', wait=0.15)
+            if 'OK' in resp:
+                if self.verbose:
+                    print(f"[ESP] Found baud: {b}")
+                return b
+        return None
+
+    def _set_cur_baud(self, target):
+        """
+        Try session-only change first (AT+UART_CUR).
+        Fall back to persistent (AT+UART_DEF) if needed.
+        """
+        # Try CUR (session only)
+        resp = self.send_cmd(f'AT+UART_CUR={target},8,1,0,0', wait=0.2)
+        if 'OK' in resp:
+            self._open_uart(target)
+            ok = 'OK' in self.send_cmd('AT', wait=0.15)
+            return ok
+
+        # Fallback: DEF (persistent across resets)
+        resp = self.send_cmd(f'AT+UART_DEF={target},8,1,0,0', wait=0.2)
+        if 'OK' in resp:
+            # Some firmwares need a reset after DEF
+            self.send_cmd('AT+RST', wait=1.5)
+            time.sleep(0.5)
+            self._open_uart(target)
+            ok = 'OK' in self.send_cmd('AT', wait=0.15)
+            return ok
+
+        return False
 
     # ---------- lifecycle ----------
     def disable(self):
@@ -77,8 +129,9 @@ class WifiServer:
             print("[ESP] ON")
         self.en_pin.value(1)
         time.sleep(1.2)
-        # capture boot log at 74880
-        self.uart.init(baudrate=self.boot_baud, tx=self.tx_pin, rx=self.rx_pin)
+
+        # 1) Listen at boot baud (74,880) to capture boot log
+        self._open_uart(self.boot_baud)
         time.sleep(1)
         if self.uart.any():
             log = self.uart.read()
@@ -87,8 +140,24 @@ class WifiServer:
                     print("[ESP] Boot log:\n", log.decode())
                 except:
                     print("[ESP] Boot log (raw):\n", log)
-        # switch to working baud
-        self.uart.init(baudrate=self.baudrate, tx=self.tx_pin, rx=self.rx_pin)
+
+        # 2) Find the current AT baud and talk at that speed
+        cur = self._probe_baud()
+        if cur is None:
+            if self.verbose:
+                print("[ESP] Could not detect current baud; falling back to 115200")
+            cur = 115200
+            self._open_uart(cur)
+
+        # 3) Switch to target (session-only if possible)
+        if cur != self.baudrate:
+            if self.verbose:
+                print(f"[ESP] Switching baud {cur} -> {self.baudrate}")
+            if not self._set_cur_baud(self.baudrate):
+                if self.verbose:
+                    print("[ESP] Baud switch failed; staying at", cur)
+                # keep using 'cur' if switch failed
+                self._open_uart(cur)
 
     def setup(self):
         """Clean start in STA mode, no auto-reconnect, no association."""
@@ -110,7 +179,10 @@ class WifiServer:
     def send_cmd(self, cmd, wait=0.1):
         if self.verbose > 1:
             print(f"> {cmd}")
-        self.uart.write(cmd + '\r\n')
+        # ensure bytes on MicroPython
+        if isinstance(cmd, str):
+            cmd = cmd.encode()
+        self.uart.write(cmd + b'\r\n')
         time.sleep(wait)
         return self._read_response()
 
@@ -120,14 +192,27 @@ class WifiServer:
         while True:
             if self.uart.any():
                 out += self.uart.read()
-                if b"OK\r\n" in out or b"ERROR\r\n" in out:
+                # Break on common success tokens as well as ERROR
+                if (b"SEND OK" in out) or (b"OK\r\n" in out) or (b"ERROR\r\n" in out):
                     break
             if time.ticks_diff(time.ticks_ms(), start) > timeout_ms:
                 break
         try:
             return out.decode()
         except:
+            # lenient decode for mixed binary/ASCII
             return ''.join(chr(b) for b in out if 32 <= b <= 126 or b in (10, 13))
+
+    def _wait_for_prompt(self, timeout_ms=2000):
+        """Wait for the '>' prompt from CIPSEND using a small buffer."""
+        start = time.ticks_ms()
+        buf = b""
+        while time.ticks_diff(time.ticks_ms(), start) < timeout_ms:
+            if self.uart.any():
+                buf += self.uart.read()
+                if b'>' in buf:
+                    return True
+        return False
 
     # ---------- Scan / Connect ----------
     def scan_presets(self, ssids=None, timeout_ms=8000, details=False, retries=1, gap_ms=400):
@@ -148,7 +233,7 @@ class WifiServer:
         for attempt in range(retries + 1):
             if self.verbose:
                 print(f"[ESP] CWLAP attempt {attempt+1}/{retries+1}")
-            self.uart.write('AT+CWLAP\r\n')
+            self.uart.write(b'AT+CWLAP\r\n')
             start = time.ticks_ms()
             buf = b""
             while True:
@@ -191,7 +276,7 @@ class WifiServer:
         self._ok('AT+CWMODE=1')
         self._ok('AT+CWAUTOCONN=0')
         self._ok('AT+CWQAP')
-        resp = self.send_cmd(f'AT+CWJAP="{ssid}","{password}"', wait=6)
+        resp = self.send_cmd(f'AT+CWJAP="{ssid}","{password}"', wait=8)  # slightly longer wait
         if "OK" in resp or "WIFI CONNECTED" in resp:
             return self.send_cmd('AT+CIFSR')
         if self.verbose:
@@ -247,7 +332,7 @@ class WifiServer:
                 # skip bad packet and continue
         return msgs
 
-    def send_data(self, obj, conn_id=0, max_chunk_size=1024):
+    def send_data(self, obj, conn_id=0, max_chunk_size=1460):
         """Send a msgpack-encoded object in chunks with 2-byte length prefix per chunk."""
         try:
             packed = msgpack.dumps(obj)
@@ -270,17 +355,12 @@ class WifiServer:
 
             # Send AT+CIPSEND command for this chunk
             self.uart.write(f"AT+CIPSEND={conn_id},{chunk_len}\r\n")
-            t0 = time.ticks_ms()
 
-            # Wait for '>' prompt
-            while True:
-                if self.uart.any():
-                    if b'>' in self.uart.read():
-                        break
-                if time.ticks_diff(time.ticks_ms(), t0) > 2000:
-                    if self.verbose:
-                        print(f"[ESP] Timed out waiting for '>' on chunk {chunk_id}")
-                    return False
+            # Wait for '>' prompt (buffered)
+            if not self._wait_for_prompt(timeout_ms=2000):
+                if self.verbose:
+                    print(f"[ESP] Timed out waiting for '>' on chunk {chunk_id}")
+                return False
 
             self.uart.write(chunk)
             resp = self._read_response()
@@ -294,7 +374,7 @@ class WifiServer:
 
             index += chunk_len
             chunk_id += 1
-            time.sleep(0.05)  # small pause for ESP
+            # No sleep needed; we wait for 'SEND OK'
 
         if self.verbose:
             print(f"[ESP] Data sent in {chunk_id} chunk(s), total {total_len} bytes")

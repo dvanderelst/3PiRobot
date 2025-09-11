@@ -16,9 +16,7 @@ ticks_ms   = time.ticks_ms
 ticks_add  = time.ticks_add
 ticks_diff = time.ticks_diff
 
-# ─────────────────────────────────────────────────────────────
-# Free-run scheduler helpers (no nested defs)
-# ─────────────────────────────────────────────────────────────
+
 def set_free_run(val_ms, state):
     """
     Enable/disable the free-run pulser and (re)grid its next deadline.
@@ -41,10 +39,13 @@ def main(selected_ssid=None):
     # ───────────────────── Initialization ─────────────────────
     beeper.play('startup_proc')
     print('[Main] Initializing systems...')
+    verbose = settings.verbose
+
     heartbeat_interval = 1000  # ms
     minimum_free_range_period = settings.minimum_free_range_period
     measure_guard_ms = settings.measure_guard_ms
-    verbose = settings.verbose
+
+
     led = leds.LEDs()
     display = screen.Screen()
     bump = bumpers.Bumpers(leds=led)
@@ -57,17 +58,11 @@ def main(selected_ssid=None):
 
     # ───────────────────── Wi-Fi Setup ─────────────────────
     bridge, ip, ssid = wifi.setup_wifi(ssids=selected_ssid)
-    beeper.play('wifi_connected'); led.set(0, 'green')
     display.clear()
     display.write(0, 'Connected')
     display.write(1, ssid or '')
     display.write(2, ip or '')
 
-    # ───────────────────── Startup pulses ─────────────────────
-    print("[Main] Performing startup pulses...")
-    for _ in range(5):
-        sonar.acquire('pulse')      # emit only; no capture
-        time.sleep(0.05)
     # ───────────────────── Main Loop ─────────────────────
     print('[Main] Entering main loop...')
     current_led_color = 'blue'
@@ -77,7 +72,6 @@ def main(selected_ssid=None):
     command_queue = []
 
     display.write(0, 'Ready')
-    beeper.play('main_loop')
 
     # ── Free-run pulser state ──
     state = {
@@ -87,6 +81,13 @@ def main(selected_ssid=None):
         'display': display,
     }
     set_free_run(0, state)  # start disabled
+    #Set color toggling
+    led.set_toggle_colors(0, ['red', 'green', 'blue'])
+    led.set_toggle_colors(2, ['orange' , 'blue'])
+    beeper.play('main_loop')
+
+    # Initialize sonar. Wait until here to avoid clash with buzzer
+    snr = sonar.Sonar()
 
     while True:
         # Cache "now" once per loop for consistent timing decisions
@@ -164,20 +165,17 @@ def main(selected_ssid=None):
 
                     # ── Do the acquisition ──
                     display.write(0, action)
-                    buf0, buf1, buf2, timing_info = sonar.acquire(action, sample_rate, samples)
-                    # ── Resume free-run (re-grid from "now") ──
-                    if prev_period > 0: set_free_run(prev_period, state)
-                    # ── Respond to client ──
-                    if buf0 is not None: buf0 = list(buf0)
-                    if buf1 is not None: buf1 = list(buf1)
-                    if buf2 is not None: buf2 = list(buf2)
-                    data = [buf0, buf1, buf2]
+                    buf0, buf1, buf2, timing_info = snr.acquire(action, sample_rate, samples)
+                    packed = bytes(buf0) + bytes(buf1) + bytes(buf2)
 
                     response = {}
-                    response['data'] = data
+                    response['data'] = packed
                     response['timing_info'] = timing_info
                     response['mode'] = action
+                    print(f'[{action}] {timing_info}')
                     bridge.send_data(response)
+
+                    if prev_period > 0: set_free_run(prev_period, state)
 
                 elif action == 'acknowledge':
                     if verbose: print('[Main] Acknowledgment received')
@@ -185,7 +183,8 @@ def main(selected_ssid=None):
         # ── Free-running pulsing (drift-free absolute schedule) ──
         if state['next_due'] is not None and ticks_diff(now, state['next_due']) >= 0:
             # Emit a free-run pulse (no capture)
-            sonar.acquire('pulse')
+            led.toggle_color(0)
+            snr.acquire('pulse')
             # Measure achieved interval (edge-to-edge) for telemetry
             this_mark = ticks_ms()
             interval  = ticks_diff(this_mark, state['last_mark'])
@@ -205,6 +204,5 @@ def main(selected_ssid=None):
 
         # ── LED heartbeat (non-blocking) ──
         if ticks_diff(now, last_heartbeat) >= heartbeat_interval:
-            current_led_color = 'blue' if current_led_color == 'orange' else 'orange'
-            led.set(2, current_led_color)
+            led.toggle_color(2)
             last_heartbeat = now
