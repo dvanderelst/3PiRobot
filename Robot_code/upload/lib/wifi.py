@@ -60,7 +60,7 @@ class WifiServer:
         self.en_pin = Pin(settings.en_pin, Pin.OUT)
 
         self.boot_baud = 74880
-        self.baudrate = 921600     # target baud when available
+        self.baudrate = 115200     # target baud when available
         # Create UART; exact baud will be set via _open_uart()
         self.uart = UART(1, baudrate=self.boot_baud, tx=self.tx_pin, rx=self.rx_pin)
 
