@@ -94,30 +94,6 @@ class WifiServer:
                 return b
         return None
 
-    def _set_cur_baud(self, target):
-        """
-        Try session-only change first (AT+UART_CUR).
-        Fall back to persistent (AT+UART_DEF) if needed.
-        """
-        # Try CUR (session only)
-        resp = self.send_cmd(f'AT+UART_CUR={target},8,1,0,0', wait=0.2)
-        if 'OK' in resp:
-            self._open_uart(target)
-            ok = 'OK' in self.send_cmd('AT', wait=0.15)
-            return ok
-
-        # Fallback: DEF (persistent across resets)
-        resp = self.send_cmd(f'AT+UART_DEF={target},8,1,0,0', wait=0.2)
-        if 'OK' in resp:
-            # Some firmwares need a reset after DEF
-            self.send_cmd('AT+RST', wait=1.5)
-            time.sleep(0.5)
-            self._open_uart(target)
-            ok = 'OK' in self.send_cmd('AT', wait=0.15)
-            return ok
-
-        return False
-
     # ---------- lifecycle ----------
     def disable(self):
         if self.verbose:
@@ -139,25 +115,25 @@ class WifiServer:
                 try:
                     print("[ESP] Boot log:\n", log.decode())
                 except:
-                    print("[ESP] Boot log (raw):\n", log)
+                    print("[ESP] Boot log (binary) length:", len(log))
 
-        # 2) Find the current AT baud and talk at that speed
-        cur = self._probe_baud()
-        if cur is None:
-            if self.verbose:
-                print("[ESP] Could not detect current baud; falling back to 115200")
-            cur = 115200
-            self._open_uart(cur)
+        # 2) Immediately switch the UART (local) to our fixed safe baud
+        #    (No AT+UART_CUR/DEF, no probing—just use 115200 always.)
+        self._open_uart(self.baudrate)
+        if self.verbose:
+            print(f"[ESP] Using fixed baud: {self.baudrate}")
 
-        # 3) Switch to target (session-only if possible)
-        if cur != self.baudrate:
-            if self.verbose:
-                print(f"[ESP] Switching baud {cur} -> {self.baudrate}")
-            if not self._set_cur_baud(self.baudrate):
-                if self.verbose:
-                    print("[ESP] Baud switch failed; staying at", cur)
-                # keep using 'cur' if switch failed
-                self._open_uart(cur)
+        # 3) Minimal clean init at fixed baud
+        #    ATE0 = echo off, CWMODE=1 = STA, CWAUTOCONN=0 = do not auto-join,
+        #    CWQAP = quit AP if any stale connection.
+        self._ok('ATE0')
+        self._ok('AT+CWMODE=1')
+        self._ok('AT+CWAUTOCONN=0')
+        self._ok('AT+CWQAP')
+
+        # Quick sanity check
+        ok = 'OK' in self.send_cmd('AT', wait=0.2)
+        if self.verbose: print("[ESP] AT check:", "OK" if ok else "FAIL")
 
     def setup(self):
         """Clean start in STA mode, no auto-reconnect, no association."""
@@ -215,7 +191,7 @@ class WifiServer:
         return False
 
     # ---------- Scan / Connect ----------
-    def scan_presets(self, ssids=None, timeout_ms=8000, details=False, retries=1, gap_ms=400):
+    def scan_presets(self, ssids=None, timeout_ms=15000, details=False, retries=2, gap_ms=400):
         """
         Robust scan: single unfiltered CWLAP → parse → filter to presets.
         Returns list of SSID strings by default, or list of dicts if details=True.
