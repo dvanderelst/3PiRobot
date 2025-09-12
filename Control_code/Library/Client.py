@@ -6,9 +6,9 @@ import time
 import select
 from matplotlib import pyplot as plt
 
+import Library.Settings
 from Library import Process
 from Library import Utils
-from Library import ClientList
 from Library import FileOperations
 from Library import Logging
 
@@ -16,7 +16,7 @@ from Library import Logging
 class Client:
     def __init__(self, robot_number=0, ip=None):
         index = robot_number - 1
-        configuration = ClientList.get_config(index)
+        configuration = Library.Settings.get_client_config(index)
         self.configuration = configuration
         self.ip = self.configuration.ip
         if ip is not None: self.ip = ip
@@ -25,7 +25,7 @@ class Client:
         self.sock.connect((self.ip, 1234))
         self.calibration = self.load_calibration()
 
-    def print_message(self, message, category="INFO"):
+    def print_message(self, message, category):
         robot_name = self.configuration.robot_name
         Logging.print_message(robot_name, message, category)
 
@@ -82,18 +82,18 @@ class Client:
         msg = msgpack.unpackb(body, raw=False)
         t3 = time.perf_counter()
 
-        # # Diagnostics --> This code allows to see where time is spent
-        # first_byte_wait_ms = 1000.0 * wait_h  # time until ANY data arrived
-        # idle_wait_ms = 1000.0 * (wait_h + wait_b)  # total time waiting for readability
-        # read_ms = 1000.0 * (read_h + read_b)  # actual socket read time
-        # unpack_ms = 1000.0 * (t3 - t2)
-        # total_ms = 1000.0 * (t3 - t0)
-        # diagnostic = (
-        #     f"[recv timings ms] first_byte_wait={first_byte_wait_ms:.1f} "
-        #     f"idle_wait={idle_wait_ms:.1f} read={read_ms:.1f} "
-        #     f"unpack={unpack_ms:.1f} total={total_ms:.1f} len={length}"
-        # )
-        # self.print_message(diagnostic)
+        # Diagnostics --> This code allows to see where time is spent
+        first_byte_wait_ms = 1000.0 * wait_h  # time until ANY data arrived
+        idle_wait_ms = 1000.0 * (wait_h + wait_b)  # total time waiting for readability
+        read_ms = 1000.0 * (read_h + read_b)  # actual socket read time
+        unpack_ms = 1000.0 * (t3 - t2)
+        total_ms = 1000.0 * (t3 - t0)
+        # Add timing info to the message
+        msg['first_byte_wait_ms'] = first_byte_wait_ms
+        msg['idle_wait_ms'] = idle_wait_ms
+        msg['read_ms'] = read_ms
+        msg['unpack_ms'] = unpack_ms
+        msg['total_ms'] = total_ms
         return msg
 
     def load_calibration(self):
@@ -109,7 +109,8 @@ class Client:
         start = time.time()
         dictionary = {'action': 'kinematics', 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
         self._send_dict(dictionary)
-        self.print_message(f"Set_kinematics took {time.time() - start:.4f}s")
+        msg = f"Set_kinematics took {time.time() - start:.4f}s"
+        self.print_message(msg, category='INFO')
 
     def stop_robot(self):
         """Convenience shortcut."""
@@ -120,7 +121,8 @@ class Client:
         start = time.time()
         parameter = str(parameter)
         self._send_dict({'action': 'parameter', parameter: value})
-        self.print_message(f"Changed settings in {time.time() - start:.4f}s")
+        msg = f"Changed settings in {time.time() - start:.4f}s"
+        self.print_message(msg, category='INFO')
 
     def change_free_ping_period(self, period):
         """Change the free ping period on the robot."""
@@ -131,9 +133,10 @@ class Client:
         angle = int(angle)
         dictionary = {'action': 'step', 'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
         self._send_dict(dictionary)
-        self.print_message(f"step sent (d={distance}, a={angle}) in {time.time() - start:.4f}s")
+        msg = f"Step (d={distance}, a={angle}) took {time.time() - start:.4f}s"
+        self.print_message(msg, category='INFO')
 
-    def acquire(self, action, plot=False):
+    def acquire(self, action, plot=False, print_timing=False):
         # assure that action is either 'ping' or 'listen'
         error_message = f"Invalid action '{action}'. Action must be either 'ping' or 'listen'."
         if action not in ['ping', 'listen']: raise ValueError(error_message)
@@ -160,12 +163,20 @@ class Client:
         # Create messages and plot
         current_time = time.time()
         window = 1000 * (samples/sample_rate)
-        duration = current_time - start
-        listen_msg = f"Listening for {window:.1f}ms took {duration:.4f}s"
-        ping_msg = f"Ping (Recording {window:.1f}ms) took {duration:.4f}s"
-        if action == 'listen': self.print_message(listen_msg)
-        if action == 'ping': self.print_message(ping_msg)
+        duration = (current_time - start)*1000.0
+        listen_msg = f"Listening for {window:.1f}ms took {duration:.1f}ms"
+        ping_msg = f"Ping (Recording {window:.1f}ms) took {duration:.1f}ms"
+        if action == 'listen': self.print_message(listen_msg, category='INFO')
+        if action == 'ping': self.print_message(ping_msg, category='INFO')
         if plot: Utils.sonar_plot(data, sample_rate);plt.show()
+
+        self.print_message(f"Robot timing info: {robot_timing_info}", category='DEBUG')
+        self.print_message(f"First byte wait: {msg['first_byte_wait_ms']:.1f}ms", category='DEBUG')
+        self.print_message(f"Idle wait: {msg['idle_wait_ms']:.1f}ms", category='DEBUG')
+        self.print_message(f"Read time: {msg['read_ms']:.1f}ms", category='DEBUG')
+        self.print_message(f"Unpack time: {msg['unpack_ms']:.1f}ms", category='DEBUG')
+        self.print_message(f"Total time: {msg['total_ms']:.1f}ms", category='DEBUG')
+
         distance_axis = Utils.get_distance_axis(sample_rate, samples)
         return data, distance_axis, robot_timing_info
 

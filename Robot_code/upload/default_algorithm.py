@@ -82,7 +82,7 @@ def main(selected_ssid=None):
     }
     set_free_run(0, state)  # start disabled
     #Set color toggling
-    led.set_toggle_colors(0, ['red', 'green', 'blue'])
+    led.set_toggle_colors(0, ['black', 'green', 'red', 'blue'])
     led.set_toggle_colors(2, ['orange' , 'blue'])
     beeper.play('main_loop')
 
