@@ -2,25 +2,27 @@ from Library import Client
 from Library import FileOperations
 from Library import Callibration
 from Library import Process
-import  easygui
+import easygui
 import numpy as np
 
 # ─── Baseline collection Settings ────
-robot_nr = 2
-repeats = 10
+robot_nr = 1
+repeats = 2
 real_distance1 = 0.3 # meters
 real_distance2 = 0.5 # meters
 angles = [-40, -30, -20, -10, 0, 10, 20, 30, 40]
+delete_calibration = True
 collect_baseline = True
 collect_distance_calibration = True
 collect_sweep_data = True
 # ─────────────────────────────────────
 
-client = Client.Client(robot_nr)
-client.change_free_ping_period(0) #To ensure no free pings are done during callibration
+client = Client.Client(robot_nr, ip='192.168.1.13')
+client.change_free_ping_period(0) #To ensure no free pings are done during calibration
 
 robot_name = client.configuration.robot_name
 
+if delete_calibration: FileOperations.delete_calibration(robot_name)
 calibration = FileOperations.load_calibration(robot_name)
 if calibration == {}: message = 'No calibration file found.\nStarting new calibration'
 else: message = 'Calibration file found.\nUpdating calibration.'
@@ -28,7 +30,8 @@ easygui.msgbox(message)
 
 
 if collect_baseline:
-    easygui.msgbox("Starting baseline collection.\nPlease ensure no objects are in front of the robot and press OK.")
+    user_message = "Starting baseline collection.\nPlease ensure no objects are in front of the robot and press OK."
+    easygui.msgbox(user_message)
     baseline_data = Callibration.get_baseline_data(client, nr_repeats=repeats)
     calibration['baseline_present'] = True
     calibration['raw_distance_axis'] = baseline_data['raw_distance_axis']
@@ -37,6 +40,7 @@ if collect_baseline:
     data, _, _ = client.ping()
     raw_result = Process.locate_echo(client, data, calibration)
     FileOperations.save_calibration(robot_name, calibration)
+
 
 if collect_distance_calibration:
     easygui.msgbox(f"Place the object at {real_distance1} meters and press OK.")
@@ -74,3 +78,5 @@ if collect_sweep_data:
 
 print(calibration['distance_intercept'])
 print(calibration['distance_coefficient'])
+
+Callibration.print_calibration_content(calibration)

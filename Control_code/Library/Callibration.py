@@ -6,13 +6,24 @@ from Library import Logging
 from Library import Process
 from Library import Utils
 
+def print_calibration_content(calibration, title=None):
+    if title is None: title = 'Calibration Content'
+    print("─────────────────────────────────────")
+    print(title)
+    print("─────────────────────────────────────")
+    for key in calibration.keys():
+        type_string = type(calibration[key])
+        key = key.capitalize()
+        key = key.ljust(25, '_')
+        print(key, type_string)
+    print("─────────────────────────────────────")
 
 
 def angles2steps(angles):
     angles = np.array(angles)
     steps = np.diff(angles)
     steps = np.insert(steps, 0, angles[0])
-    steps = list(steps)
+    steps = np.array(steps)
     return steps
 
 
@@ -39,8 +50,8 @@ def get_baseline_data(client, nr_repeats=10):
     overall_max = np.max(data_collected) + 500
     overall_min = np.min(data_collected) - 500
     robot_name = client.configuration.robot_name
-    baseline_extent_samples = client.configuration.baseline_extent
-    baseline_extent_distance = raw_distance_axis[baseline_extent_samples]
+    baseline_extent_m = client.configuration.baseline_extent_m
+    _, baseline_extent_s = Utils.find_closest_value(raw_distance_axis, baseline_extent_m)
 
     plt.figure()
     plt.subplot(211)
@@ -48,20 +59,20 @@ def get_baseline_data(client, nr_repeats=10):
     plt.plot(left_mean, color='black')
     plt.ylim(overall_min, overall_max)
     plt.ylabel('Amplitude')
-    plt.xlabel('Index')
+    plt.xlabel('Sample Index')
     plt.grid()
-    plt.title(f'{robot_name}: Left')
-    plt.axvspan(0, baseline_extent_samples, color='grey', alpha=0.25, label='Baseline Extent')
+    plt.title(f'Baseline Data, {robot_name}: Left')
+    plt.axvspan(0, baseline_extent_s, color='grey', alpha=0.25, label='Baseline Extent')
     plt.subplot(212)
     plt.plot(raw_distance_axis, right_measurements, color='red', alpha=0.5)
     plt.plot(raw_distance_axis, right_mean, color='black')
     plt.ylim(overall_min, overall_max)
-    plt.xlabel('Uncorrected Distance')
+    plt.xlabel('Raw Distance')
     plt.ylabel('Amplitude')
     plt.grid()
-    plt.title(f'{robot_name}: Right')
-    plt.axvspan(0, baseline_extent_distance, color='grey', alpha=0.25, label='Baseline Extent')
-    plt.legend(loc='lower left')
+    plt.title(f'Baseline Data, {robot_name}: Right')
+    plt.axvspan(0, baseline_extent_m, color='grey', alpha=0.25, label='Baseline Extent')
+    plt.legend(loc='upper right')
     plt.tight_layout()
 
     plot_filename = FileOperations.get_calibration_plot(robot_name, 'baseline_data')
@@ -149,7 +160,7 @@ def get_sweep_data(client, calibration, sweep_angles):
 
     results = {}
     results['all_data'] = all_sweep_data
-    results['sweep_angles'] = sweep_angles
+    results['sweep_angles'] = np.array(sweep_angles)
     results['sweep_data'] = sweep_data
     results['sweep_onsets'] = sweep_onsets
     results['sweep_iids'] = sweep_iids

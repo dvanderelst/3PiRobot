@@ -1,9 +1,9 @@
 import numpy as np
 from matplotlib import pyplot as plt
+from scipy.interpolate import interp1d
+
 from Library import Utils
 from Library.Utils import draw_integration_box
-
-
 
 def shift2right(arr, n):
     if n <= 0: return arr.copy()
@@ -12,75 +12,92 @@ def shift2right(arr, n):
     shifted[n:] = arr[:-n]
     return shifted
 
-def baseline2threshold(baseline, extent=None, right=0, up=0):
-    if extent is not None: baseline[extent:] = np.min(baseline)
-    samples = len(baseline)
+def monotonize_threshold(baseline):
     flipped = np.flip(baseline)
-    threshold = np.zeros(samples)
-    current_max = 0
-    for i in range(samples):
-        if flipped[i] > current_max: current_max = flipped[i]
-        threshold[i] = current_max
-    threshold = np.flip(threshold)
-    threshold = shift2right(threshold, right)
-    threshold += up
+    cumulative_max = np.maximum.accumulate(flipped)
+    threshold = np.flip(cumulative_max)
     return threshold
 
-def locate_echo(client, data, calibration, selection_mode='first'):
-    # This function processes sonar data using the baseline
-    # in the calibration dictionary, and integrates the signal
-    # to find the echo onset, based on the selection mode.
-    # selection_mode can be 'first', 'max' or an integer index.
 
-    configuration = client.configuration
-    integration_window = configuration.integration_window
-    shift_right = configuration.baseline_shift_right
-    shift_up = configuration.baseline_shift_up
-    extent = configuration.baseline_extent
-
+def get_threshold_function(calibration, extent_m=None, right_m=0, up_a=0):
+    raw_distance_axis = calibration['raw_distance_axis']
     left_baseline = calibration['left_baseline']
     right_baseline = calibration['right_baseline']
+    baseline = np.maximum(left_baseline, right_baseline)
 
-    left_threshold = baseline2threshold(left_baseline, extent, shift_right, shift_up)
-    right_threshold = baseline2threshold(right_baseline, extent, shift_right, shift_up)
-    threshold = np.maximum(left_threshold, right_threshold)
+    if extent_m is not None:
+        _, extent_s = Utils.find_closest_value(raw_distance_axis, extent_m)
+        extent_s = int(np.clip(extent_s, 0, len(baseline)))
+        baseline[extent_s:] = np.min(baseline)
 
-    # Threshold the channels, setting samples below the single threshold to 0
+    baseline = baseline + up_a
+    baseline = monotonize_threshold(baseline)
+    raw_distance_axis = raw_distance_axis + right_m
+    fill_value =(baseline[0], baseline[-1])
+    function = interp1d(raw_distance_axis,baseline, bounds_error=False,fill_value=fill_value)
+    return function
+
+
+def locate_echo(client, data, calibration, selection_mode='first', plot=False):
+    configuration = client.configuration
+    sample_rate = configuration.sample_rate
+    samples = int(configuration.samples)
+    shift_right_m = configuration.baseline_shift_right_m
+    shift_up_a = configuration.baseline_shift_up_a
+    extent_m = configuration.baseline_extent_m
+    integration_window = int(configuration.integration_window_samples)
+    integration_window = max(1, min(integration_window, samples))      # keep [1, samples]
+
+    current_distance_axis = Utils.get_distance_axis(sample_rate, samples)
+    threshold_function = get_threshold_function(calibration, extent_m=extent_m, right_m=shift_right_m, up_a=shift_up_a)
+    threshold = threshold_function(current_distance_axis)
+
+    if plot:
+        plt.figure()
+        plt.plot(current_distance_axis, threshold)
+        plt.title('Threshold Function')
+        plt.xlabel('Raw Distance [m]')
+        plt.ylabel('Amplitude')
+        plt.grid()
+        plt.show()
+
+    # Channels
     left_channel = data[:, 1]
     right_channel = data[:, 2]
 
-    left_thresholded = left_channel * 1.0
-    right_thresholded = right_channel * 1.0
+    # Thresholding
+    left_thresholded = left_channel.astype(float)
+    right_thresholded = right_channel.astype(float)
     left_thresholded[left_thresholded < threshold] = 0
     right_thresholded[right_thresholded < threshold] = 0
-    # This is the maximum of the two channels, after they were thresholded
+
     thresholded = np.maximum(left_thresholded, right_thresholded)
     amount_above_threshold = np.maximum(left_thresholded - threshold, right_thresholded - threshold)
 
     crossed = False
-    onset = data.shape[0] - integration_window
+    onset = max(0, data.shape[0] - integration_window)  # NEW: guard against negative
     offset = data.shape[0]
 
-    # If the selection mode is an integer, use it directly
     if isinstance(selection_mode, int):
-        onset = selection_mode
+        onset = int(selection_mode)
+        onset = max(0, min(onset, samples - 1))                     # NEW: clamp
         offset = min(onset + integration_window, data.shape[0])
-    # If the selection mode is 'first', find the first crossing
+
     elif selection_mode == 'first':
         crossing_indices = np.where(thresholded > 0)[0]
         if len(crossing_indices) > 0:
             onset = int(crossing_indices[0])
             offset = min(onset + integration_window, data.shape[0])
             crossed = True
-    # If the selection mode is 'max', find the crossing extending furthest above threshold
+
     elif selection_mode == 'max':
-        max_idx = np.argmax(amount_above_threshold)
+        max_idx = int(np.argmax(amount_above_threshold))
         crossed = thresholded[max_idx] > threshold[max_idx]
         if crossed:
             half_window = integration_window // 2
             onset = max(0, max_idx - half_window)
             offset = min(onset + integration_window, data.shape[0])
-            onset = offset - integration_window  # re-adjust if cut short at end
+            onset = offset - integration_window  # keep exact length
 
     # Integrate both channels over shared window
     left_integral = float(np.sum(left_channel[onset:offset]))
@@ -91,8 +108,7 @@ def locate_echo(client, data, calibration, selection_mode='first'):
     iid = float(log_integrals[1] - log_integrals[0])
     if not crossed: iid = 0
 
-    raw_distance_axis = calibration['raw_distance_axis']
-    raw_distance = raw_distance_axis[onset]
+    raw_distance = float(current_distance_axis[onset])
 
     raw_results = {
         'data': data,
@@ -100,10 +116,9 @@ def locate_echo(client, data, calibration, selection_mode='first'):
         'offset': int(offset),
         'crossed': crossed,
         'selection_mode': selection_mode,
-        'thresholds': np.array([left_threshold, right_threshold]),
         'threshold': threshold,
         'thresholded': np.array([left_thresholded, right_thresholded]),
-        'raw_distance_axis': raw_distance_axis,
+        'raw_distance_axis': current_distance_axis,
         'integrals': integrals,
         'log_integrals': log_integrals,
         'raw_distance': raw_distance,
@@ -111,7 +126,6 @@ def locate_echo(client, data, calibration, selection_mode='first'):
         'client_configuration': configuration
     }
     return raw_results
-
 
 
 def plot_locate_echo(raw_results, file_name=None, close_after=False, calibration=None):

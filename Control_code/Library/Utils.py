@@ -3,6 +3,12 @@ import numpy as np
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches
 
+def find_closest_value(array, target):
+    array = np.asarray(array)
+    idx = (np.abs(array - target)).argmin()
+    value = array[idx]
+    return value, idx
+
 def is_valid_ip(s):
     if not isinstance(s, str):
         return False
