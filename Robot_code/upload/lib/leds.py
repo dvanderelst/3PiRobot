@@ -1,41 +1,44 @@
 from pololu_3pi_2040_robot import robot
 import time
 
-class LEDs:
-    COLORS = {
-        "off":       [0, 0, 0],
-        "black":     [0, 0, 0],
-        "red":       [255, 0, 0],
-        "green":     [0, 255, 0],
-        "blue":      [0, 0, 255],
-        "yellow":    [255, 255, 0],
-        "cyan":      [0, 255, 255],
-        "magenta":   [255, 0, 255],
-        "white":     [255, 255, 255],
-        "orange":    [255, 128, 0],
-        "purple":    [128, 0, 255],
-        "pink":      [255, 105, 180],
-        "dim_red":   [64, 0, 0],
-        "dim_blue":  [0, 0, 64],
-        "dim_green": [0, 64, 0],
-    }
+COLORS = {
+    "off": [0, 0, 0],
+    "black": [0, 0, 0],
+    "red": [255, 0, 0],
+    "green": [0, 255, 0],
+    "blue": [0, 0, 255],
+    "yellow": [255, 255, 0],
+    "cyan": [0, 255, 255],
+    "magenta": [255, 0, 255],
+    "white": [255, 255, 255],
+    "orange": [255, 128, 0],
+    "purple": [128, 0, 255],
+    "pink": [255, 105, 180],
+    "dim_red": [64, 0, 0],
+    "dim_blue": [0, 0, 64],
+    "dim_green": [0, 64, 0],
+}
 
-    COLORMAPS = {
-        "blue_red":         ["blue", "red"],
-        "blue_green_red":   ["blue", "green", "red"],
-        "grayscale":        ["black", "white"],
-        "hot":              ["black", "red", "orange", "yellow", "white"],
-        "cool":             ["cyan", "blue", "purple"],
-        "spring":           ["magenta", "yellow"],
-        "autumn":           ["red", "orange", "yellow"],
-        "viridis": [
-            [68, 1, 84],
-            [59, 82, 139],
-            [33, 145, 140],
-            [94, 201, 98],
-            [253, 231, 37],
-        ],
-    }
+COLORMAPS = {
+    "blue_black": ["blue", "black"],
+    "blue_red": ["blue", "red"],
+    "blue_green_red": ["blue", "green", "red"],
+    "grayscale": ["black", "white"],
+    "hot": ["black", "red", "orange", "yellow", "white"],
+    "cool": ["cyan", "blue", "purple"],
+    "spring": ["magenta", "yellow"],
+    "autumn": ["red", "orange", "yellow"],
+    "viridis": [
+        [68, 1, 84],
+        [59, 82, 139],
+        [33, 145, 140],
+        [94, 201, 98],
+        [253, 231, 37],
+    ],
+}
+
+class LEDs:
+
 
     def __init__(self):
         self.leds = robot.RGBLEDs()
@@ -120,7 +123,7 @@ class LEDs:
 
     # ─────────────── Gradients / colormaps ───────────────
     def set_gradient(self, index, value, domain=(0, 1), cmap="blue_red", show=True):
-        colors = self.COLORMAPS.get(cmap, ["blue", "red"])
+        colors = COLORMAPS.get(cmap, ["blue", "red"])
         vmin, vmax = domain
         t = 0.0 if vmax == vmin else max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
         n = len(colors) - 1
@@ -169,7 +172,7 @@ class LEDs:
     def resolve_color(self, color):
         """Map a name or [R,G,B] to an RGB list (green scaled for balance)."""
         if isinstance(color, str):
-            base = self.COLORS.get(color.lower(), [0, 0, 0])
+            base = COLORS.get(color.lower(), [0, 0, 0])
         else:
             base = color
         return [base[0], base[1] // 3, base[2]]
