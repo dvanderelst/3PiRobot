@@ -26,6 +26,5 @@ adc_emit = 0 # used for emission detection
 trigger_emitter = 22
 
 # These settings depend on the limits of the sonar sensor
-# See notion notes
-minimum_free_range_period = 45  # minimum period in ms for free-run mode
+
 measure_guard_ms = 150 #wait at least this long after last free-run pulse before measuring in ping mode
