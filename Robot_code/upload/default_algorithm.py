@@ -42,7 +42,6 @@ def main(selected_ssid=None):
     verbose = settings.verbose
 
     heartbeat_interval = 1000  # ms
-    minimum_free_range_period = settings.minimum_free_range_period
     measure_guard_ms = settings.measure_guard_ms
 
 
@@ -131,8 +130,8 @@ def main(selected_ssid=None):
                         display.write(0, 'Set wheel base')
 
                     if new_free_ping_period is not None:
-                        new_free_ping_period = max(minimum_free_range_period, new_free_ping_period)
                         set_free_run(new_free_ping_period, state)
+
 
                 # Discrete move/turn steps
                 elif action == 'step':

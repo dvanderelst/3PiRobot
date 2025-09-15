@@ -18,6 +18,11 @@ def load_calibration(robot_name):
     with open(filename, 'rb') as f: calibration = pickle.load(f)
     return calibration
 
+def delete_calibration(robot_name):
+    filename = get_calibration_file(robot_name)
+    file_exists = path.isfile(filename)
+    if file_exists: os.remove(filename)
+
 def save_calibration(robot_name, calibration):
     filename = get_calibration_file(robot_name)
     with open(filename, 'wb') as f: pickle.dump(calibration, f)
