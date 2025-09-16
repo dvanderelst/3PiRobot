@@ -17,7 +17,7 @@ collect_distance_calibration = False
 collect_sweep_data = False
 # ─────────────────────────────────────
 
-client = Client.Client(robot_nr, ip='192.168.200.38')
+client = Client.Client(robot_nr)
 client.change_free_ping_period(0) #To ensure no free pings are done during calibration
 
 robot_name = client.configuration.robot_name
@@ -39,11 +39,14 @@ if collect_baseline:
     calibration['right_baseline'] = baseline_data['right_mean']
     calibration['samples'] = client.configuration.samples
     calibration['sample_rate'] = client.configuration.sample_rate
-    sonar_package = client.ping()
-    raw_result = Process.locate_echo(client, sonar_package, calibration)
-    Process.plot_locate_echo(raw_result)
     FileOperations.save_calibration(robot_name, calibration)
 
+
+client.load_calibration() # Reload calibration
+sonar_package = client.ping()
+Process.plot_sonar_package(sonar_package)
+sonar_package = Process.locate_echo(sonar_package)
+Process.plot_sonar_package(sonar_package)
 
 # Raise error if the client configuration does not match the calibration file
 # In theory, this is not strictly necessary, but in practice it allows all data in the calibration

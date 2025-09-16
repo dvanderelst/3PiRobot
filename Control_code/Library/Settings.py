@@ -22,7 +22,7 @@ class ClientConfig:
     baseline_extent_m: int = 0.3       # in raw distance, meters
     baseline_shift_right_m: int = 0   # in raw distance, meters
     baseline_shift_up_a: int = 5000     # in amplitude units
-    integration_window_samples: int = 5       # in number of samples
+    integration_window_m: int = 0.1       # in raw distance, meters
 
 client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101")
 client2 = ClientConfig(robot_name="Robot02", ip="192.168.0.102")

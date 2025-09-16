@@ -58,54 +58,12 @@ def compare_configurations(config1, config2):
         matches = sample_rate_same and samples_same
         return matches
 
-def sonar_plot(sonar_package, title='', yrange=None, color='black', label=None, distance_axis=None):
-    sonar_data = sonar_package['sonar_data']
-    if distance_axis is None: distance_axis = sonar_package['raw_distance_axis']
 
-    x_min = float(distance_axis[0])
-    x_max = float(distance_axis[-1])
-    y_min = float(np.nanmin(sonar_data)) - 1000.0
-    y_max = float(np.nanmax(sonar_data)) + 1000.0
-    if yrange is not None: y_min, y_max = yrange
-
-    ax = plt.gca()
-    dim = sonar_data.shape
-    labels_set = False
-
-    if len(dim) == 2 and dim[1] == 3:
-        ax.plot(distance_axis, sonar_data[:, 0], color='grey', marker='.', label='Emitter')
-        ax.plot(distance_axis, sonar_data[:, 1], color='blue',  marker='.', label='Left Channel')
-        ax.plot(distance_axis, sonar_data[:, 2], color='red',   marker='.', label='Right Channel')
-        labels_set = True
-    else:
-        ax.plot(distance_axis, sonar_data, color=color, marker='.', label=label)
-
-    # ---- Adaptive ticks for main x and y axes ----
-    x_ticks, _ = make_ticks(x_min, x_max, steps=[0.025, 0.05, 0.1, 0.2, 0.5, 1], preferred=9)
-    y_ticks, _ = make_ticks(y_min, y_max, steps=[500, 1000, 2000, 5000], preferred=8)
-
-    if x_ticks.size: ax.set_xticks(x_ticks)
-    ax.set_xlim(x_min, x_max)
-
-    if y_ticks.size: ax.set_yticks(y_ticks)
-    ax.set_ylim(y_min, y_max)
-    # ---- Adaptive top axis using indices ----
-    n = len(distance_axis)
-    # Use indices 0..n-1 as the "range" and pick adaptive ticks
-    index_ticks, _ = make_ticks(0, n-1, steps=[10, 20, 50, 100, 200], preferred=10)
-    ax_top = ax.secondary_xaxis('top')
-    # Convert index ticks into positions on the distance axis
-    pos_ticks = distance_axis[index_ticks.astype(int)]
-    ax_top.set_ticks(pos_ticks)
-    ax_top.set_xticklabels([str(int(i)) for i in index_ticks])
-    ax_top.set_xlabel("Index")
-    ax.grid(True, which='both', axis='both')
-
-    plt.xlabel('Raw Distance [m]')
-    plt.ylabel('Value [Arbitrary]')
-    if labels_set: plt.legend()
-    plt.title(title)
-
+def distance2samples(sample_rate, distance_m):
+    speed_of_sound = 343.0
+    t = 2.0 * distance_m / speed_of_sound  # seconds (round trip)
+    n = int(round(t * float(sample_rate)))  # samples
+    return n
 
 def get_distance_axis(sample_rate, samples):
     speed_of_sound = 343.0

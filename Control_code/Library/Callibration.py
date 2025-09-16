@@ -123,7 +123,7 @@ def get_distance_data(client, calibration, real_distance, nr_repeats=10):
         Logging.print_message('Baseline', message, category='INFO')
         data, _, _ = client.ping()
         raw_result = Process.locate_echo(client, data, calibration, selection_mode='first')
-        Process.plot_locate_echo(raw_result, file_name=file_name, close_after=close_after)
+        Process.plot_sonar_package(raw_result, file_name=file_name, close_after=close_after)
         raw_results.append(raw_result)
         time.sleep(0.25)
     raw_distances = np.array([result['raw_distance'] for result in raw_results])

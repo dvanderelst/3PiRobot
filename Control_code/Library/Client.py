@@ -23,7 +23,8 @@ class Client:
         self.sock = socket.socket()
         self.sock.settimeout(5)
         self.sock.connect((self.ip, 1234))
-        self.calibration = self.load_calibration()
+        self.calibration = {}
+        self.load_calibration()
 
     def print_message(self, message, category):
         robot_name = self.configuration.robot_name
@@ -90,6 +91,7 @@ class Client:
         """Load the calibration file for this robot."""
         robot_name = self.configuration.robot_name
         calibration = FileOperations.load_calibration(robot_name)
+        self.calibration = calibration
         return calibration
 
     def set_kinematics(self, linear_speed=0, rotation_speed=0):
@@ -165,8 +167,12 @@ class Client:
         effective_sample_rate = sonar_package['effective_fs_hz']
         raw_distance_axis = Utils.get_distance_axis(effective_sample_rate, samples)
         sonar_package['raw_distance_axis'] = raw_distance_axis
-
-        if plot: Utils.sonar_plot(sonar_package);plt.show()
+        # Add calibration is present, else empty dict
+        sonar_package['calibration'] = {}
+        if self.calibration: sonar_package['calibration'] = self.calibration
+        # Add client configuration
+        sonar_package['configuration'] = self.configuration
+        if plot: Process.plot_sonar_data(raw_distance_axis, sonar_package);plt.show()
         return sonar_package
 
     def listen(self, plot=False):
@@ -195,17 +201,10 @@ class Client:
             self.print_message("No calibration loaded. Returning unprocessed data.", "WARNING")
             return sonar_package
 
-        # 2) Detect echo on this capture
-        sonar_package = Process.locate_echo(self, sonar_package, calibration, selection_mode)
+        sonar_package = Process.locate_echo(sonar_package, selection_mode)
+        sonar_package = Process.apply_correction(sonar_package)
 
-        # Ensure the sonar_package rides along (apply_correction expects it for axes)
-        # This is already done inside locate_echo
-        # if 'sonar_package' not in raw_results: raw_results['sonar_package'] = sonar_package
-
-        # 3) Apply distance/IID correction (adds corrected_* fields; preserves raw)
-        sonar_package = Process.apply_correction(sonar_package, calibration)
-
-        # 4) Warnings if a correction wasn’t applied
+        # Warnings if a correction wasn’t applied
         if not sonar_package.get('distance_correction_applied', False):
             self.print_message("No distance correction applied.", "WARNING")
         if not sonar_package.get('iid_correction_applied', False):
@@ -217,7 +216,7 @@ class Client:
         # 5) Optional plot
         if plot:
             file_name = plot if isinstance(plot, str) else None
-            Process.plot_locate_echo(sonar_package, file_name=file_name, close_after=close_after, calibration=calibration)
+            Process.plot_sonar_package(sonar_package, file_name=file_name, close_after=close_after)
 
         return sonar_package
 
