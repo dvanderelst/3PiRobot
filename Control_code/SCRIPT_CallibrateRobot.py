@@ -11,10 +11,10 @@ repeats = 3
 real_distance1 = 0.3 # meters
 real_distance2 = 0.5 # meters
 angles = [-40, -30, -20, -10, 0, 10, 20, 30, 40]
-delete_calibration = True
-collect_baseline = True
+delete_calibration = False
+collect_baseline = False
 collect_distance_calibration = False
-collect_sweep_data = False
+collect_sweep_data = True
 # ─────────────────────────────────────
 
 client = Client.Client(robot_nr)
@@ -41,10 +41,9 @@ if collect_baseline:
     calibration['sample_rate'] = client.configuration.sample_rate
     FileOperations.save_calibration(robot_name, calibration)
 
-
+# We need to reload the calibration file because it might have been updated
 client.load_calibration() # Reload calibration
 sonar_package = client.ping()
-Process.plot_sonar_package(sonar_package)
 sonar_package = Process.locate_echo(sonar_package)
 Process.plot_sonar_package(sonar_package)
 
@@ -52,7 +51,6 @@ Process.plot_sonar_package(sonar_package)
 # In theory, this is not strictly necessary, but in practice it allows all data in the calibration
 # file to be correctly interpreted
 Callibration.compare_sampling(client, calibration)
-
 
 if collect_distance_calibration:
     easygui.msgbox(f"Place the object at {real_distance1} meters and press OK.")
@@ -87,8 +85,8 @@ if collect_sweep_data:
     easygui.msgbox(f"Press ok to start the sweep.")
     sweep_results = Callibration.get_sweep_data(client, calibration, angles)
     Callibration.plot_sweep_data(robot_name, sweep_results, calibration)
-    # We save the sweep data as well because it might be useful for later plotting
-    calibration['sweep_data'] =  sweep_results['sweep_data']
+    # We could save the sweep data as well because it might be useful for later plotting
+    # calibration['sweep_all_data'] =  sweep_results['sweep_all_data']
     calibration['sweep_onsets'] = sweep_results['sweep_onsets']
     calibration['sweep_iids'] = sweep_results['sweep_iids']
     calibration['sweep_angles'] = sweep_results['sweep_angles']

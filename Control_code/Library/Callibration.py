@@ -121,8 +121,8 @@ def get_distance_data(client, calibration, real_distance, nr_repeats=10):
         file_name = FileOperations.get_calibration_plot(robot_name, plot_basename)
         message = f"Distance data: {i + 1}/{nr_repeats}..."
         Logging.print_message('Baseline', message, category='INFO')
-        data, _, _ = client.ping()
-        raw_result = Process.locate_echo(client, data, calibration, selection_mode='first')
+        sonar_package = client.ping()
+        raw_result = Process.locate_echo(sonar_package, selection_mode='first')
         Process.plot_sonar_package(raw_result, file_name=file_name, close_after=close_after)
         raw_results.append(raw_result)
         time.sleep(0.25)
@@ -172,18 +172,17 @@ def get_sweep_data(client, calibration, sweep_angles):
         Logging.print_message('Sweep', message, category='INFO')
         client.step(angle=int(step))
         time.sleep(1.5)
-        data, _, _ = client.ping()
-        raw_result = Process.locate_echo(client, data, calibration, selection_mode='first')
+        sonar_package = client.ping()
+        raw_result = Process.locate_echo(sonar_package, selection_mode='first')
         all_sweep_data.append(raw_result)
 
-    sweep_data = np.array([result['data'] for result in all_sweep_data])
+    sweep_all_data = np.array([result['sonar_data'] for result in all_sweep_data])
     sweep_onsets = np.array([result['onset'] for result in all_sweep_data])
     sweep_iids = np.array([result['raw_iid'] for result in all_sweep_data])
 
     results = {}
-    results['all_data'] = all_sweep_data
+    results['sweep_all_data'] = sweep_all_data
     results['sweep_angles'] = np.array(sweep_angles)
-    results['sweep_data'] = sweep_data
     results['sweep_onsets'] = sweep_onsets
     results['sweep_iids'] = sweep_iids
     return results
@@ -195,14 +194,14 @@ def plot_sweep_data(robot_name, sweep_results, calibration=None):
     zero_iids = calibration.get('zero_iids', [])
     zeros = [0] * len(zero_iids)
 
-    sweep_data =  sweep_results['sweep_data']
+    sweep_all_data =  sweep_results['sweep_all_data']
     sweep_onsets = sweep_results['sweep_onsets']
     sweep_iids = sweep_results['sweep_iids']
     sweep_angles = sweep_results['sweep_angles']
     nr_of_steps = len(sweep_angles)
 
-    left_sweep_data = sweep_data[:, :, 1]
-    right_sweep_data = sweep_data[:, :, 2]
+    left_sweep_data = sweep_all_data[:, :, 1]
+    right_sweep_data = sweep_all_data[:, :, 2]
     sweep_differences = left_sweep_data - right_sweep_data
 
     plot_filename = FileOperations.get_calibration_plot(robot_name, 'sweep_results')

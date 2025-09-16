@@ -65,6 +65,13 @@ def distance2samples(sample_rate, distance_m):
     n = int(round(t * float(sample_rate)))  # samples
     return n
 
+def samples2distance(sample_rate, n_samples):
+    speed_of_sound = 343.0
+    t = float(n_samples) / float(sample_rate)
+    distance_m = 0.5 * speed_of_sound * t
+    return distance_m
+
+
 def get_distance_axis(sample_rate, samples):
     speed_of_sound = 343.0
     n = np.arange(samples, dtype=float)            # 0, 1, ..., samples-1

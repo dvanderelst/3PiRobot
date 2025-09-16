@@ -202,6 +202,7 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
     sonar_data = sonar_package['sonar_data']
     distance_axis = sonar_package['raw_distance_axis']
     xlab = 'Raw Distance [m]'
+    max_sonar_data = np.max(sonar_data)
     if distance_correction_applied: distance_axis = sonar_package['corrected_distance_axis']
     if echo_located or distance_correction_applied:
         title = 'Locate Echo Results'
@@ -212,7 +213,8 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
         onset_distance = distance_axis[onset]
         offset_distance = distance_axis[offset - 1]
         y_min = np.min(sonar_data) - 500
-        y_max = np.max(threshold) + 500
+        y_max = np.max(threshold)
+        y_max = max(y_max, max_sonar_data) + 500
         plot_settings = {'y_min': y_min, 'y_max': y_max}
 
     if distance_correction_applied: xlab = 'Corrected Distance [m]'
@@ -223,8 +225,6 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
     plt.tight_layout()
 
     if echo_located and crossed:
-        y_min = plot_sonar_output['y_min']
-        y_max = np.max(threshold) + 1000
         plt.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
         plt.axvspan(onset_distance, offset_distance, color='gray', alpha=0.3, label='Integration Window')
         plt.ylim(y_min, y_max)
