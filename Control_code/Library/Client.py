@@ -193,22 +193,22 @@ class Client:
         # If no calibration, return the bare package so downstream can still inspect/plot raw
         if not calibration:
             self.print_message("No calibration loaded. Returning unprocessed data.", "WARNING")
-            return {"sonar_package": sonar_package}
+            return sonar_package
 
         # 2) Detect echo on this capture
-        raw_results = Process.locate_echo(self, sonar_package, calibration, selection_mode)
+        sonar_package = Process.locate_echo(self, sonar_package, calibration, selection_mode)
 
         # Ensure the sonar_package rides along (apply_correction expects it for axes)
         # This is already done inside locate_echo
         # if 'sonar_package' not in raw_results: raw_results['sonar_package'] = sonar_package
 
         # 3) Apply distance/IID correction (adds corrected_* fields; preserves raw)
-        corrected = Process.apply_correction(raw_results, calibration)
+        sonar_package = Process.apply_correction(sonar_package, calibration)
 
         # 4) Warnings if a correction wasn’t applied
-        if not corrected.get('distance_correction_applied', False):
+        if not sonar_package.get('distance_correction_applied', False):
             self.print_message("No distance correction applied.", "WARNING")
-        if not corrected.get('iid_correction_applied', False):
+        if not sonar_package.get('iid_correction_applied', False):
             self.print_message("No IID correction applied.", "WARNING")
 
         # Human-readable strings (will include corrected_* when present)
@@ -217,9 +217,9 @@ class Client:
         # 5) Optional plot
         if plot:
             file_name = plot if isinstance(plot, str) else None
-            Process.plot_locate_echo(corrected, file_name=file_name, close_after=close_after, calibration=calibration)
+            Process.plot_locate_echo(sonar_package, file_name=file_name, close_after=close_after, calibration=calibration)
 
-        return corrected
+        return sonar_package
 
 
 

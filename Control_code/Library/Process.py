@@ -87,11 +87,9 @@ def locate_echo(client, sonar_package, calibration, selection_mode='first'):
     log_integrals = 20 * np.log10(integrals + 1e-6)
     iid = float(log_integrals[1] - log_integrals[0])
     if not crossed: iid = 0
-
     raw_distance = float(raw_distance_axis[onset])
 
     raw_results = {
-        'sonar_package': sonar_package,
         'onset': int(onset),
         'offset': int(offset),
         'crossed': crossed,
@@ -104,35 +102,33 @@ def locate_echo(client, sonar_package, calibration, selection_mode='first'):
         'client_configuration': configuration,
         'threshold_function': threshold_function,
         'calibration': calibration
-
     }
-    return raw_results
+    sonar_package.update(raw_results)
+    return sonar_package
 
-def apply_correction(raw_results, calibration=None, eps_db=0.5):
+def apply_correction(sonar_package, calibration=None, eps_db=0.5):
     calibration = calibration or {}
-    sonar_package = raw_results['sonar_package']
     distance_intercept = calibration.get('distance_intercept', None)
     distance_coefficient = calibration.get('distance_coefficient', None)
     zero_iids = calibration.get('zero_iids', None)
 
-    corrected_results = dict(raw_results)  # shallow copy is fine
-
-    corrected_distance = raw_results['raw_distance']
+    # Try to apply distance correction
+    corrected_distance = sonar_package['raw_distance']
     corrected_distance_axis = sonar_package['raw_distance_axis']
     distance_correction_applied = False
+
     if distance_intercept is not None:
         corrected_distance = distance_intercept + distance_coefficient * corrected_distance
         corrected_distance_axis = distance_intercept + distance_coefficient * corrected_distance_axis
         distance_correction_applied = True
-
-    iid_corrected = raw_results['raw_iid']
+    # Try to apply IID correction
+    iid_corrected = sonar_package['raw_iid']
     iid_correction_applied = False
     # --- IID calibration ---
     if zero_iids is not None:
         mean_zero = float(np.mean(zero_iids))
         iid_corrected = iid_corrected - mean_zero
         iid_correction_applied = True
-
 
     if iid_corrected < -eps_db: side_code = 'L'
     elif iid_corrected > eps_db: side_code = 'R'
@@ -145,18 +141,17 @@ def apply_correction(raw_results, calibration=None, eps_db=0.5):
     corrections['corrected_iid'] = iid_corrected
     corrections['iid_correction_applied'] = iid_correction_applied
     corrections['side_code'] = side_code
-    corrected_results.update(corrections)
-    return corrected_results
+    sonar_package.update(corrections)
+    return sonar_package
 
 
-def plot_locate_echo(raw_results, file_name=None, close_after=False, calibration=None):
+def plot_locate_echo(sonar_package, file_name=None, close_after=False, calibration=None):
     # Try to apply correction
-    corrected_results = apply_correction(raw_results, calibration)
-    sonar_package = raw_results['sonar_package']
-    threshold = raw_results['threshold']
-    onset = raw_results['onset']
-    offset = raw_results['offset']
-    crossed = raw_results['crossed']
+    corrected_results = apply_correction(sonar_package, calibration)
+    threshold = sonar_package['threshold']
+    onset = sonar_package['onset']
+    offset = sonar_package['offset']
+    crossed = sonar_package['crossed']
 
     distance_axis_label = 'Raw Distance [m]'
     distance_axis = sonar_package['raw_distance_axis']
