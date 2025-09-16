@@ -44,8 +44,6 @@ def get_threshold_function(client, calibration):
 
 def locate_echo(client, sonar_package, calibration, selection_mode='first'):
     configuration = client.configuration
-    left_channel = configuration.left_channel
-    right_channel = configuration.right_channel
     integration_window = int(configuration.integration_window_samples)
 
     sonar_data = sonar_package['sonar_data']
@@ -54,9 +52,9 @@ def locate_echo(client, sonar_package, calibration, selection_mode='first'):
     threshold_function = get_threshold_function(client, calibration)
     threshold = threshold_function(raw_distance_axis)
 
-    # Channels
-    left_channel = sonar_data[:, left_channel]
-    right_channel = sonar_data[:, right_channel]
+    # Channels - This order has been set in Client.py already
+    left_channel = sonar_data[:, 1]
+    right_channel = sonar_data[:, 2]
 
     # Thresholding
     left_thresholded = left_channel.astype(float)
@@ -136,8 +134,6 @@ def plot_locate_echo(raw_results, file_name=None, close_after=False, calibration
     distance_axis = sonar_package['raw_distance_axis']
     distance_axis_label = 'Raw Distance [m]'
 
-    distance_intercept = 1
-    distance_coefficient = 4
 
     if distance_intercept is not None:
         distance_axis = distance_intercept + distance_coefficient * distance_axis
