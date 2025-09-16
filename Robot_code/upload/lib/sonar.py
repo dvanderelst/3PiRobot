@@ -2,16 +2,14 @@ from machine import Pin, ADC
 import time
 import array
 import settings
-import struct
+
+DEBUG_TIMING = False  # set True if you want to include 'overruns' once in a while
 
 def now():
-    ticks = time.ticks_us()
-    return ticks
+    return time.ticks_us()
 
 def time_since(previous_time):
-    current_time = time.ticks_us()
-    difference = time.ticks_diff(current_time , previous_time)
-    return difference
+    return time.ticks_diff(time.ticks_us(), previous_time)
 
 class Sonar:
     def __init__(self, n_samples=0):
@@ -19,86 +17,101 @@ class Sonar:
         self.buf0 = None
         self.buf1 = None
         self.buf2 = None
-        
         self.create_buffers()
-        
+
         self.adc_emit  = ADC(settings.adc_emit)
         self.adc_recv1 = ADC(settings.adc_recv1)
         self.adc_recv2 = ADC(settings.adc_recv2)
-        
-        self.tgr_emit = Pin(settings.trigger_emitter, Pin.OUT)
+
+        self.tgr_emit  = Pin(settings.trigger_emitter, Pin.OUT)
         self.tgr_recv1 = Pin(settings.trigger_recv1, Pin.OUT)
         self.tgr_recv2 = Pin(settings.trigger_recv2, Pin.OUT)
-        
-        self.tgr_emit.value(0)
-        self.tgr_recv1.value(0)
-        self.tgr_recv2.value(0)
-        
+
+        self.tgr_emit.value(0); self.tgr_recv1.value(0); self.tgr_recv2.value(0)
+
         self.timeout_us = 100_000
         self.post_emit_settle_us = 20
-        
+
+        self.timing_stats = {}
+
     def emit(self):
-        self.tgr_recv1.value(0)
-        self.tgr_recv2.value(0)
-        self.tgr_emit.value(1)
-        time.sleep_us(75)
-        self.tgr_emit.value(0)
-            
+        self.tgr_recv1.value(0); self.tgr_recv2.value(0)
+        self.tgr_emit.value(1); time.sleep_us(75); self.tgr_emit.value(0)
+
     def create_buffers(self):
-        n_samples = self.n_samples
-        self.buf0 = array.array('H', (0 for _ in range(n_samples)))  
-        self.buf1 = array.array('H', (0 for _ in range(n_samples)))  
-        self.buf2 = array.array('H', (0 for _ in range(n_samples)))
-        
+        n = self.n_samples
+        self.buf0 = array.array('H', (0 for _ in range(n)))
+        self.buf1 = array.array('H', (0 for _ in range(n)))
+        self.buf2 = array.array('H', (0 for _ in range(n)))
+
     def update_buffers(self, n_samples):
-        if n_samples is None: return
-        if not n_samples == self.n_samples:
+        if n_samples is not None and n_samples != self.n_samples:
             self.n_samples = n_samples
             self.create_buffers()
-            
+
     def fill_buffers(self, sample_rate):
-        sample_period = int(1_000_000 // int(sample_rate)) #in usecs
-        n_samples = self.n_samples
-        next_sample_due = now()
-        for i in range(n_samples):
-            while time.ticks_diff(time.ticks_us(), next_sample_due) < 0: pass
+        """Deadline-scheduled sampling; store only effective fs (and overruns if DEBUG_TIMING)."""
+        period_us_req = int(round(1_000_000 / int(sample_rate)))
+        n = int(self.n_samples)
+
+        next_due = time.ticks_us()
+        t_first = None
+        t_last = None
+        overruns = 0
+
+        for i in range(n):
+            if time.ticks_diff(time.ticks_us(), next_due) > 0: overruns += 1
+            while time.ticks_diff(time.ticks_us(), next_due) < 0: pass
+
+            t_now = time.ticks_us()
+            if t_first is None: t_first = t_now
+            t_last = t_now
+
             self.buf0[i] = self.adc_emit.read_u16()
             self.buf1[i] = self.adc_recv1.read_u16()
             self.buf2[i] = self.adc_recv2.read_u16()
-            next_sample_due = time.ticks_add(next_sample_due, sample_period)
+
+            next_due = time.ticks_add(next_due, period_us_req)
+
+        # effective fs (average)
+        intervals = max(1, n - 1)
+        span_us = time.ticks_diff(t_last, t_first) if (t_first is not None and t_last is not None) else 0
+        eff_period_us = (span_us / intervals) if span_us > 0 else 0
+        eff_fs_hz = (1_000_000.0 / eff_period_us) if eff_period_us > 0 else 0.0
+        self.timing_stats = {"requested_fs_hz": sample_rate, "effective_fs_hz": eff_fs_hz}
+        if DEBUG_TIMING: self.timing_stats["overruns"] = overruns  # small int; optional
 
     def wait_for_emission(self):
         threshold = settings.pulse_threshold
-        timeout_us = self.timeout_us
-        start_of_wait = now()
+        start = now()
         while True:
             if self.adc_emit.read_u16() > threshold: return True
-            if time_since(start_of_wait) > timeout_us: return False
+            if time_since(start) > self.timeout_us: return False
             time.sleep_us(1)
-     
+
     def acquire(self, mode, sample_rate=None, n_samples=None):
         mode = mode.lower()
-        start_acquire = now()
+        t0 = now()
         timing_info = {}
-        # ── Mode: pulse ──
+
         if mode == 'pulse':
             self.emit()
             timing_info['mode'] = 'pulse'
-            timing_info['total_duration_us'] = time_since(start_acquire)
+            timing_info['total_duration_us'] = time_since(t0)
             return None, None, None, timing_info
-        
-        # ── Modes: pulse or ping──
+
         self.update_buffers(n_samples)
 
         if mode == 'ping':
-            timing_info['emission_delay_us'] = time_since(start_acquire)
+            timing_info['emission_delay_us'] = time_since(t0)
             self.emit()
             time.sleep_us(self.post_emit_settle_us)
-            emission_detected = self.wait_for_emission()
-            timing_info['emission_detected'] = emission_detected
-        
-        if mode in ['ping', 'listen']: self.fill_buffers(sample_rate)
-        timing_info['total_duration_us'] = time_since(start_acquire)
-        timing_info['mode'] = mode
-        return self.buf0, self.buf1, self.buf2, timing_info
+            timing_info['emission_detected'] = self.wait_for_emission()
 
+        if mode in ['ping', 'listen']:
+            self.fill_buffers(sample_rate)
+            timing_info.update(self.timing_stats)
+
+        timing_info['mode'] = mode
+        timing_info['total_duration_us'] = time_since(t0)
+        return self.buf0, self.buf1, self.buf2, timing_info

@@ -7,17 +7,17 @@ import numpy as np
 
 # ─── Baseline collection Settings ────
 robot_nr = 1
-repeats = 2
+repeats = 3
 real_distance1 = 0.3 # meters
 real_distance2 = 0.5 # meters
 angles = [-40, -30, -20, -10, 0, 10, 20, 30, 40]
 delete_calibration = True
 collect_baseline = True
-collect_distance_calibration = True
-collect_sweep_data = True
+collect_distance_calibration = False
+collect_sweep_data = False
 # ─────────────────────────────────────
 
-client = Client.Client(robot_nr, ip='192.168.1.13')
+client = Client.Client(robot_nr, ip='192.168.200.38')
 client.change_free_ping_period(0) #To ensure no free pings are done during calibration
 
 robot_name = client.configuration.robot_name
@@ -37,9 +37,18 @@ if collect_baseline:
     calibration['raw_distance_axis'] = baseline_data['raw_distance_axis']
     calibration['left_baseline'] = baseline_data['left_mean']
     calibration['right_baseline'] = baseline_data['right_mean']
-    data, _, _ = client.ping()
-    raw_result = Process.locate_echo(client, data, calibration)
+    calibration['samples'] = client.configuration.samples
+    calibration['sample_rate'] = client.configuration.sample_rate
+    sonar_package = client.ping()
+    raw_result = Process.locate_echo(client, sonar_package, calibration)
+    Process.plot_locate_echo(raw_result)
     FileOperations.save_calibration(robot_name, calibration)
+
+
+# Raise error if the client configuration does not match the calibration file
+# In theory, this is not strictly necessary, but in practice it allows all data in the calibration
+# file to be correctly interpreted
+Callibration.compare_sampling(client, calibration)
 
 
 if collect_distance_calibration:
@@ -63,8 +72,14 @@ if collect_distance_calibration:
     calibration['zero_iids'] = zero_iids
     FileOperations.save_calibration(robot_name, calibration)
 
+# Raise error if the client configuration does not match the calibration file
+# In theory, this is not strictly necessary, but in practice it allows all data in the calibration
+# file to be correctly interpreted
+Callibration.compare_sampling(client, calibration)
+
 # Sweep data collection does not contribute to calibration but
 # is useful for visualizing the robot's sonar transfer function
+
 if collect_sweep_data:
     easygui.msgbox(f"Press ok to start the sweep.")
     sweep_results = Callibration.get_sweep_data(client, calibration, angles)
@@ -76,7 +91,5 @@ if collect_sweep_data:
     calibration['sweep_angles'] = sweep_results['sweep_angles']
     FileOperations.save_calibration(robot_name, calibration)
 
-print(calibration['distance_intercept'])
-print(calibration['distance_coefficient'])
 
 Callibration.print_calibration_content(calibration)

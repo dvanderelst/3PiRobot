@@ -49,17 +49,7 @@ class Client:
             read_s += (time.perf_counter() - t1)
             if rcvd == 0: return None, wait_s, read_s
             got += rcvd
-
         return mv, wait_s, read_s
-
-    # def _recv_exact(self, n):
-    #     """Receive exactly *n* bytes (or None on socket close)."""
-    #     buf = b""
-    #     while len(buf) < n:
-    #         chunk = self.sock.recv(n - len(buf))
-    #         if not chunk: return None
-    #         buf += chunk
-    #     return buf
 
     def _send_dict(self, dct):
         """Prefix-frame a msgpack dict and send it."""
@@ -136,7 +126,7 @@ class Client:
         msg = f"Step (d={distance}, a={angle}) took {time.time() - start:.4f}s"
         self.print_message(msg, category='INFO')
 
-    def acquire(self, action, plot=False, print_timing=False):
+    def acquire(self, action, plot=False):
         # assure that action is either 'ping' or 'listen'
         error_message = f"Invalid action '{action}'. Action must be either 'ping' or 'listen'."
         if action not in ['ping', 'listen']: raise ValueError(error_message)
@@ -149,17 +139,20 @@ class Client:
         right_channel = self.configuration.right_channel
 
         self._send_dict({'action': action, 'sample_rate': sample_rate, 'samples': samples})
-        msg = self._recv_msgpack()
+        sonar_package = self._recv_msgpack()
         self._send_dict({'action': 'acknowledge'})  # send ack back
+        # Flatten timing info into the main dict
+        timing_info = sonar_package.pop('timing_info')
+        sonar_package.update(timing_info)
 
         # Reshape and reorder data
-        raw = msg['data']  # the single byte blob
+        raw = sonar_package.pop('data')  # the single byte blob
         arr = np.frombuffer(raw, dtype='<u2')  # length = 3*samples
         a0, a1, a2 = np.split(arr, [samples, 2 * samples])
-        data = np.column_stack([a0, a1, a2])  # shape: (samples, 3), same as before
-        data = data[:, [emitter_channel, left_channel, right_channel]]  # reorder channels
-        data = data.astype(np.float32)  # convert to float32 for processing
-        robot_timing_info = msg['timing_info'] # This is a dict with timing info from the robot
+        sonar_data = np.column_stack([a0, a1, a2])  # shape: (samples, 3), same as before
+        sonar_data = sonar_data[:, [emitter_channel, left_channel, right_channel]]  # reorder channels
+        sonar_data = sonar_data.astype(np.float32)  # convert to float32 for processing
+        sonar_package['sonar_data'] = sonar_data
         # Create messages and plot
         current_time = time.time()
         window = 1000 * (samples/sample_rate)
@@ -168,25 +161,21 @@ class Client:
         ping_msg = f"Ping (Recording {window:.1f}ms) took {duration:.1f}ms"
         if action == 'listen': self.print_message(listen_msg, category='INFO')
         if action == 'ping': self.print_message(ping_msg, category='INFO')
-        if plot: Utils.sonar_plot(data, sample_rate);plt.show()
 
-        self.print_message(f"Robot timing info: {robot_timing_info}", category='DEBUG')
-        self.print_message(f"First byte wait: {msg['first_byte_wait_ms']:.1f}ms", category='DEBUG')
-        self.print_message(f"Idle wait: {msg['idle_wait_ms']:.1f}ms", category='DEBUG')
-        self.print_message(f"Read time: {msg['read_ms']:.1f}ms", category='DEBUG')
-        self.print_message(f"Unpack time: {msg['unpack_ms']:.1f}ms", category='DEBUG')
-        self.print_message(f"Total time: {msg['total_ms']:.1f}ms", category='DEBUG')
+        effective_sample_rate = sonar_package['effective_fs_hz']
+        raw_distance_axis = Utils.get_distance_axis(effective_sample_rate, samples)
+        sonar_package['raw_distance_axis'] = raw_distance_axis
 
-        distance_axis = Utils.get_distance_axis(sample_rate, samples)
-        return data, distance_axis, robot_timing_info
+        if plot: Utils.sonar_plot(sonar_package);plt.show()
+        return sonar_package
 
     def listen(self, plot=False):
-        data, distance_axis, timing_info = self.acquire(action='listen', plot=plot)
-        return data, distance_axis, timing_info
+        sonar_package = self.acquire(action='listen', plot=plot)
+        return sonar_package
 
     def ping(self, plot=False):
-        data, distance_axis, timing_info = self.acquire(action='ping', plot=plot)
-        return data, distance_axis, timing_info
+        sonar_package = self.acquire(action='ping', plot=plot)
+        return sonar_package
 
     def ping_process(self, plot=False, close_after=False, selection_mode='first'):
         results = {}

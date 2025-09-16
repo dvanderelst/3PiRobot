@@ -1,13 +1,42 @@
 import ipaddress
+import math
 import numpy as np
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches
 
-def find_closest_value(array, target):
+def make_ticks(vmin, vmax, steps, preferred=8):
+    """Return (ticks, chosen_step) for [vmin, vmax] using the step from `steps`
+    that gives a tick count closest to `preferred`."""
+    if vmax < vmin: vmin, vmax = vmax, vmin
+    span = vmax - vmin
+    best = None
+    best_ticks = None
+
+    for step in steps:
+        if step <= 0: continue
+        start = math.floor(vmin / step) * step
+        end   = math.ceil(vmax / step) * step
+        # robust arange with a small epsilon to include endpoint
+        ticks = np.arange(start, end + step * 0.5, step)
+        # keep only visible ticks (optional, avoids ticks outside limits)
+        ticks = ticks[(ticks >= vmin) & (ticks <= vmax)]
+        n = len(ticks)
+        score = abs(n - preferred)
+
+        # tie-break: prefer slightly denser (larger n), then smaller step
+        key = (score, -n, step)
+        if (best is None) or (key < best[0]):
+            best = (key, step)
+            best_ticks = ticks
+
+    return best_ticks if best_ticks is not None else np.array([]), (best[1] if best else None)
+
+
+def find_closest_value_index(array, target):
     array = np.asarray(array)
     idx = (np.abs(array - target)).argmin()
-    value = array[idx]
-    return value, idx
+    #value = array[idx]
+    return idx
 
 def is_valid_ip(s):
     if not isinstance(s, str):
@@ -29,59 +58,61 @@ def compare_configurations(config1, config2):
         matches = sample_rate_same and samples_same
         return matches
 
-def sonar_plot(data, sample_rate, title='', yrange=None, color='black', label=None, distance_axis=None):
-    samples = data.shape[0]
-    if distance_axis is None: distance_axis = get_distance_axis(sample_rate, samples)
+def sonar_plot(sonar_package, title='', yrange=None, color='black', label=None, distance_axis=None):
+    sonar_data = sonar_package['sonar_data']
+    if distance_axis is None: distance_axis = sonar_package['raw_distance_axis']
+
+    x_min = float(distance_axis[0])
     x_max = float(distance_axis[-1])
-    y_max = np.nanmax(data)
-    if not np.isfinite(y_max): y_max = 1.0
-    y_min = np.min(data)
-    y_max = min(y_max, 50000)
-    if yrange is not None: y_max = yrange[1]; y_min = yrange[0]
-    # Horizontal axis = distance (x)
+    y_min = float(np.nanmin(sonar_data)) - 1000.0
+    y_max = float(np.nanmax(sonar_data)) + 1000.0
+    if yrange is not None: y_min, y_max = yrange
+
     ax = plt.gca()
-    dim = data.shape
+    dim = sonar_data.shape
     labels_set = False
-    # assumes the order of the channels is: [emitter, left, right]
+
     if len(dim) == 2 and dim[1] == 3:
-        ax.plot(distance_axis, data[:, 0], color='black', marker='.', label='Emitter')
-        ax.plot(distance_axis, data[:, 1], color='blue', marker='.' , label='Left Channel')
-        ax.plot(distance_axis, data[:, 2], color='red', marker='.', label='Right Channel')
+        ax.plot(distance_axis, sonar_data[:, 0], color='grey', marker='.', label='Emitter')
+        ax.plot(distance_axis, sonar_data[:, 1], color='blue',  marker='.', label='Left Channel')
+        ax.plot(distance_axis, sonar_data[:, 2], color='red',   marker='.', label='Right Channel')
         labels_set = True
-    # makes no assumption about the number of channels
     else:
-        ax.plot(distance_axis, data, color=color, marker='.', label=label)
+        ax.plot(distance_axis, sonar_data, color=color, marker='.', label=label)
 
-    ax.set_xticks(np.arange(0, x_max + 0.25, 0.5), minor=True)
-    ax.set_xticks(np.arange(0, x_max + 0.5, 1))
-    ax.set_xlim(left=0, right=x_max)  # clamp to data range
+    # ---- Adaptive ticks for main x and y axes ----
+    x_ticks, _ = make_ticks(x_min, x_max, steps=[0.025, 0.05, 0.1, 0.2, 0.5, 1], preferred=9)
+    y_ticks, _ = make_ticks(y_min, y_max, steps=[500, 1000, 2000, 5000], preferred=8)
 
-    # Vertical axis = signal values (y)
-    ax.set_yticks(np.arange(y_min, y_max, 500), minor=True)
-    ax.set_yticks(np.arange(y_min, y_max, 5000))
-    ax.set_ylim(bottom=y_min, top=y_max)
+    if x_ticks.size: ax.set_xticks(x_ticks)
+    ax.set_xlim(x_min, x_max)
 
-    ax.grid(which='minor', color='gray', linestyle=':', linewidth=0.5)
-    ax.grid(which='major', color='darkgray', linestyle='--', linewidth=0.8)
-
-    # Add indices
-    indices = np.arange(0, len(distance_axis), step=100)
-    tick_positions = distance_axis[indices]
-
+    if y_ticks.size: ax.set_yticks(y_ticks)
+    ax.set_ylim(y_min, y_max)
+    # ---- Adaptive top axis using indices ----
+    n = len(distance_axis)
+    # Use indices 0..n-1 as the "range" and pick adaptive ticks
+    index_ticks, _ = make_ticks(0, n-1, steps=[10, 20, 50, 100, 200], preferred=10)
     ax_top = ax.secondary_xaxis('top')
-    ax_top.set_ticks(tick_positions)
-    ax_top.set_xticklabels([str(i) for i in indices])
+    # Convert index ticks into positions on the distance axis
+    pos_ticks = distance_axis[index_ticks.astype(int)]
+    ax_top.set_ticks(pos_ticks)
+    ax_top.set_xticklabels([str(int(i)) for i in index_ticks])
     ax_top.set_xlabel("Index")
+    ax.grid(True, which='both', axis='both')
 
     plt.xlabel('Raw Distance [m]')
     plt.ylabel('Value [Arbitrary]')
     if labels_set: plt.legend()
     plt.title(title)
 
+
 def get_distance_axis(sample_rate, samples):
-    max_d = (343 / 2) * (samples / sample_rate)
-    distance_axis = np.linspace(0, max_d, samples)
-    return distance_axis
+    speed_of_sound = 343.0
+    n = np.arange(samples, dtype=float)            # 0, 1, ..., samples-1
+    t = n / float(sample_rate)                     # seconds
+    d = 0.5 * float(speed_of_sound) * t            # meters (round trip)
+    return d
 
 def fit_linear_calibration(real_distance1, raw_distances1, real_distance2, raw_distances2):
     raw_distances1 = np.asarray(raw_distances1)

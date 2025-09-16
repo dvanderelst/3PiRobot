@@ -1,10 +1,26 @@
 import time
 import numpy as np
 from matplotlib import pyplot as plt
+
 from Library import FileOperations
 from Library import Logging
 from Library import Process
 from Library import Utils
+
+
+def compare_sampling(client, calibration, raise_error=True):
+    calibration_samples = calibration['samples']
+    calibration_sample_rate = calibration['sample_rate']
+
+    client_samples = client.configuration.samples
+    client_sample_rate = client.configuration.sample_rate
+
+    samples_same = calibration_samples == client_samples
+    sample_rate_same = calibration_sample_rate == client_sample_rate
+    both_same = samples_same and sample_rate_same
+    error_message = "Client configuration does not match calibration file."
+    if not both_same and raise_error: raise ValueError(error_message)
+    return both_same
 
 def print_calibration_content(calibration, title=None):
     if title is None: title = 'Calibration Content'
@@ -28,18 +44,24 @@ def angles2steps(angles):
 
 
 def get_baseline_data(client, nr_repeats=10):
-    data_collected = []
-    raw_distance_axis = None
+    sonar_package = None
+    left_channel = client.configuration.left_channel
+    right_channel = client.configuration.right_channel
+    collected_sonar_data = []
     for i in range(nr_repeats):
         message = f"Baseline data: {i + 1}/{nr_repeats}..."
         Logging.print_message('Baseline', message, category='INFO')
-        data, raw_distance_axis, timing_info = client.ping()
-        data_collected.append(data)
+        sonar_package = client.ping()
+        sonar_data = sonar_package['sonar_data']
+        collected_sonar_data.append(sonar_data)
         time.sleep(0.25)
-    data_collected = np.array(data_collected)
 
-    left_measurements = data_collected[:, :, 1]
-    right_measurements = data_collected[:, :, 2]
+    collected_sonar_data = np.array(collected_sonar_data)
+    # Use the raw distance axis from the last received data
+    raw_distance_axis = sonar_package['raw_distance_axis']
+
+    left_measurements = collected_sonar_data[:, :, left_channel]
+    right_measurements = collected_sonar_data[:, :, right_channel]
 
     left_measurements = np.transpose(left_measurements)
     right_measurements = np.transpose(right_measurements)
@@ -47,11 +69,11 @@ def get_baseline_data(client, nr_repeats=10):
     left_mean = np.mean(left_measurements, axis=1)
     right_mean = np.mean(right_measurements, axis=1)
 
-    overall_max = np.max(data_collected) + 500
-    overall_min = np.min(data_collected) - 500
+    overall_max = np.max(collected_sonar_data) + 500
+    overall_min = np.min(collected_sonar_data) - 500
     robot_name = client.configuration.robot_name
     baseline_extent_m = client.configuration.baseline_extent_m
-    _, baseline_extent_s = Utils.find_closest_value(raw_distance_axis, baseline_extent_m)
+    baseline_extent_samples = Utils.find_closest_value_index(raw_distance_axis, baseline_extent_m)
 
     plt.figure()
     plt.subplot(211)
@@ -62,7 +84,7 @@ def get_baseline_data(client, nr_repeats=10):
     plt.xlabel('Sample Index')
     plt.grid()
     plt.title(f'Baseline Data, {robot_name}: Left')
-    plt.axvspan(0, baseline_extent_s, color='grey', alpha=0.25, label='Baseline Extent')
+    plt.axvspan(0, baseline_extent_samples, color='grey', alpha=0.25, label='Baseline Extent')
     plt.subplot(212)
     plt.plot(raw_distance_axis, right_measurements, color='red', alpha=0.5)
     plt.plot(raw_distance_axis, right_mean, color='black')
