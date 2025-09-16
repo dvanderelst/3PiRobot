@@ -178,53 +178,48 @@ class Client:
         return sonar_package
 
     def ping_process(self, plot=False, close_after=False, selection_mode='first'):
-        results = {}
+        """
+        1) Acquire a sonar_package (data + raw_distance_axis + timing).
+        2) Run echo detection (locate_echo) using the loaded calibration.
+        3) Apply distance/IID correction in one place (apply_correction).
+        4) Warn if corrections weren’t applied.
+        5) Optionally plot, then return the corrected result dict.
+        """
         calibration = self.calibration
-        data, distance_axis, timing_info = self.ping(plot=False)
-        results['data'] = data
-        results['distance_axis'] = distance_axis
-        results['timing_info'] = timing_info
-        # In case no calibration is loaded, return unprocessed data
-        if calibration == {}:
-            message = "No calibration loaded. Returning unprocessed data."
-            self.print_message(message, category='WARNING')
-            return results
 
-        # Detect the echo and get raw results
-        file_name = None
-        if isinstance(plot, str): file_name = plot
-        raw_results = Process.locate_echo(self, data, calibration, selection_mode)
-        if plot: Process.plot_locate_echo(raw_results, file_name, close_after,calibration)
-        results.update(raw_results)
+        # 1) Acquire (single dict: sonar_data, raw_distance_axis, timing, etc.)
+        sonar_package = self.ping(plot=False)
 
-        # Try to correct the results based on the calibration
+        # If no calibration, return the bare package so downstream can still inspect/plot raw
+        if not calibration:
+            self.print_message("No calibration loaded. Returning unprocessed data.", "WARNING")
+            return {"sonar_package": sonar_package}
 
-        # Distance calibration
-        distance_present = calibration.get('distance_present', False)
-        if distance_present:
-            distance_coefficient = calibration['distance_coefficient']
-            distance_intercept = calibration['distance_intercept']
-            raw_distance = raw_results['raw_distance']
-            corrected_distance = distance_intercept + distance_coefficient * raw_distance
-            results['corrected_distance'] = corrected_distance
-        else:
-            message = "No distance calibration present. Not correcting distance."
-            self.print_message(message, category='WARNING')
+        # 2) Detect echo on this capture
+        raw_results = Process.locate_echo(self, sonar_package, calibration, selection_mode)
 
-        # IID calibration
-        iid_present = calibration.get('iid_present', False)
-        if iid_present:
-            zero_iids = calibration['zero_iids']
-            mean_zero_iids = np.mean(zero_iids)
-            raw_iid = raw_results['raw_iid']
-            corrected_iid = raw_iid - mean_zero_iids
-            side_code = 'L' if corrected_iid < 0 else 'R'
-            results['corrected_iid'] = corrected_iid
-            results['side_code'] = side_code
-        else:
-            message = "No IID calibration present. Not correcting IID"
-            self.print_message(message, category='WARNING')
-        messages = Process.create_messages(results)
-        results.update(messages)
-        return results
+        # Ensure the sonar_package rides along (apply_correction expects it for axes)
+        # This is already done inside locate_echo
+        # if 'sonar_package' not in raw_results: raw_results['sonar_package'] = sonar_package
+
+        # 3) Apply distance/IID correction (adds corrected_* fields; preserves raw)
+        corrected = Process.apply_correction(raw_results, calibration)
+
+        # 4) Warnings if a correction wasn’t applied
+        if not corrected.get('distance_correction_applied', False):
+            self.print_message("No distance correction applied.", "WARNING")
+        if not corrected.get('iid_correction_applied', False):
+            self.print_message("No IID correction applied.", "WARNING")
+
+        # Human-readable strings (will include corrected_* when present)
+        # corrected.update(Process.create_messages(corrected))
+
+        # 5) Optional plot
+        if plot:
+            file_name = plot if isinstance(plot, str) else None
+            Process.plot_locate_echo(corrected, file_name=file_name, close_after=close_after, calibration=calibration)
+
+        return corrected
+
+
 

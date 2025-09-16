@@ -2,21 +2,12 @@ import numpy as np
 from matplotlib import pyplot as plt
 from scipy.interpolate import interp1d
 from Library import Utils
-from Library.Utils import draw_integration_box
-
-def shift2right(arr, n):
-    if n <= 0: return arr.copy()
-    shifted = np.empty_like(arr)
-    shifted[:n] = arr[0]
-    shifted[n:] = arr[:-n]
-    return shifted
 
 def monotonize_threshold(baseline):
     flipped = np.flip(baseline)
     cumulative_max = np.maximum.accumulate(flipped)
     threshold = np.flip(cumulative_max)
     return threshold
-
 
 def get_threshold_function(client, calibration):
     configuration = client.configuration
@@ -40,7 +31,6 @@ def get_threshold_function(client, calibration):
     fill_value =(raw_threshold[0], raw_threshold[-1])
     function = interp1d(calibration_distance_axis, raw_threshold, bounds_error=False,fill_value=fill_value)
     return function
-
 
 def locate_echo(client, sonar_package, calibration, selection_mode='first'):
     configuration = client.configuration
@@ -118,29 +108,65 @@ def locate_echo(client, sonar_package, calibration, selection_mode='first'):
     }
     return raw_results
 
+def apply_correction(raw_results, calibration=None, eps_db=0.5):
+    calibration = calibration or {}
+    sonar_package = raw_results['sonar_package']
+    distance_intercept = calibration.get('distance_intercept', None)
+    distance_coefficient = calibration.get('distance_coefficient', None)
+    zero_iids = calibration.get('zero_iids', None)
+
+    corrected_results = dict(raw_results)  # shallow copy is fine
+
+    corrected_distance = raw_results['raw_distance']
+    corrected_distance_axis = sonar_package['raw_distance_axis']
+    distance_correction_applied = False
+    if distance_intercept is not None:
+        corrected_distance = distance_intercept + distance_coefficient * corrected_distance
+        corrected_distance_axis = distance_intercept + distance_coefficient * corrected_distance_axis
+        distance_correction_applied = True
+
+    iid_corrected = raw_results['raw_iid']
+    iid_correction_applied = False
+    # --- IID calibration ---
+    if zero_iids is not None:
+        mean_zero = float(np.mean(zero_iids))
+        iid_corrected = iid_corrected - mean_zero
+        iid_correction_applied = True
+
+
+    if iid_corrected < -eps_db: side_code = 'L'
+    elif iid_corrected > eps_db: side_code = 'R'
+    else: side_code = 'C'
+
+    corrections = {}
+    corrections['corrected_distance'] = corrected_distance
+    corrections['corrected_distance_axis'] = corrected_distance_axis
+    corrections['distance_correction_applied'] = distance_correction_applied
+    corrections['corrected_iid'] = iid_corrected
+    corrections['iid_correction_applied'] = iid_correction_applied
+    corrections['side_code'] = side_code
+    corrected_results.update(corrections)
+    return corrected_results
+
 
 def plot_locate_echo(raw_results, file_name=None, close_after=False, calibration=None):
-    configuration = raw_results['client_configuration']
+    # Try to apply correction
+    corrected_results = apply_correction(raw_results, calibration)
     sonar_package = raw_results['sonar_package']
     threshold = raw_results['threshold']
     onset = raw_results['onset']
     offset = raw_results['offset']
     crossed = raw_results['crossed']
 
-    if calibration is None: calibration = {}
-    distance_intercept = calibration.get('distance_intercept', None)  # b
-    distance_coefficient = calibration.get('distance_coefficient', None)  # a
-
-    distance_axis = sonar_package['raw_distance_axis']
     distance_axis_label = 'Raw Distance [m]'
-
-
-    if distance_intercept is not None:
-        distance_axis = distance_intercept + distance_coefficient * distance_axis
+    distance_axis = sonar_package['raw_distance_axis']
+    distance_correction_applied = corrected_results['distance_correction_applied']
+    if distance_correction_applied:
+        distance_axis = corrected_results['corrected_distance_axis']
         distance_axis_label = 'Corrected Distance [m]'
 
     onset_distance = distance_axis[onset]
-    offset_distance = distance_axis[offset]
+    offset_distance = distance_axis[offset - 1]
 
     mx_sonar_data = np.max(sonar_package['sonar_data'][:])
     mx_threshold = np.max(threshold)
@@ -157,104 +183,6 @@ def plot_locate_echo(raw_results, file_name=None, close_after=False, calibration
     ax.set_facecolor('#f5f5dc')
     ax.legend(loc='upper right')
     plt.tight_layout()
-    plt.show()
-
-    # --- Results from locate_echo ---
-
-    # #onset             = raw_results['onset']
-    # #offset            = raw_results['offset']
-    # #crossed           = raw_results['crossed']
-    # #threshold_raw_arr = raw_results['threshold']                # evaluated on RAW axis originally
-    # #selection_mode    = raw_results['selection_mode']
-    # #threshold_fn      = raw_results.get('threshold_function')   # callable on RAW axis (if present)
-    # #raw_axis          = raw_results['raw_distance_axis']        # RAW axis (meters, uncorrected)
-    #
-    # # --- Choose plotting axis & re-evaluate threshold if needed ---
-    # # distance_axis = raw_axis.copy()
-    # # threshold_for_plot = threshold_raw_arr  # default: raw axis
-    #
-    # xlabel = 'Raw Distance [m]'
-    # use_corrected = (distance_coefficient is not None) and (distance_intercept is not None)
-    #
-    # if use_corrected:
-    #     # Build corrected axis for plotting
-    #     corrected_axis = distance_intercept + distance_coefficient * raw_axis
-    #     xlabel = 'Corrected Distance [m]'
-    #
-    #     if threshold_fn is not None:
-    #         # Map corrected x back to RAW x for evaluation: x_raw = (x_corr - b) / a
-    #         # Guard against a == 0 just in case (fall back to raw axis)
-    #         a = distance_coefficient
-    #         b = distance_intercept
-    #         if a != 0:
-    #             x_raw_for_corr = (corrected_axis - b) / a
-    #             threshold_for_plot = threshold_fn(x_raw_for_corr)
-    #             distance_axis = corrected_axis
-    #         else:
-    #             # Degenerate fit: keep raw axis/threshold
-    #             distance_axis = raw_axis
-    #             threshold_for_plot = threshold_raw_arr
-    #     else:
-    #         # No function available to re-evaluate; keep raw threshold and raw axis
-    #         # (Alternatively, you could still switch the axis and accept slight misalignment.)
-    #         distance_axis = raw_axis
-    #         threshold_for_plot = threshold_raw_arr
-    #         xlabel = 'Raw Distance [m]'
-    #
-    # # --- Plot styling / ranges ---
-    # fixed_onset = isinstance(selection_mode, int)
-    # onset_color = 'black' if fixed_onset else 'green'
-    #
-    # sonar_data = data[:, 1:3]  # left & right
-    # range_min = np.min(sonar_data) - 500
-    # range_max = max(np.max(sonar_data), np.max(threshold_for_plot)) + 500
-    # yrange = [range_min, range_max]
-    #
-    # # --- Figure ---
-    # plt.figure(figsize=(12, 3))
-    # ax1 = plt.subplot(111)
-    #
-    # # Left/right traces on the chosen axis
-    # Utils.sonar_plot(received_data)
-    #
-    #
-    # # Threshold (aligned with axis in use)
-    # ax1.plot(distance_axis, threshold_for_plot, color='black', linestyle='--', label='Threshold')
-    # # Integration window shading
-    # min_in_window = np.min(data[onset:offset, :])
-    # max_in_window = np.max(data[onset:offset, :])
-    # window_start = distance_axis[onset]
-    # window_end   = distance_axis[offset - 1]
-    # if crossed: draw_integration_box(ax1, [window_start, window_end, min_in_window, max_in_window], color='gray', alpha=0.3, onset_color=onset_color)
-    #
-    # # Cosmetics
-
-    # ax1.set_xlabel(xlabel)
-    # ax1.set_ylabel("Amplitude")
-    # ax1.set_title(f'Plot Locate Echo\nselection mode: {selection_mode}')
-    # ax1.legend(loc='upper right')
-    #
-
-    # if file_name is not None: plt.savefig(file_name, dpi=300)
-    # if close_after: plt.close()
-    # else: plt.show()
-
-
-
-def create_messages(results):
-    raw_distance = results.get('raw_distance', 'None')
-    raw_iid = results.get('raw_iid', 'None')
-    corrected_distance = results.get('corrected_distance', 'None')
-    corrected_iid = results.get('corrected_iid', 'None')
-    side_code = results.get('side_code', 'None')
-
-    if raw_distance is not None: raw_distance = f"{raw_distance:.2f}"
-    if raw_iid is not None: raw_iid = f"{raw_iid:.2f}"
-    if corrected_distance is not None: corrected_distance = f"{corrected_distance:.2f}"
-    if corrected_iid is not None: corrected_iid = f"{corrected_iid:.2f}"
-
-    raw_message = f"Rdist: {raw_distance} m, Riid: {raw_iid}"
-    corrected_message = f"Cdist: {corrected_distance} m, Ciid: {corrected_iid}, Side: {side_code}"
-    full_message = f"{raw_message} | {corrected_message}"
-    messages = {'raw_message': raw_message, 'corrected_message': corrected_message, 'full_message': full_message}
-    return messages
+    if file_name is not None: plt.savefig(file_name, bbox_inches='tight')
+    if not close_after: plt.show()
+    if close_after: plt.close()
