@@ -14,14 +14,14 @@ class ClientConfig:
     ip: str
     # Acquisition settings
     sample_rate: int = 10000
-    samples: int = 100
+    samples: int = 250
     emitter_channel: int = 0
     left_channel: int = 2
     right_channel: int = 1
     # Processing parameters
     baseline_extent_m: int = 0.3       # in raw distance, meters
-    baseline_shift_right_m: int = 0   # in raw distance, meters
-    baseline_shift_up_a: int = 5000     # in amplitude units
+    baseline_shift_right_m: int = 0.1   # in raw distance, meters
+    baseline_shift_up_a: int = 2500    # in amplitude units
     integration_window_m: int = 0.1       # in raw distance, meters
 
 client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101")

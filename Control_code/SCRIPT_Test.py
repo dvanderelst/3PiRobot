@@ -2,31 +2,43 @@ import time
 from Library import Dialog
 from Library import Client
 from matplotlib import pyplot as plt
-
+import random
 
 #client = Client.Client(robot_number=2)
 client1 = Client.Client(robot_number=1)
 client2 = Client.Client(robot_number=2)
-client2.change_free_ping_period(120)
+#client2.change_free_ping_period(110)
 
-wait_for_confirmation = True
+clients = [client1, client2]
+
+wait_for_confirmation = False
 do_rotation = True
-do_translation = False
-selection_mode = 'max'
+do_translation = True
+selection_mode = 'first'
 
 while True:
     plt.close('all')
-    result = client1.ping_process(plot=True, selection_mode=selection_mode)
-    iid = result['corrected_iid']
-    corrected_distance = result['corrected_distance']
-    side_code = result['side_code']
+    results = []
+    # Echolocation stage
+    for client in clients:
+        result = client.ping_process(plot=False, selection_mode=selection_mode)
+        results.append(result)
 
-    if do_rotation:
-        if side_code == 'L': client1.step(angle=20)
-        if side_code == 'R': client1.step(angle=-20)
-        time.sleep(1)
-    if do_translation:
-        client1.step(distance=0.1)
+    for index, client in enumerate(clients):
+        result = results[index]
+        current_client = clients[index]
+        iid = result['corrected_iid']
+        corrected_distance = result['corrected_distance']
+        side_code = result['side_code']
+
+        if do_rotation:
+            magnitude = int(random.randrange(30, 40))
+            if side_code == 'L': client.step(angle=magnitude)
+            if side_code == 'R': client.step(angle=-magnitude)
+            time.sleep(1)
+        if do_translation:
+            client.step(distance=0.1)
+
     if wait_for_confirmation:
         response = Dialog.ask_yes_no("Continue",min_size=(400, 200))
         if response[0] == 'No': break

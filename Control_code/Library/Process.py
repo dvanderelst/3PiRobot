@@ -115,7 +115,7 @@ def locate_echo(sonar_package, selection_mode='first'):
     sonar_package.update(location_results)
     return sonar_package
 
-def apply_correction(sonar_package, eps_db=0.5):
+def apply_correction(sonar_package, eps_db=0):
     corrections = {}
     correction_applied = sonar_package.get('correction_applied', False)
     if correction_applied: return sonar_package  # already applied
@@ -197,6 +197,8 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
     echo_located = sonar_package.get('echo_located', False)
     distance_correction_applied = sonar_package.get('distance_correction_applied', False)
     iid_correction_applied = sonar_package.get('iid_correction_applied', False)
+    configuration = sonar_package['configuration']
+    robot_name = configuration.robot_name
     title = 'Raw Sonar Data'
     plot_settings = None
     sonar_data = sonar_package['sonar_data']
@@ -219,7 +221,7 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
 
     if distance_correction_applied: xlab = 'Corrected Distance [m]'
 
-    plt.figure()
+    plt.figure(figsize=(10, 5))
     plot_sonar_output = plot_sonar_data(distance_axis, sonar_package, plot_settings)
     plt.title(title)
     plt.tight_layout()
@@ -233,6 +235,12 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
         iid = sonar_package['corrected_iid']
         side_code = sonar_package['side_code']
         plt.suptitle(f'Corrected IID: {iid:.2f} dB ({side_code})', y=0.98, fontsize=10)
+
+    # Show the robot name in the bottom left corner of the plot
+    # Use relative coordinates (0 to 1)
+    transform = plt.gcf().transFigure
+    plt.text(0.01, 0.01, robot_name, transform=transform, fontsize=20, verticalalignment='bottom', horizontalalignment='left', color='gray', alpha=0.5)
+
 
     plt.xlabel(xlab)
     plt.ylabel('Amplitude [a.u.]')
