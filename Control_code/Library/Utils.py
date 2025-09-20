@@ -3,6 +3,23 @@ import math
 import numpy as np
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches
+import time
+import string
+
+def make_code(n=8, prefix=""):
+    # Use current time in microseconds
+    ts = int(time.time() * 1e6)
+    alphabet = string.ascii_uppercase  # only letters
+    base = len(alphabet)
+    # Convert timestamp into a base-26 string
+    chars = []
+    while ts > 0:
+        ts, rem = divmod(ts, base)
+        chars.append(alphabet[rem])
+    code = ''.join(reversed(chars))
+    # Pad or trim to desired length
+    code = (code[-n:]).rjust(n, 'A')
+    return f"{prefix}{code}"
 
 def make_ticks(vmin, vmax, steps, preferred=8):
     """Return (ticks, chosen_step) for [vmin, vmax] using the step from `steps`

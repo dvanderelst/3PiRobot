@@ -24,7 +24,10 @@ class Client:
         self.sock.settimeout(5)
         self.sock.connect((self.ip, 1234))
         self.calibration = {}
+        self.robot_number = robot_number
         self.load_calibration()
+
+        self._samples_in_buffers = None
 
     def print_message(self, message, category):
         robot_name = self.configuration.robot_name
@@ -128,19 +131,34 @@ class Client:
         msg = f"Step (d={distance}, a={angle}) took {time.time() - start:.4f}s"
         self.print_message(msg, category='INFO')
 
-    def acquire(self, action, plot=False):
+    def acquire(self, action):
         # assure that action is either 'ping' or 'listen'
+        start_time = time.time()
         error_message = f"Invalid action '{action}'. Action must be either 'ping' or 'listen'."
         if action not in ['ping', 'listen']: raise ValueError(error_message)
         start = time.time()
         sample_rate = self.configuration.sample_rate
         samples = self.configuration.samples
 
+        acquire_id = Utils.make_code(n=8)
+        cmd_dict= {'acquire_id': acquire_id, 'action': action, 'sample_rate': sample_rate, 'samples': samples}
+        self._send_dict(cmd_dict)
+        self._samples_in_buffers = samples  # remember for later
+        current_time = time.time()
+        duration = (current_time - start) * 1000.0
+        msg = f"Sent {action} command (id={acquire_id}, sr={sample_rate}, samples={samples}) took {duration:.1f}ms"
+        self.print_message(msg, category='INFO')
+        return acquire_id
+
+    def read_buffers(self, plot=False):
+        start_time = time.time()
+        samples = self._samples_in_buffers
         emitter_channel = self.configuration.emitter_channel
         left_channel = self.configuration.left_channel
         right_channel = self.configuration.right_channel
 
-        self._send_dict({'action': action, 'sample_rate': sample_rate, 'samples': samples})
+        cmd_dict = {'action': 'read'}
+        self._send_dict(cmd_dict)
         sonar_package = self._recv_msgpack()
         self._send_dict({'action': 'acknowledge'})  # send ack back
         # Flatten timing info into the main dict
@@ -157,12 +175,9 @@ class Client:
         sonar_package['sonar_data'] = sonar_data
         # Create messages and plot
         current_time = time.time()
-        window = 1000 * (samples/sample_rate)
-        duration = (current_time - start)*1000.0
-        listen_msg = f"Listening for {window:.1f}ms took {duration:.1f}ms"
-        ping_msg = f"Ping (Recording {window:.1f}ms) took {duration:.1f}ms"
-        if action == 'listen': self.print_message(listen_msg, category='INFO')
-        if action == 'ping': self.print_message(ping_msg, category='INFO')
+        duration = (current_time - start_time) * 1000.0
+        msg = f"Reading buffers took {duration:.1f}ms"
+        self.print_message(msg, category='INFO')
 
         effective_sample_rate = sonar_package['effective_fs_hz']
         raw_distance_axis = Utils.get_distance_axis(effective_sample_rate, samples)
@@ -176,11 +191,13 @@ class Client:
         return sonar_package
 
     def listen(self, plot=False):
-        sonar_package = self.acquire(action='listen', plot=plot)
+        self.acquire(action='listen')
+        sonar_package = self.read_buffers(plot=plot)
         return sonar_package
 
     def ping(self, plot=False):
-        sonar_package = self.acquire(action='ping', plot=plot)
+        self.acquire(action='ping')
+        sonar_package = self.read_buffers(plot=plot)
         return sonar_package
 
     def ping_process(self, plot=False, close_after=False, selection_mode='first'):

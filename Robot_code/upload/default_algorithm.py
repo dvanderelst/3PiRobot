@@ -106,6 +106,7 @@ def main(selected_ssid=None):
             command_queue = []
             if verbose: print(f"[Main] Received: {cmds}")
 
+
             for cmd in cmds:
                 action = cmd.get('action')
                 # Drive continuously (teleop-style)
@@ -131,7 +132,6 @@ def main(selected_ssid=None):
 
                     if new_free_ping_period is not None:
                         set_free_run(new_free_ping_period, state)
-
 
                 # Discrete move/turn steps
                 elif action == 'step':
@@ -164,17 +164,22 @@ def main(selected_ssid=None):
 
                     # ── Do the acquisition ──
                     display.write(0, action)
-                    buf0, buf1, buf2, timing_info = snr.acquire(action, sample_rate, samples)
-                    packed = bytes(buf0) + bytes(buf1) + bytes(buf2)
+                    snr.acquire(action, sample_rate, samples)
+                    snr.timing_info['acquire_id'] = cmd.get('acquire_id')
+                    if prev_period > 0: set_free_run(prev_period, state)
 
+                elif action == 'read':
+                    buf0 = snr.buf0
+                    buf1 = snr.buf1
+                    buf2 = snr.buf2
+                    timing_info = snr.timing_info
+                    packed = bytes(buf0) + bytes(buf1) + bytes(buf2)
                     response = {}
                     response['data'] = packed
                     response['timing_info'] = timing_info
                     response['mode'] = action
-                    print(f'[{action}] {timing_info}')
+                    #print(f'[Read] {timing_info}')
                     bridge.send_data(response)
-
-                    if prev_period > 0: set_free_run(prev_period, state)
 
                 elif action == 'acknowledge':
                     if verbose: print('[Main] Acknowledgment received')

@@ -32,7 +32,7 @@ class Sonar:
         self.timeout_us = 100_000
         self.post_emit_settle_us = 20
 
-        self.timing_stats = {}
+        self.timing_info = {}
 
     def emit(self):
         self.tgr_recv1.value(0); self.tgr_recv2.value(0)
@@ -78,8 +78,9 @@ class Sonar:
         span_us = time.ticks_diff(t_last, t_first) if (t_first is not None and t_last is not None) else 0
         eff_period_us = (span_us / intervals) if span_us > 0 else 0
         eff_fs_hz = (1_000_000.0 / eff_period_us) if eff_period_us > 0 else 0.0
-        self.timing_stats = {"requested_fs_hz": sample_rate, "effective_fs_hz": eff_fs_hz}
-        if DEBUG_TIMING: self.timing_stats["overruns"] = overruns  # small int; optional
+        self.timing_info['requested_fs_hz'] = sample_rate
+        self.timing_info['effective_fs_hz'] = eff_fs_hz
+        if DEBUG_TIMING: self.timing_info["overruns"] = overruns  # small int; optional
 
     def wait_for_emission(self):
         threshold = settings.pulse_threshold
@@ -92,26 +93,25 @@ class Sonar:
     def acquire(self, mode, sample_rate=None, n_samples=None):
         mode = mode.lower()
         t0 = now()
-        timing_info = {}
+        self.timing_info = {}
 
         if mode == 'pulse':
             self.emit()
-            timing_info['mode'] = 'pulse'
-            timing_info['total_duration_us'] = time_since(t0)
-            return None, None, None, timing_info
+            self.timing_info['mode'] = 'pulse'
+            self.timing_info['total_duration_us'] = time_since(t0)
 
         self.update_buffers(n_samples)
 
         if mode == 'ping':
-            timing_info['emission_delay_us'] = time_since(t0)
+            self.timing_info['emission_delay_us'] = time_since(t0)
             self.emit()
             time.sleep_us(self.post_emit_settle_us)
-            timing_info['emission_detected'] = self.wait_for_emission()
+            self.timing_info['emission_detected'] = self.wait_for_emission()
 
         if mode in ['ping', 'listen']:
             self.fill_buffers(sample_rate)
-            timing_info.update(self.timing_stats)
 
-        timing_info['mode'] = mode
-        timing_info['total_duration_us'] = time_since(t0)
-        return self.buf0, self.buf1, self.buf2, timing_info
+
+        self.timing_info['mode'] = mode
+        self.timing_info['total_duration_us'] = time_since(t0)
+

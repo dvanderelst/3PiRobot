@@ -512,7 +512,7 @@ def setup_wifi(ssids=None):
                     print("        → IP info:")
                     print(join_response)
                     ip = bridge.get_ip()
-                    print('IP address:', ip)
+                    print('[WiFi] IP address:', ip)
                     bridge.start_server(1234)
                     return bridge, ip, s
 
@@ -545,7 +545,7 @@ def setup_wifi(ssids=None):
     print(join_response)
 
     ip = bridge.get_ip()
-    print('IP address:', ip)
+    print('[WiFi] IP address:', ip)
 
     bridge.start_server(1234)
     return bridge, ip, selected_ssid
