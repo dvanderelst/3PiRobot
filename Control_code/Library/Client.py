@@ -11,6 +11,36 @@ from Library import Process
 from Library import Utils
 from Library import FileOperations
 from Library import Logging
+from rich.console import Console
+from rich.table import Table
+
+def print_robot_timing(package, compare_ID=None):
+    console = Console()
+    acquire_id = package.get('acquire_id', None)
+    requested = package.get('requested_fs_hz', None)
+    effective = package.get('effective_fs_hz', None)
+    sample_delay_us = package.get('sample_delay_us', None)
+    emission_detected = package.get('emission_detected', None)
+    total_duration_us = package.get('total_duration_us', None)
+    robot_name = package['configuration'].robot_name
+
+    id_matches = True
+    if compare_ID is not None: id_matches = acquire_id == compare_ID
+
+    table = Table(title=f"Robot Timing Report - {robot_name}")
+    table.add_column("Parameter", style="cyan", no_wrap=True)
+    table.add_column("Value", style="magenta")
+
+    table.add_row("Acquire ID", str(acquire_id))
+    if not id_matches: table.add_row("[bold red]WARNING[/bold red]", "Acquire ID does not match!")
+    table.add_row("Requested FS Hz", f"{requested:.2f}" if isinstance(requested, (int, float)) else str(requested))
+    table.add_row("Effective FS Hz", f"{effective:.2f}" if isinstance(effective, (int, float)) else str(effective))
+    table.add_row("Sample Delay (us)", str(sample_delay_us))
+    table.add_row("Emission Detected", str(emission_detected))
+    table.add_row("Total Duration (us)", str(total_duration_us))
+    console.print(table)
+
+
 
 
 class Client:
@@ -187,7 +217,10 @@ class Client:
         if self.calibration: sonar_package['calibration'] = self.calibration
         # Add client configuration
         sonar_package['configuration'] = self.configuration
-        if plot: Process.plot_sonar_data(raw_distance_axis, sonar_package);plt.show()
+        if plot:
+            plot_settings = {'y_max': 30000, 'y_min': 5000}
+            Process.plot_sonar_data(raw_distance_axis, sonar_package, plot_settings)
+            plt.show()
         return sonar_package
 
     def listen(self, plot=False):

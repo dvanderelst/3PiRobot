@@ -150,10 +150,18 @@ def apply_correction(sonar_package, eps_db=0):
     return sonar_package
 
 
+import numpy as np
+import matplotlib.pyplot as plt
+
 def plot_sonar_data(distance_axis, sonar_package, plot_settings=None):
-    meta_result = {} #To store stuff we might want to return
-    if plot_settings is None: plot_settings = {}
+    meta_result = {}  # To store stuff we might want to return
+    if plot_settings is None:
+        plot_settings = {}
+
     sonar_data = sonar_package['sonar_data']
+    effective_sample_rate = float(sonar_package['effective_fs_hz'])
+
+    # ---- Axis ranges (with optional overrides) ----
     x_min = float(distance_axis[0])
     x_max = float(distance_axis[-1])
     y_min = float(np.nanmin(sonar_data)) - 1000.0
@@ -163,34 +171,96 @@ def plot_sonar_data(distance_axis, sonar_package, plot_settings=None):
     if 'y_min' in plot_settings: y_min = float(plot_settings['y_min'])
     if 'y_max' in plot_settings: y_max = float(plot_settings['y_max'])
 
+    # ---- Main axis ----
     ax = plt.gca()
     ax.plot(distance_axis, sonar_data[:, 0], color='grey', marker='.', label='Emitter')
     ax.plot(distance_axis, sonar_data[:, 1], color='blue',  marker='.', label='Left Channel')
     ax.plot(distance_axis, sonar_data[:, 2], color='red',   marker='.', label='Right Channel')
-    # ---- Adaptive ticks for main x and y axes ----
+
+    # Adaptive ticks for main x and y axes
     x_ticks, _ = Utils.make_ticks(x_min, x_max, steps=[0.025, 0.05, 0.1, 0.2, 0.5, 1], preferred=9)
     y_ticks, _ = Utils.make_ticks(y_min, y_max, steps=[500, 1000, 2000, 5000], preferred=8)
     if x_ticks.size: ax.set_xticks(x_ticks)
     if y_ticks.size: ax.set_yticks(y_ticks)
     ax.set_ylim(y_min, y_max)
     ax.set_xlim(x_min, x_max)
-    # ---- Adaptive top axis using indices ----
-    n = len(distance_axis)
-    # Use indices 0..n-1 as the "range" and pick adaptive ticks
-    index_ticks, _ = Utils.make_ticks(0, n-1, steps=[10, 20, 50, 100, 200], preferred=10)
-    ax_top = ax.secondary_xaxis('top')
-    # Convert index ticks into positions on the distance axis
-    pos_ticks = distance_axis[index_ticks.astype(int)]
-    ax_top.set_ticks(pos_ticks)
-    ax_top.set_xticklabels([str(int(i)) for i in index_ticks])
-    ax_top.set_xlabel("Index")
+    ax.set_xlabel('Raw Distance [m]')
     ax.grid(True, which='both', axis='both')
 
+    # ---- Helpers for mapping distance <-> index <-> time ----
+    n = len(distance_axis)
+    idx = np.arange(n)
+
+    # Ensure monotonic for safe interpolation
+    if not np.all(np.diff(distance_axis) >= 0):
+        order = np.argsort(distance_axis)
+        d_sorted = distance_axis[order]
+        i_sorted = idx[order]
+    else:
+        d_sorted = distance_axis
+        i_sorted = idx
+
+    # distance -> index (continuous), and inverse
+    def idx_of_dist(x):
+        return np.interp(x, d_sorted, i_sorted, left=i_sorted[0], right=i_sorted[-1])
+
+    def dist_of_idx(i):
+        return np.interp(i, i_sorted, d_sorted, left=d_sorted[0], right=d_sorted[-1])
+
+    # distance -> time (s), and inverse (time -> distance)
+    def time_of_dist(x):
+        return idx_of_dist(x) / effective_sample_rate
+
+    def dist_of_time(t):
+        return dist_of_idx(t * effective_sample_rate)
+
+    # ---- Top axis #1: Sample index (secondary_xaxis) ----
+    ax_samples = ax.secondary_xaxis('top', functions=(idx_of_dist, dist_of_idx))
+    ax_samples.set_xlabel("Index")
+
+    # Nice integer ticks for sample index
+    index_ticks, _ = Utils.make_ticks(0, n - 1, steps=[10, 20, 50, 100, 200], preferred=10)
+    if index_ticks.size:
+        # Set ticks in "index space"; secondary axis handles mapping to distance positions
+        ax_samples.set_xticks(index_ticks)
+        ax_samples.set_xticklabels([str(int(i)) for i in index_ticks])
+
+        # ---- Top axis #2: Time in milliseconds ----
+    ax_time = ax.twiny()
+    ax_time.set_xlim(ax.get_xlim())
+    ax_time.spines['top'].set_position(('axes', 1.15))
+    ax_time.set_xlabel("Time [ms]")
+
+    # Total duration in ms
+    total_time_ms = (n - 1) / effective_sample_rate * 1000.0 if n > 1 else 0.0
+    time_steps = [1, 5, 10]
+
+    t_ticks, _ = Utils.make_ticks(0.0, total_time_ms, steps=time_steps, preferred=8)
+    if t_ticks.size:
+        # Convert ms ticks → distance positions
+        pos_ticks = dist_of_time(t_ticks / 1000.0)  # back to seconds for mapping
+        ax_time.set_xticks(pos_ticks)
+        ax_time.set_xticklabels([f"{int(t)}" for t in t_ticks])  # integers in ms
+
+    # ---- Legend (optional) ----
+    if plot_settings.get('show_legend', True): ax.legend(loc='best')
+
+    plt.tight_layout()
+
+    # ---- Return some metadata ----
     meta_result['x_min'] = x_min
     meta_result['x_max'] = x_max
     meta_result['y_min'] = y_min
     meta_result['y_max'] = y_max
+    meta_result['n_samples'] = n
+    meta_result['total_time_s'] = (n - 1) / effective_sample_rate if n > 1 else 0.0
+    meta_result['axes'] = {
+        'main': ax,
+        'samples_top': ax_samples,
+        'time_top': ax_time
+    }
     return meta_result
+
 
 
 def plot_sonar_package(sonar_package, file_name=None, close_after=False):

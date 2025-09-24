@@ -34,9 +34,20 @@ class Sonar:
 
         self.timing_info = {}
 
-    def emit(self):
-        self.tgr_recv1.value(0); self.tgr_recv2.value(0)
-        self.tgr_emit.value(1); time.sleep_us(75); self.tgr_emit.value(0)
+    def emit(self, execute=True, wait_for_detection=True):
+        threshold = settings.pulse_threshold
+        timeout_us = self.timeout_us
+        self.tgr_recv1.value(0)
+        self.tgr_recv2.value(0)
+        self.tgr_emit.value(execute)
+        time.sleep_us(75)
+        self.tgr_emit.value(0)
+        if not execute or not wait_for_detection: return False
+        start = now()
+        while True:
+            if self.adc_emit.read_u16() > threshold: return True
+            if time_since(start) > timeout_us: return False
+            time.sleep_us(1)
 
     def create_buffers(self):
         n = self.n_samples
@@ -82,36 +93,26 @@ class Sonar:
         self.timing_info['effective_fs_hz'] = eff_fs_hz
         if DEBUG_TIMING: self.timing_info["overruns"] = overruns  # small int; optional
 
-    def wait_for_emission(self):
-        threshold = settings.pulse_threshold
-        start = now()
-        while True:
-            if self.adc_emit.read_u16() > threshold: return True
-            if time_since(start) > self.timeout_us: return False
-            time.sleep_us(1)
+
 
     def acquire(self, mode, sample_rate=None, n_samples=None):
         mode = mode.lower()
-        t0 = now()
-        self.timing_info = {}
+        start_time = now()
+        self.timing_info = {'mode': mode}
 
         if mode == 'pulse':
-            self.emit()
+            self.emit(execute=True, wait_for_detection=False)
             self.timing_info['mode'] = 'pulse'
-            self.timing_info['total_duration_us'] = time_since(t0)
+            self.timing_info['total_duration_us'] = time_since(start_time)
+            return
 
         self.update_buffers(n_samples)
 
         if mode == 'ping':
-            self.timing_info['emission_delay_us'] = time_since(t0)
-            self.emit()
+            self.timing_info['emission_detected'] = self.emit(execute=True, wait_for_detection=True)
             time.sleep_us(self.post_emit_settle_us)
-            self.timing_info['emission_detected'] = self.wait_for_emission()
 
-        if mode in ['ping', 'listen']:
-            self.fill_buffers(sample_rate)
-
-
-        self.timing_info['mode'] = mode
-        self.timing_info['total_duration_us'] = time_since(t0)
+        self.timing_info['sample_delay_us'] = time_since(start_time)
+        self.fill_buffers(sample_rate)
+        self.timing_info['total_duration_us'] = time_since(start_time)
 
