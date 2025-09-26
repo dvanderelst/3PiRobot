@@ -6,14 +6,14 @@ import numpy as np
 import easygui
 
 # ─── Baseline collection Settings ────
-robot_nr = 2
+robot_nr = 3
 repeats = 10
 real_distance1 = 0.3 # meters
 real_distance2 = 0.5 # meters
 angles = [-40, -30, -20, -10, 0, 10, 20, 30, 40]
 delete_calibration = False
-collect_baseline = True
-collect_distance_calibration = True
+collect_baseline = False
+collect_distance_calibration = False
 collect_sweep_data = True
 # ─────────────────────────────────────
 
@@ -46,7 +46,7 @@ if collect_baseline:
 
 # We need to reload the calibration file because it might have been updated
 client.load_calibration() # Reload calibration
-sonar_package = client.ping()
+sonar_package = client.read_and_process()
 sonar_package = Process.locate_echo(sonar_package)
 Process.plot_sonar_package(sonar_package)
 

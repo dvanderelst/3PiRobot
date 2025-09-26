@@ -93,8 +93,6 @@ class Sonar:
         self.timing_info['effective_fs_hz'] = eff_fs_hz
         if DEBUG_TIMING: self.timing_info["overruns"] = overruns  # small int; optional
 
-
-
     def acquire(self, mode, sample_rate=None, n_samples=None):
         mode = mode.lower()
         start_time = now()

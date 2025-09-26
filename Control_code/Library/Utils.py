@@ -6,6 +6,11 @@ import matplotlib.patches as patches
 import time
 import string
 
+def sleep_ms(min_ms, max_ms=None):
+    if max_ms is None:max_ms = min_ms
+    ms = np.random.randint(min_ms, max_ms + 1)
+    time.sleep(ms / 1000.0)
+
 def make_code(n=8, prefix=""):
     # Use current time in microseconds
     ts = int(time.time() * 1e6)

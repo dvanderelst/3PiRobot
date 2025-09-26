@@ -1,38 +1,46 @@
 import time
 from Library import Dialog
 from Library import Client
+from Library import Utils
 from matplotlib import pyplot as plt
 import random
 
-#client = Client.Client(robot_number=2)
+
 client1 = Client.Client(robot_number=1)
 client2 = Client.Client(robot_number=2)
-#client2.change_free_ping_period(110)
 
-clients = [client1, client2]
+clients = [client1,client2]
 
 wait_for_confirmation = False
 do_rotation = True
 do_translation = True
 selection_mode = 'first'
 
+
 while True:
     plt.close('all')
     results = []
-    # Echolocation stage
+    random.shuffle(clients)
     for client in clients:
-        result = client.ping_process(plot=False, selection_mode=selection_mode)
-        results.append(result)
+        client.acquire('ping')
+        Utils.sleep_ms(0, 50)
 
-    for index, client in enumerate(clients):
-        result = results[index]
-        current_client = clients[index]
-        iid = result['corrected_iid']
-        corrected_distance = result['corrected_distance']
-        side_code = result['side_code']
+    sonar_packages = []
+    index = 1
+    for client in clients:
+        if index == 1: plot = True
+        else: plot = False
+        sonar_package = client.read_and_process(do_ping=False, plot=plot, selection_mode=selection_mode)
+        sonar_packages.append(sonar_package)
+        iid = sonar_package['corrected_iid']
+        corrected_distance = sonar_package['corrected_distance']
+        side_code = sonar_package['side_code']
+        index = index + 1
 
         if do_rotation:
-            magnitude = int(random.randrange(30, 40))
+            magnitude = 10
+            if corrected_distance < 0.8: magnitude = 20
+            if corrected_distance < 0.4: magnitude = 50
             if side_code == 'L': client.step(angle=magnitude)
             if side_code == 'R': client.step(angle=-magnitude)
             time.sleep(1)
@@ -43,4 +51,3 @@ while True:
         response = Dialog.ask_yes_no("Continue",min_size=(400, 200))
         if response[0] == 'No': break
     else: time.sleep(1)
-

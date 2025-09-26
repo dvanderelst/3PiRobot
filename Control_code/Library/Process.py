@@ -150,9 +150,6 @@ def apply_correction(sonar_package, eps_db=0):
     return sonar_package
 
 
-import numpy as np
-import matplotlib.pyplot as plt
-
 def plot_sonar_data(distance_axis, sonar_package, plot_settings=None):
     meta_result = {}  # To store stuff we might want to return
     if plot_settings is None:
@@ -243,7 +240,7 @@ def plot_sonar_data(distance_axis, sonar_package, plot_settings=None):
         ax_time.set_xticklabels([f"{int(t)}" for t in t_ticks])  # integers in ms
 
     # ---- Legend (optional) ----
-    if plot_settings.get('show_legend', True): ax.legend(loc='best')
+    if plot_settings.get('show_legend', False): ax.legend(loc='best')
 
     plt.tight_layout()
 
@@ -254,11 +251,7 @@ def plot_sonar_data(distance_axis, sonar_package, plot_settings=None):
     meta_result['y_max'] = y_max
     meta_result['n_samples'] = n
     meta_result['total_time_s'] = (n - 1) / effective_sample_rate if n > 1 else 0.0
-    meta_result['axes'] = {
-        'main': ax,
-        'samples_top': ax_samples,
-        'time_top': ax_time
-    }
+    meta_result['axes'] = { 'main': ax, 'samples_top': ax_samples, 'time_top': ax_time}
     return meta_result
 
 
@@ -289,36 +282,41 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
         y_max = max(y_max, max_sonar_data) + 500
         plot_settings = {'y_min': y_min, 'y_max': y_max}
 
-    if distance_correction_applied: xlab = 'Corrected Distance [m]'
+    if distance_correction_applied:
+        title = 'Corrected Results'
+        xlab = 'Corrected Distance [m]'
 
     plt.figure(figsize=(10, 5))
     plot_sonar_output = plot_sonar_data(distance_axis, sonar_package, plot_settings)
-    plt.title(title)
-    plt.tight_layout()
+    main_axis = plot_sonar_output['axes']['main']
+    # samples_top_axis = plot_sonar_output['axes']['samples_top']
+    # time_top_axis = plot_sonar_output['axes']['time_top']
+
+    main_axis.set_title(title)
 
     if echo_located and crossed:
-        plt.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
-        plt.axvspan(onset_distance, offset_distance, color='gray', alpha=0.3, label='Integration Window')
-        plt.ylim(y_min, y_max)
+        main_axis.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
+        main_axis.axvspan(onset_distance, offset_distance, color='gray', alpha=0.3, label='Integration Window')
+        main_axis.set_ylim(y_min, y_max)
 
+    processed_msg = f'[{robot_name}]'
     if iid_correction_applied:
         iid = sonar_package['corrected_iid']
         side_code = sonar_package['side_code']
-        plt.suptitle(f'Corrected IID: {iid:.2f} dB ({side_code})', y=0.98, fontsize=10)
+        processed_msg = f'[{robot_name}] Corrected IID: {iid:.2f} dB ({side_code})'
 
     # Show the robot name in the bottom left corner of the plot
     # Use relative coordinates (0 to 1)
     transform = plt.gcf().transFigure
-    plt.text(0.01, 0.01, robot_name, transform=transform, fontsize=20, verticalalignment='bottom', horizontalalignment='left', color='gray', alpha=0.5)
+    plt.text(0.01, 0.01, processed_msg, transform=transform, fontsize=15, verticalalignment='bottom', horizontalalignment='left', color='gray', alpha=1)
 
+    main_axis.set_xlabel(xlab)
+    main_axis.set_ylabel('Amplitude [a.u.]')
 
-    plt.xlabel(xlab)
-    plt.ylabel('Amplitude [a.u.]')
-    plt.legend(loc='upper right')
+    main_axis.set_facecolor('#f5f5dc')
+    main_axis.legend(loc='upper right')
+
     plt.tight_layout()
-
-    ax = plt.gca()
-    ax.set_facecolor('#f5f5dc')
 
     if file_name is not None: plt.savefig(file_name, bbox_inches='tight')
     if not close_after: plt.show()

@@ -228,23 +228,11 @@ class Client:
         sonar_package = self.read_buffers(plot=plot)
         return sonar_package
 
-    def ping(self, plot=False):
-        self.acquire(action='ping')
-        sonar_package = self.read_buffers(plot=plot)
-        return sonar_package
-
-    def ping_process(self, plot=False, close_after=False, selection_mode='first'):
-        """
-        1) Acquire a sonar_package (data + raw_distance_axis + timing).
-        2) Run echo detection (locate_echo) using the loaded calibration.
-        3) Apply distance/IID correction in one place (apply_correction).
-        4) Warn if corrections weren’t applied.
-        5) Optionally plot, then return the corrected result dict.
-        """
+    def read_and_process(self, do_ping=True, plot=False, close_after=False, selection_mode='first'):
         calibration = self.calibration
 
-        # 1) Acquire (single dict: sonar_data, raw_distance_axis, timing, etc.)
-        sonar_package = self.ping(plot=False)
+        if do_ping: self.acquire(action='ping')
+        sonar_package = self.read_buffers()
 
         # If no calibration, return the bare package so downstream can still inspect/plot raw
         if not calibration:
@@ -260,10 +248,6 @@ class Client:
         if not sonar_package.get('iid_correction_applied', False):
             self.print_message("No IID correction applied.", "WARNING")
 
-        # Human-readable strings (will include corrected_* when present)
-        # corrected.update(Process.create_messages(corrected))
-
-        # 5) Optional plot
         if plot:
             file_name = plot if isinstance(plot, str) else None
             Process.plot_sonar_package(sonar_package, file_name=file_name, close_after=close_after)
