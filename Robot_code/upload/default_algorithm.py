@@ -16,6 +16,9 @@ ticks_ms   = time.ticks_ms
 ticks_add  = time.ticks_add
 ticks_diff = time.ticks_diff
 
+def time_since(previous_time):
+    return time.ticks_diff(time.ticks_us(), previous_time)
+
 
 def set_free_run(val_ms, state):
     """
@@ -33,6 +36,8 @@ def set_free_run(val_ms, state):
     else:
         state['next_due'] = None
         state['display'].write(4, 'Free: off')
+
+
 
 def main(selected_ssid=None):
     beeper = beeps.Beeper()
@@ -87,6 +92,7 @@ def main(selected_ssid=None):
 
     # Initialize sonar. Wait until here to avoid clash with buzzer
     snr = sonar.Sonar()
+    last_cmd_received = ticks_ms()
 
     while True:
         # Cache "now" once per loop for consistent timing decisions
@@ -98,10 +104,20 @@ def main(selected_ssid=None):
 
         # ── Safety: Bumpers ──
         bump_left, bump_right = bump.read()
-        if bump_left or bump_right: drive.stop()
+        if bump_left or bump_right:
+            print(f"[Main] Stopping robot because of bumper")
+            drive.stop()
+
+        # -- Safety: Auto-stop if no command received for a while
+        now = ticks_ms()
+        if ticks_diff(now, last_cmd_received) > 2500:
+            last_cmd_received = ticks_ms()
+            if verbose: print(f"[Main] Stopping robot due to inactivity")
+            drive.stop()
 
         # ── Command Processing ──
         if command_queue:
+            last_cmd_received = ticks_ms()
             cmds = command_queue
             command_queue = []
             if verbose: print(f"[Main] Received: {cmds}")

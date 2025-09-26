@@ -20,9 +20,9 @@ class ClientConfig:
     right_channel: int = 1
     # Processing parameters
     baseline_extent_m: int = 0.3       # in raw distance, meters
-    baseline_shift_right_m: int = 0.15   # in raw distance, meters
+    baseline_shift_right_m: int = 0.05   # in raw distance, meters
     baseline_shift_up_a: int = 5000   # in amplitude units
-    integration_window_m: int = 0.2       # in raw distance, meters
+    integration_window_m: int = 0.17       # in raw distance, meters
 
 client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101")
 client2 = ClientConfig(robot_name="Robot02", ip="192.168.0.102")
