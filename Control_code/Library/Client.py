@@ -6,7 +6,7 @@ import time
 import select
 from matplotlib import pyplot as plt
 
-import Library.Settings
+from Library import Settings
 from Library import Process
 from Library import Utils
 from Library import FileOperations
@@ -46,7 +46,7 @@ def print_robot_timing(package, compare_ID=None):
 class Client:
     def __init__(self, robot_number=0, ip=None):
         index = robot_number - 1
-        configuration = Library.Settings.get_client_config(index)
+        configuration = Settings.get_client_config(index)
         self.configuration = configuration
         self.ip = self.configuration.ip
         if ip is not None: self.ip = ip

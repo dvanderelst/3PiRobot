@@ -2,7 +2,7 @@ import re, hashlib
 import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from Library.Settings import client_verbosity, controller_verbosity
+from Library.Settings import client_verbosity, controller_verbosity, tracker_verbosity
 
 # --- timing flags -------------------------------------------------------------
 SHOW_WALLCLOCK    = False  # [HH:MM:SS.mmm]
@@ -153,6 +153,8 @@ def _origin_style_for(origin: str) -> str:
     # Special-case controller
     if origin == "Controller":
         return "\033[1;96m"  # bold bright-cyan
+    if origin == "Tracker":
+        return "\033[1;92m"  # bold bright-green
 
     # Deterministic color per origin (e.g., Robot01, Robot02, etc.)
     if USE_256_ORIGIN:
@@ -201,6 +203,7 @@ def print_message(origin, message, category="INFO"):
     verbose = 2
     if origin == "Controller": verbose = controller_verbosity
     if str(origin).startswith("Robot"): verbose = client_verbosity
+    if origin == 'Tracker': verbose = tracker_verbosity
 
     # Validate level
     category = category.upper()

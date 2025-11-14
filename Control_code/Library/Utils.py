@@ -6,6 +6,39 @@ import matplotlib.patches as patches
 import time
 import string
 
+def wrap_angle(angle, mode='deg180'):
+    """
+    Wrap angles to [-180, 180) or [0, 360).
+
+    Parameters
+    ----------
+    angle : scalar, list/tuple, or numpy array
+    mode : 'deg180' for [-180,180), 'deg360' for [0,360)
+
+    Returns
+    -------
+    scalar, list, or numpy array
+        Wrapped angle(s), matching input type.
+    """
+    # Track original type
+    is_scalar = np.isscalar(angle)
+    is_listlike = isinstance(angle, (list, tuple))
+    # Convert to array for math
+    arr = np.asarray(angle, dtype=float)
+    # Wrap
+    if mode == 'deg180':
+        wrapped = ((arr + 180) % 360) - 180
+    elif mode == 'deg360':
+        wrapped = arr % 360
+    else:
+        raise ValueError("mode must be 'deg180' or 'deg360'")
+    # Restore original type
+    if is_scalar:
+        return float(wrapped)
+    if is_listlike:
+        return wrapped.tolist()
+    return wrapped
+
 def sleep_ms(min_ms, max_ms=None):
     if max_ms is None:max_ms = min_ms
     ms = np.random.randint(min_ms, max_ms + 1)

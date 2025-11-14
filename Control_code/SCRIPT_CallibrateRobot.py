@@ -6,7 +6,7 @@ import numpy as np
 import easygui
 
 # ─── Baseline collection Settings ────
-robot_nr = 3
+robot_nr = 1
 repeats = 10
 real_distance1 = 0.3 # meters
 real_distance2 = 0.5 # meters

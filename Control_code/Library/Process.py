@@ -268,6 +268,7 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
     distance_axis = sonar_package['raw_distance_axis']
     xlab = 'Raw Distance [m]'
     max_sonar_data = np.max(sonar_data)
+    crossed = False
     if distance_correction_applied: distance_axis = sonar_package['corrected_distance_axis']
     if echo_located or distance_correction_applied:
         title = 'Locate Echo Results'
@@ -293,9 +294,8 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
     # time_top_axis = plot_sonar_output['axes']['time_top']
 
     main_axis.set_title(title)
-
+    main_axis.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
     if echo_located and crossed:
-        main_axis.plot(distance_axis, threshold, color='black', linestyle='--', label='Threshold')
         main_axis.axvspan(onset_distance, offset_distance, color='gray', alpha=0.3, label='Integration Window')
         main_axis.set_ylim(y_min, y_max)
 
