@@ -1,4 +1,4 @@
-from PyLorex.library import ServerClient
+from PyLorex.Library import ServerClient
 from Library import Logging
 from Library import Settings
 from Library import Utils
@@ -13,7 +13,7 @@ class LorexTracker:
     def print_message(self, message, category):
         Logging.print_message('Tracker', message, category)
 
-    def get_position(self, robot_number, simple=True):
+    def get_position(self, robot_number, simple=True, as_dict=True):
         index = robot_number - 1
         configuration = Settings.get_client_config(index)
         aruco_id = configuration.aruco_id
@@ -31,6 +31,7 @@ class LorexTracker:
         yaw = Utils.wrap_angle(yaw)
 
         self.print_message(message, message_type)
-        if simple: return x, y, yaw
+        if simple and not as_dict: return x, y, yaw
+        if simple and as_dict: return {'x': x, 'y': y, 'yaw': yaw}
         package = {'camera_name': camera_name, 'x': x, 'y': y, 'yaw': yaw}
         return package
