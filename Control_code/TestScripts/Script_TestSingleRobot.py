@@ -1,3 +1,6 @@
+import sys
+sys.path.append('..')  # Add the parent directory
+
 import time
 from matplotlib import pyplot as plt
 from Library import Dialog
@@ -6,8 +9,6 @@ from Library import Utils
 from Library import LorexTracker
 
 robot_number = 1
-
-
 
 client = Client.Client(robot_number=robot_number)
 tracker = LorexTracker.LorexTracker()

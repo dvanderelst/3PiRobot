@@ -1,3 +1,6 @@
+import sys
+sys.path.append('..')  # Add the parent directory
+
 import time
 
 from Library import Client
