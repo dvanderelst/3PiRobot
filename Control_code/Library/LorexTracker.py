@@ -1,4 +1,4 @@
-from PyLorex.Library import ServerClient
+from LorexLib import ServerClient
 from Library import Logging
 from Library import Settings
 from Library import Utils

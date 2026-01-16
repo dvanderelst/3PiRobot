@@ -1,20 +1,16 @@
 
-.idea/
+*.idea*
+*__pycache*
 
-old/
+############## Control_code sub repo
+Control_code/Library/RobotCalibration/
+Control_code/TestScripts
+Control_code/Plots/
+Control_code/Data/
 
-__pycache__/
-
-*passwords.py
-baselines/
-
-Library/acoustic_functions/plots/
-
-plots/
-
-Control_code/Library/robot_calibration/
-
+############## Robot code sub repo
 robot_code/.Trash-1000/
 robot_code/System Volume Information/
 
+############## Updater sub repo
 Updater/staging/

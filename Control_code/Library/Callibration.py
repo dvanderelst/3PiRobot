@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 
 from Library import FileOperations
 from Library import Logging
-from Library import Process
+from Library import AcousticProcessing
 from Library import Utils
 
 
@@ -117,7 +117,7 @@ def get_distance_data(client, calibration, real_distance, nr_repeats=10):
     close_after = True
     for i in range(nr_repeats):
         if i == nr_repeats - 1: close_after = False
-        plot_basename = f'dist_{real_distance:.2f}_repeat_{i + 1}.png'
+        plot_basename = f'dist_{real_distance:.2f}_repeat_{i + 1}'
         file_name = FileOperations.get_calibration_plot(robot_name, plot_basename)
         message = f"Distance data: {i + 1}/{nr_repeats}..."
         Logging.print_message('Baseline', message, category='INFO')

@@ -7,7 +7,7 @@ import select
 from matplotlib import pyplot as plt
 
 from Library import Settings
-from Library import Process
+from Library import AcousticProcessing
 from Library import Utils
 from Library import FileOperations
 from Library import Logging
@@ -239,8 +239,8 @@ class Client:
             self.print_message("No calibration loaded. Returning unprocessed data.", "WARNING")
             return sonar_package
 
-        sonar_package = Process.locate_echo(sonar_package, selection_mode)
-        sonar_package = Process.apply_correction(sonar_package)
+        sonar_package = AcousticProcessing.locate_echo(sonar_package, selection_mode)
+        sonar_package = AcousticProcessing.apply_correction(sonar_package)
 
         # Warnings if a correction wasn’t applied
         if not sonar_package.get('distance_correction_applied', False):
@@ -250,7 +250,7 @@ class Client:
 
         if plot:
             file_name = plot if isinstance(plot, str) else None
-            Process.plot_sonar_package(sonar_package, file_name=file_name, close_after=close_after)
+            AcousticProcessing.plot_sonar_package(sonar_package, file_name=file_name, close_after=close_after)
 
         return sonar_package
 

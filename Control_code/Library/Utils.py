@@ -177,3 +177,15 @@ def draw_integration_box(ax, bounds, color='gray', alpha=0.3, onset_color='red')
     ax.add_patch(rect)
     # Draw onset line
     ax.axvline(x_min, color=onset_color, linestyle='--', label='Onset')
+
+
+def none2nan(array):
+    arr = np.asarray(array, dtype=float)
+    arr[arr == None] = np.nan  # noqa: E711
+    return arr
+
+
+def nonzero_indices(array):
+    arr = np.asarray(array)
+    indices = np.nonzero(arr)[0]
+    return indices
