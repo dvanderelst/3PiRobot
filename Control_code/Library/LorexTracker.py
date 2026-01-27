@@ -32,6 +32,6 @@ class LorexTracker:
 
         self.print_message(message, message_type)
         if simple and not as_dict: return x, y, yaw
-        if simple and as_dict: return {'x': x, 'y': y, 'yaw': yaw}
-        package = {'camera_name': camera_name, 'x': x, 'y': y, 'yaw': yaw}
+        if simple and as_dict: return {'x': x, 'y': y, 'yaw_deg': yaw}
+        package = {'camera_name': camera_name, 'x': x, 'y': y, 'yaw_deg': yaw}
         return package

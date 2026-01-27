@@ -1,10 +1,11 @@
 import ipaddress
 import math
-import numpy as np
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches
 import time
 import string
+import numpy as np
+from scipy.interpolate import griddata
 
 def wrap_angle(angle, mode='deg180'):
     """
@@ -189,3 +190,114 @@ def nonzero_indices(array):
     arr = np.asarray(array)
     indices = np.nonzero(arr)[0]
     return indices
+
+
+def polar_plot(angle_deg, distance):
+    min_distance = np.min(distance)
+    if min_distance < 0: distance = distance - np.min(distance)
+    radians = np.deg2rad(angle_deg)
+    plt.axes(projection='polar')
+    plt.polar(radians, distance)
+
+def fill_nans_linear(x):
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    isnan = np.isnan(x)
+    if not isnan.any(): return x
+    idx = np.arange(n)
+    x[isnan] = np.interp(idx[isnan], idx[~isnan], x[~isnan])
+    return x
+
+
+def chip1d(array, n):
+    length = len(array)
+    if n < 1: return array
+    if not length % 2 == 1: raise ValueError("array must have odd length")
+    if 2 * n >= length: return array[length // 2]
+    return array[n:-n]
+
+
+def chip2d(array, n):
+    width = array.shape[1]
+    if n < 1: return array
+    if not width % 2 == 1: raise ValueError("array must have odd width")
+    if 2 * n >= width: return array[:, width // 2]
+    return array[:, n:-n]
+
+def chip(array, n):
+    if array.ndim == 1: return chip1d(array, n)
+    if array.ndim == 2: return chip2d(array, n)
+    raise ValueError("array of wrong shape")
+
+def get_extrema_positions(array, extrema='max'):
+    if array.ndim == 1:
+        if extrema == 'min': return np.argmin(array)
+        if extrema == 'max': return np.argmax(array)
+    if array.ndim == 2:
+        if extrema == 'min': return np.argmin(array, axis=1)
+        if extrema == 'max': return np.argmax(array, axis=1)
+
+def get_side_average(array):
+    if array.ndim == 1:
+        length = len(array)
+        middle = length // 2
+        left_side = np.sum(array[:middle])
+        right_side = np.sum(array[middle+1:])
+        side = np.sign(right_side - left_side)
+        return side
+    if array.ndim == 2:
+        width = array.shape[1]
+        middle = width // 2
+        left_side = array[:, :middle]
+        right_side = array[:, middle+1:]
+        left_side = np.sum(left_side, axis=1)
+        right_side = np.sum(right_side, axis=1)
+        side = np.sign(right_side - left_side)
+        return side
+
+def get_extrema_values(array, extrema='max'):
+    if array.ndim == 1:
+        if extrema == 'min': return np.min(array)
+        if extrema == 'max': return np.max(array)
+    if array.ndim == 2:
+        if extrema == 'min': return np.min(array, axis=1)
+        if extrema == 'max': return np.max(array, axis=1)
+
+
+
+
+def interpolate_scattered_xyc(x, y, c, nx=200, ny=200, method='linear'):
+    """
+    Interpolate scattered (x, y, c) data onto a regular grid.
+
+    Parameters
+    ----------
+    x, y, c : array-like
+        1D arrays of equal length with unordered sample points.
+    nx, ny : int
+        Number of grid points in x and y directions.
+    method : {'linear', 'cubic', 'nearest'}
+        Interpolation method passed to scipy.interpolate.griddata.
+
+    Returns
+    -------
+    Xi, Yi : 2D arrays
+        Meshgrid of x and y coordinates.
+    Ci : 2D array
+        Interpolated c values on the grid (NaNs where undefined).
+    """
+    x = np.asarray(x)
+    y = np.asarray(y)
+    c = np.asarray(c)
+
+    xi = np.linspace(x.min(), x.max(), nx)
+    yi = np.linspace(y.min(), y.max(), ny)
+    Xi, Yi = np.meshgrid(xi, yi)
+
+    Ci = griddata(
+        (x, y), c,
+        (Xi, Yi),
+        method=method
+    )
+
+    return Xi, Yi, Ci
