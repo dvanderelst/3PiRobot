@@ -14,3 +14,5 @@ robot_code/System Volume Information/
 
 ############## Updater sub repo
 Updater/staging/
+
+Control_code/cache/

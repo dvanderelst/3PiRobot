@@ -1,146 +1,114 @@
 #%%
 """
 This script calculates the correspondence between the layout of the environment and the
-distance/side of closest obstacle as inferred from the the sonar data.
+distance/side of closest obstacle as inferred from the sonar data.
 """
 import numpy as np
 from Library import Utils
 from Library import DataProcessor
 from matplotlib import pyplot as plt
 import pandas as pd
-import seaborn as sn
 
-az_steps = 19
-max_extent = 60
-chip_steps = 8
 
-processor1 = DataProcessor.DataProcessor("session6")
-processor2 = DataProcessor.DataProcessor("session7")
-processor3 = DataProcessor.DataProcessor("session8")
+az_steps = 121
+max_extent = 45
+extents = [20, 40, 60, 80, 100]
 
-collated1 = processor1.collate_data(az_min=-max_extent, az_max=max_extent, az_steps=az_steps)
-collated2 = processor2.collate_data(az_min=-max_extent, az_max=max_extent, az_steps=az_steps)
-collated3 = processor3.collate_data(az_min=-max_extent, az_max=max_extent, az_steps=az_steps)
-
-collated_results = [collated1, collated2, collated3]
-all_centers = collated1['centers']
-all_centers = np.round(all_centers)
-profiles = DataProcessor.collect(collated_results, 'profiles')
-
-sonar_iid = DataProcessor.collect(collated_results, 'corrected_iid')
-sonar_iid_sign = np.sign(sonar_iid)
-sonar_distance = DataProcessor.collect(collated_results, 'corrected_distance')
-
-rob_x = DataProcessor.collect(collated_results, 'rob_x')
-rob_y = DataProcessor.collect(collated_results, 'rob_y')
-rob_yaw_deg = DataProcessor.collect(collated_results, 'rob_yaw_deg')
-wall_x = processor1.wall_x
-wall_y = processor1.wall_y
-
+sessions = [ 'session03', 'session04', 'session06', 'session07']
+collection = DataProcessor.DataCollection(sessions, az_min=-max_extent, az_max=max_extent, az_steps=az_steps)
+wall_x, wall_y = collection.get_walls(processor_index=0)
+centers = collection.get_centers()
 #%%
+
+full_profiles = collection.get_field('profiles') / 1000 #to meters
+sonar_distance = collection.get_field('corrected_distance')
+sonar_iid = collection.get_field('corrected_iid')
+sonar_data = collection.get_field('sonar_data')
+sonar_iid_sign = np.sign(sonar_iid)
+
+
 all_results = []
-for chip_n in range(chip_steps):
-    print(chip_n)
-    chipped_profiles = Utils.chip(profiles, chip_n)
-    chipped_centers = Utils.chip(all_centers, chip_n)
-    chipped_extent = np.max(chipped_centers)
+for extent in extents:
+    center_indices = np.where(np.abs(centers) <= extent)[0]
+    constrained_profiles = full_profiles[:, center_indices]
+    constrained_centers = centers[center_indices]
 
-    indices = Utils.get_extrema_positions(chipped_profiles, 'min')
-    closest_visual_direction = chipped_centers[indices]
+    indices = Utils.get_extrema_positions(constrained_profiles, 'min')
+    closest_visual_direction = constrained_centers[indices]
     closest_visual_side = np.sign(closest_visual_direction) * -1
-    closest_visual_side_average = Utils.get_side_average(chipped_profiles)
-    closest_visual_distance = Utils.get_extrema_values(chipped_profiles, 'min')
+    closest_visual_distance = Utils.get_extrema_values(constrained_profiles, 'min')
 
-
-    result = {}
-    result['closest_visual_direction'] = closest_visual_direction
-    result['closest_visual_distance'] = closest_visual_distance
-    result['closest_visual_side_average'] = closest_visual_side_average
-    result['closest_visual_side'] = closest_visual_side
-    result['sonar_iid'] = sonar_iid
-    result['sonar_iid_sign'] = sonar_iid_sign
-    result['sonar_distance'] = sonar_distance
-    result['rob_x'] = rob_x
-    result['rob_y'] = rob_y
-    result['rob_yaw_deg'] = rob_yaw_deg
-
-    result = pd.DataFrame(result)
-    result['chipped_extent'] = chipped_extent
-    result['chip_n'] = chip_n
-
-    all_results.append(result)
+    extent_results = {}
+    extent_results['closest_visual_direction'] = closest_visual_direction
+    extent_results['closest_visual_distance'] = closest_visual_distance
+    extent_results['closest_visual_side'] = closest_visual_side
+    extent_results['sonar_distance'] = sonar_distance
+    extent_results['sonar_iid'] = sonar_iid
+    extent_results['sonar_iid_sign'] = sonar_iid_sign
+    extent_results = pd.DataFrame(extent_results)
+    extent_results['extent'] = extent
+    all_results.append(extent_results)
 
 all_results = pd.concat(all_results, axis=0)
 all_results['side_matches'] = all_results['closest_visual_side'] == all_results['sonar_iid_sign']
-all_results['side_matches_average'] = all_results['closest_visual_side_average'] == all_results['sonar_iid_sign']
-
-print(all_results.columns)
 
 #%%
-filtered = all_results.query('closest_visual_side!=0')
+plt.figure(figsize=(12, 8))
+too_fars = []
+too_closes = []
+for i, extent in enumerate(extents):
+    selected_results = all_results.query('extent == @extent')
+    closest_visual_distance = selected_results['closest_visual_distance']
+    sonar_distance = selected_results['sonar_distance']
 
-grp = filtered.groupby('chipped_extent')
-mn1 = grp.agg({'side_matches': 'mean'})
-mn1 = mn1.reset_index()
+    sonar_too_far = (sonar_distance - closest_visual_distance) > 1
+    sonar_too_close = (sonar_distance - closest_visual_distance) < -1
 
-mn2 = grp.agg({'side_matches_average': 'mean'})
-mn2 = mn2.reset_index()
+    too_far = np.mean(sonar_too_far)
+    too_close = np.mean(sonar_too_close)
+    too_fars.append(too_far)
+    too_closes.append(too_close)
 
-plt.figure()
-plt.plot(mn1['chipped_extent'], mn1['side_matches'], label='Closest visual direction match')
-plt.plot(mn2['chipped_extent'], mn2['side_matches_average'], label='Closest visual direction match, average')
-plt.xlabel('Extent (deg)')
+
+    plt.subplot(3, 2, i + 1)
+    plt.scatter(closest_visual_distance, sonar_distance)
+    plt.plot([0, 1.5], [0, 1.5])
+    plt.plot([0, 1.5], [-0.1, 1.4])
+    plt.xlabel('closest visual distance')
+    plt.ylabel('sonar distance')
+    plt.title(str(extent))
+
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 8))
+plt.plot(extents, too_fars, label='Sonar Too Far')
+plt.plot(extents, too_closes, label='Sonar Too Close')
 plt.legend()
 plt.show()
 
-#%%
-rhos = []
-extents = []
-plt.figure(figsize=(12, 8))
-for chip_n in range(chip_steps):
-    selected = filtered.query('chip_n == @chip_n & sonar_distance < 1.5')
-    x = selected['closest_visual_distance'] / 1000
-    y = selected['sonar_distance']
-    extent = selected.chipped_extent.values[0]
-    rho = np.corrcoef(x, y)[0, 1]
-    rho = np.around(rho, decimals=2)
-    rhos.append(rho)
-    extents.append(extent)
-    plt.subplot(3, 3, chip_n + 1)
-    plt.scatter(x, y, alpha=0.25)
-    plt.title(f'Extent: {extent} Deg. Corr: {rho}')
-    plt.xlabel('Closest visual distance')
-    plt.ylabel('Sonar distance')
 
-plt.subplot(3, 3, chip_steps + 1)
-plt.plot(extents, rhos)
-plt.xlabel('Extent')
-plt.ylabel('Correlation')
-plt.tight_layout()
-plt.show()
+#%% Example sonar data
+indices = range(1000,1100, 10)
+b, m = Utils.profiledist2sonarsample([0.6, 1.95], [13, 48])
+for index in indices:
+    plt.figure(figsize=(12, 8))
+    selected_sonar = sonar_data[index, :]
+    selected_sonar = selected_sonar.reshape(-1, 2)
+    selected_profile = full_profiles[index, :]
+    samples = b + selected_profile * m
+    max_sample = int(max(samples)) + 10
+    truncated = selected_sonar * 1
+    truncated[max_sample:,:] = 5000
 
-#%%
-plt.figure(figsize=(12, 8))
-for chip_n in range(chip_steps):
-    selected = filtered.query('chip_n == @chip_n & sonar_distance < 1.5')
-    x = selected['closest_visual_distance'] / 1000
-    y = selected['sonar_distance']
-    error = x-y
-    indices = np.where(error > 0.5)[0]
-    rbx = selected.rob_x.values[indices]
-    rby = selected.rob_y.values[indices]
-    rbc = error.values[indices]
-    #Xi, Yi, Ci = Utils.interpolate_scattered_xyc(rbx, rby, rbc, nx=150, ny=150)
-    #extent = [rbx.min(), rbx.max(), rby.min(), rby.max()]
-
-    plt.subplot(3, 3, chip_n + 1)
-    plt.scatter(wall_x, wall_y, alpha=0.25)
-    plt.scatter(rbx, rby, c=rbc, cmap='jet')
-
-    #plt.imshow(Ci,extent=extent, origin='lower', aspect='auto', cmap='jet')
-    plt.colorbar(label='c')
-    plt.axis('equal')
+    plt.subplot(3,1,1)
+    plt.plot(selected_sonar)
+    plt.subplot(3,1,2)
+    plt.plot(selected_profile)
+    plt.ylim([0, 3.5])
+    plt.subplot(3,1,3)
+    plt.plot(truncated)
+    plt.plot()
+    plt.show()
 
 
-plt.tight_layout()
-plt.show()

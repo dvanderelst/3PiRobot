@@ -9,20 +9,16 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap
+import os
 
 from Library import Utils
 from Library.DataStorage import DataReader
-from Library import Guidance
-from Library import Vectors
+import math
 
 
 
-def collect(collation_results, field):
-    collection = []
-    for collated in collation_results: collection.append(collated[field])
-    data = np.concatenate(collection, axis=0)
-    data = np.asarray(data, dtype=np.float32)
-    return data
+#from Library import Guidance
+#from Library import Vectors
 
 
 def interp_1d_index(a):
@@ -60,8 +56,6 @@ def interpolate_positions(rob_x, rob_y, rob_yaw_deg):
     return x_f, y_f, yaw_f_deg, missing
 
 
-
-
 def mask2coordinates(mask, meta):
     min_x = meta["arena_bounds_mm"]["min_x"]
     max_y = meta["arena_bounds_mm"]["max_y"]
@@ -88,6 +82,7 @@ def get_env_dir(data_reader):
     env_dir = env_dirs[0]
     return env_dir
 
+
 def read_wall_mask(image_path, ref_rgb=(46, 194, 126), tol=35):
     img_bgr = cv2.imread(str(image_path))
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.int16)
@@ -101,11 +96,11 @@ def read_wall_mask(image_path, ref_rgb=(46, 194, 126), tol=35):
     return mask_u8.astype(bool)
 
 
-def read_path_mask( image_path, ref_rgb=(220, 40, 40),  tol=80):                 # distance threshold in RGB space
-    min_area=20
-    max_area=2000
-    open_ksize=3
-    close_ksize=5          # morphology to fill small gaps in dots
+def read_path_mask(image_path, ref_rgb=(220, 40, 40), tol=80):  # distance threshold in RGB space
+    min_area = 20
+    max_area = 2000
+    open_ksize = 3
+    close_ksize = 5  # morphology to fill small gaps in dots
 
     img_bgr = cv2.imread(str(image_path))
     if img_bgr is None: raise ValueError(f"Could not read image from {image_path}")
@@ -151,7 +146,7 @@ def load_arena_masks(data_reader):
     env_dir = get_env_dir(data_reader)
     annotation_path = env_dir / "arena_annotated.png"
     wall_mask = read_wall_mask(annotation_path)
-    path_mask= read_path_mask(annotation_path)
+    path_mask = read_path_mask(annotation_path)
     meta_path = env_dir / "meta.json"
     meta = json.load(open(meta_path))
     return wall_mask, path_mask, meta
@@ -170,6 +165,79 @@ def world2robot(x_coords, y_coords, rob_x, rob_y, rob_yaw_deg):
     x_rel = c * dx + s * dy
     y_rel = -s * dx + c * dy
     return x_rel, y_rel
+
+
+def robot2world(az_deg, dist, rob_x, rob_y, rob_yaw_deg):
+    """
+    Convert robot-relative positions (azimuth and distance) to world coordinates.
+    
+    This is the inverse of world2robot function.
+    
+    Parameters
+    ----------
+    az_deg : scalar, list, or numpy array
+        Azimuth angles in degrees (0 = forward, 90 = up/left, 180 = backward, 270 = down/right)
+        relative to the robot's current orientation.
+        
+        IMPORTANT: Azimuths follow MATHEMATICAL convention (counter-clockwise):
+        - 0° = Forward (positive X in robot frame)
+        - 90° = Up/Left (positive Y in robot frame) 
+        - 180° = Backward (negative X in robot frame)
+        - 270° = Down/Right (negative Y in robot frame)
+        
+        This means azimuths increase COUNTER-CLOCKWISE from the forward direction.
+    dist : scalar, list, or numpy array
+        Distances from the robot in the same units as rob_x, rob_y
+    rob_x, rob_y : scalar
+        Robot's position in world coordinates
+    rob_yaw_deg : scalar
+        Robot's orientation in degrees (0 = right/east, 90 = up/north, etc.)
+    
+    Returns
+    -------
+    x_world, y_world : numpy arrays
+        World coordinates corresponding to the robot-relative positions
+    
+    Examples
+    --------
+    # Single point 2 meters forward from robot
+    x, y = robot2world(0, 2, rob_x, rob_y, rob_yaw)
+    
+    # Multiple points at different azimuths
+    azimuths = [0, 90, 180, 270]  # forward, right, backward, left
+    distances = [1, 1, 1, 1]      # 1 meter each
+    x, y = robot2world(azimuths, distances, rob_x, rob_y, rob_yaw)
+    """
+    # Convert inputs to numpy arrays for consistent handling
+    az_deg = np.asarray(az_deg, dtype=float)
+    dist = np.asarray(dist, dtype=float)
+
+    # Convert azimuth and robot yaw to radians
+    az_rad = np.deg2rad(az_deg)
+    rob_yaw_rad = np.deg2rad(rob_yaw_deg)
+
+    # Calculate robot-relative coordinates from azimuth and distance
+    # In robot frame: 0° azimuth = forward (positive X in robot frame)
+    #                90° azimuth = up/left (positive Y in robot frame)
+    # This follows mathematical convention (counter-clockwise from forward)
+    # Note: This means 90° is UP/LEFT, not RIGHT, due to standard trigonometry
+    x_rel = dist * np.cos(az_rad)  # cos(az) gives X component (forward)
+    y_rel = dist * np.sin(az_rad)  # sin(az) gives Y component (up/left)
+
+    # Rotate from robot frame to world frame (rotate by -yaw to undo the world2robot rotation)
+    # This is the inverse of the world2robot rotation
+    # world2robot uses: x_rel = c*dx + s*dy, y_rel = -s*dx + c*dy (rotation by -yaw)
+    # robot2world should use: x_world = c*x_rel - s*y_rel, y_world = s*x_rel + c*y_rel (rotation by +yaw)
+    c = np.cos(rob_yaw_rad)
+    s = np.sin(rob_yaw_rad)
+    x_world = c * x_rel - s * y_rel
+    y_world = s * x_rel + c * y_rel
+
+    # Translate to world coordinates
+    x_world += rob_x
+    y_world += rob_y
+
+    return x_world, y_world
 
 
 def read_robot_trajectory(data_reader):
@@ -193,9 +261,556 @@ def read_robot_trajectory(data_reader):
     positions.loc[missing, 'missing'] = 1
     return positions
 
+def flatten_sonar(sonar_data):
+    sonar_data = sonar_data.transpose(0, 2, 1)
+    sonar_data = sonar_data.reshape(sonar_data.shape[0], -1)
+    return sonar_data
+
+class DataCollection:
+    def __init__(self, session_paths, cache_dir=None, force_recompute=False):
+        """
+        Initialize DataCollection with caching support.
+        
+        Parameters
+        ----------
+        session_paths : list
+            List of paths to session directories
+        cache_dir : str, optional
+            Directory for caching processed data. If None, uses './cache' in working directory.
+            Set to False to disable caching entirely.
+        force_recompute : bool, optional
+            If True, clears any existing cache and forces recomputation of all data.
+            Useful for development and when cache might be stale.
+            
+        Notes
+        -----
+        This class provides efficient access to multi-session data with optional
+        disk caching to avoid recomputing expensive operations (profiles, views).
+        
+        Cache is stored in a visible 'cache' folder by default, making it easy to
+        manage and inspect cache contents.
+        """
+        self.session_paths = session_paths
+        
+        # Set default cache directory to './cache' if not specified
+        if cache_dir is None:
+            self.cache_dir = './cache'
+            print(f"💾 Using default cache directory: {self.cache_dir}")
+        elif cache_dir is False:
+            self.cache_dir = None  # Disable caching
+            print("💾 Caching disabled")
+        else:
+            self.cache_dir = cache_dir
+            print(f"💾 Using specified cache directory: {self.cache_dir}")
+        
+        self.processors = []
+        self._loaded_profiles = False
+        self._loaded_views = False
+        self._loaded_sonar = False
+        
+        # Clear cache if force_recompute is True and caching is enabled
+        if force_recompute and self.cache_dir:
+            print(f"🔥 Force recompute enabled - clearing cache directory: {self.cache_dir}")
+            self.clear_cache()
+        
+        # Initialize processors (minimal setup)
+        for session_path in session_paths:
+            data_reader = DataReader(session_path)
+            processor = DataProcessor(data_reader)
+            self.processors.append(processor)
+        
+        # Cache metadata
+        self._cache_metadata = {
+            'session_paths': session_paths,
+            'processor_count': len(self.processors),
+            'total_samples': sum(p.n for p in self.processors),
+            'force_recompute': force_recompute
+        }
+        
+        print(f"📁 DataCollection initialized with {len(self.processors)} sessions")
+        print(f"   Total samples: {self._cache_metadata['total_samples']}")
+        if cache_dir:
+            print(f"   Cache directory: {cache_dir}")
+        if force_recompute:
+            print(f"   🔥 Force recompute: ENABLED (cache will be ignored)")
+
+    def _get_cache_path(self, data_type, session_index=None):
+        """Get cache file path for specific data type."""
+        if not self.cache_dir:
+            return None
+        
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        if session_index is not None:
+            session_name = os.path.basename(self.session_paths[session_index])
+            return os.path.join(self.cache_dir, f"{session_name}_{data_type}.npy")
+        else:
+            return os.path.join(self.cache_dir, f"collection_{data_type}.npy")
+
+    def _save_to_cache(self, data, data_type, session_index=None):
+        """Save data to cache file."""
+        cache_path = self._get_cache_path(data_type, session_index)
+        if cache_path:
+            np.save(cache_path, data)
+            return True
+        return False
+
+    def _load_from_cache(self, data_type, session_index=None):
+        """Load data from cache file if available."""
+        cache_path = self._get_cache_path(data_type, session_index)
+        if cache_path and os.path.exists(cache_path):
+            try:
+                data = np.load(cache_path)
+                print(f"💾 Loaded {data_type} from cache: {cache_path}")
+                return data
+            except Exception as e:
+                print(f"⚠️  Cache load failed for {data_type}: {e}")
+        return None
+
+    def load_profiles(self, az_min=-45, az_max=45, az_steps=20, force_recompute=False):
+        """
+        Load distance profiles for all sessions with caching.
+        
+        Parameters
+        ----------
+        az_min, az_max : float
+            Azimuth range in degrees
+        az_steps : int
+            Number of azimuth steps
+        force_recompute : bool
+            If True, recompute even if cache exists
+            
+        Returns
+        -------
+        tuple
+            (profiles, centers) where profiles is (N, az_steps) and centers is (N, az_steps)
+        """
+        # Check if we should force recompute (either globally or for this call)
+        global_force_recompute = self._cache_metadata.get('force_recompute', False)
+        effective_force_recompute = force_recompute or global_force_recompute
+        
+        if self._loaded_profiles and not effective_force_recompute:
+            print("📊 Using already loaded profiles")
+            return self.get_profiles(), self.get_centers()
+        
+        # Try to load from cache first (only if not forcing recompute)
+        if not effective_force_recompute:
+            cached_profiles = self._load_from_cache('profiles')
+            cached_centers = self._load_from_cache('centers')
+            
+            if cached_profiles is not None and cached_centers is not None:
+                # Store in processors for consistency
+                offset = 0
+                for i, processor in enumerate(self.processors):
+                    n_samples = processor.n
+                    processor.profiles = cached_profiles[offset:offset+n_samples]
+                    processor.profile_centers = cached_centers[offset:offset+n_samples]
+                    processor.profiles_loaded = True
+                    offset += n_samples
+                
+                self._loaded_profiles = True
+                return cached_profiles, cached_centers
+        
+        # Compute profiles
+        print(f"📊 Computing distance profiles (azimuth: {az_min}° to {az_max}°, {az_steps} steps)...")
+        
+        all_profiles = []
+        all_centers = []
+        
+        for i, processor in enumerate(self.processors):
+            print(f"   Processing session {i+1}/{len(self.processors)}...")
+            processor.load_profiles(az_min, az_max, az_steps)
+            
+            all_profiles.append(processor.profiles)
+            all_centers.append(processor.profile_centers)
+            
+            # Save individual session cache
+            if self.cache_dir:
+                self._save_to_cache(processor.profiles, 'profiles', i)
+                self._save_to_cache(processor.profile_centers, 'centers', i)
+        
+        # Concatenate all results
+        profiles = np.concatenate(all_profiles, axis=0)
+        centers = np.concatenate(all_centers, axis=0)
+        
+        # Save collection-level cache
+        if self.cache_dir:
+            self._save_to_cache(profiles, 'profiles')
+            self._save_to_cache(centers, 'centers')
+        
+        self._loaded_profiles = True
+        print(f"✅ Loaded profiles for {len(profiles)} total samples")
+        print(f"   Profile shape: {profiles.shape}")
+        print(f"   Profile centers shape: {profile_centers.shape}")
+        
+        return profiles, profile_centers
+
+    def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), force_recompute=False, show_example=True):
+        """
+        Load conical views for all sessions with caching.
+        
+        Parameters
+        ----------
+        radius_mm : float
+            Radius of views in millimeters
+        opening_deg : float
+            Opening angle of views in degrees
+        output_size : tuple
+            Output size as (width, height)
+        force_recompute : bool
+            If True, recompute even if cache exists
+        show_example : bool
+            If True, shows an example view image. Set to False for batch processing.
+            
+        Returns
+        -------
+        numpy.ndarray
+            Views as uint8 array (N, H, W, 3)
+        """
+        # Check if we should force recompute (either globally or for this call)
+        global_force_recompute = self._cache_metadata.get('force_recompute', False)
+        effective_force_recompute = force_recompute or global_force_recompute
+        
+        if self._loaded_views and not effective_force_recompute:
+            print("🎯 Using already loaded views")
+            return self.get_views()
+        
+        # Try to load from cache first (only if not forcing recompute)
+        if not effective_force_recompute:
+            cached_views = self._load_from_cache('views')
+            if cached_views is not None:
+                # Store in processors for consistency
+                offset = 0
+                for i, processor in enumerate(self.processors):
+                    n_samples = processor.n
+                    processor.views = cached_views[offset:offset+n_samples]
+                    processor.views_loaded = True
+                    processor.view_radius_mm = radius_mm
+                    processor.view_opening_deg = opening_deg
+                    processor.view_output_size = output_size
+                    offset += n_samples
+                
+                self._loaded_views = True
+                return cached_views
+        
+        # Compute views
+        print(f"🎯 Computing conical views (radius: {radius_mm}mm, opening: {opening_deg}°)...")
+        
+        all_views = []
+        
+        for i, processor in enumerate(self.processors):
+            print(f"   Processing session {i+1}/{len(self.processors)}...")
+            processor.load_views(radius_mm, opening_deg, output_size, show_example=show_example)
+            
+            all_views.append(processor.views)
+            
+            # Save individual session cache
+            if self.cache_dir:
+                self._save_to_cache(processor.views, 'views', i)
+        
+        # Concatenate all results
+        views = np.concatenate(all_views, axis=0)
+        
+        # Save collection-level cache
+        if self.cache_dir:
+            self._save_to_cache(views, 'views')
+        
+        self._loaded_views = True
+        print(f"✅ Loaded views for {len(views)} total samples")
+        print(f"   Views shape: {views.shape}")
+        print(f"   Memory usage: {views.nbytes / (1024*1024):.2f} MB")
+        
+        return views
+
+    def load_sonar(self, flatten=False, force_recompute=False):
+        """
+        Load sonar data for all sessions.
+        
+        Parameters
+        ----------
+        flatten : bool, optional
+            If True, flattens the sonar data from (N, samples, 2) to (N, samples*2)
+        force_recompute : bool, optional
+            If True, recompute even if cache exists
+             
+        Returns
+        -------
+        numpy.ndarray
+            Sonar data array (N, samples, 2) or (N, samples*2) if flattened
+        """
+        # Check if we should force recompute (either globally or for this call)
+        global_force_recompute = self._cache_metadata.get('force_recompute', False)
+        effective_force_recompute = force_recompute or global_force_recompute
+        
+        # Add sonar to cache metadata
+        self._cache_metadata['sonar_flatten'] = flatten
+        
+        # Try to load from cache first (only if not forcing recompute)
+        if not effective_force_recompute:
+            cached_sonar = self._load_from_cache('sonar')
+            if cached_sonar is not None:
+                # Store in processors for consistency
+                offset = 0
+                for i, processor in enumerate(self.processors):
+                    n_samples = processor.n
+                    processor.sonar_data = cached_sonar[offset:offset+n_samples]
+                    processor.sonar_loaded = True
+                    offset += n_samples
+                 
+                self._loaded_sonar = True
+                print("📡 Using cached sonar data")
+                return cached_sonar
+        
+        # Compute sonar data
+        print(f"📡 Loading sonar data (flatten={flatten})...")
+        
+        all_sonar = []
+        
+        for i, processor in enumerate(self.processors):
+            print(f"   Processing session {i+1}/{len(self.processors)}...")
+            processor.load_sonar(flatten=flatten)
+            all_sonar.append(processor.sonar_data)
+            
+            # Save individual session cache
+            if self.cache_dir:
+                self._save_to_cache(processor.sonar_data, 'sonar', i)
+        
+        # Concatenate all results
+        sonar_data = np.concatenate(all_sonar, axis=0)
+        
+        # Save collection-level cache
+        if self.cache_dir:
+            self._save_to_cache(sonar_data, 'sonar')
+        
+        self._loaded_sonar = True
+        print(f"✅ Loaded sonar data for {len(sonar_data)} total samples")
+        print(f"   Sonar shape: {sonar_data.shape}")
+        print(f"   Memory usage: {sonar_data.nbytes / (1024*1024):.2f} MB")
+        
+        return sonar_data
+
+    def get_field(self, field_name):
+        """
+        Get concatenated field data from all processors.
+        
+        Parameters
+        ----------
+        field_name : str
+            Name of field to retrieve (e.g., 'rob_x', 'sonar_data')
+            
+        Returns
+        -------
+        numpy.ndarray
+            Concatenated field data
+        """
+        collection = []
+        for processor in self.processors:
+            if hasattr(processor, field_name):
+                data = getattr(processor, field_name)
+                collection.append(data)
+            else:
+                # Try to get from data reader
+                try:
+                    data = processor.get_field(field_name)
+                    collection.append(data)
+                except:
+                    raise ValueError(f"Field '{field_name}' not found in processors")
+        
+        if not collection:
+            raise ValueError(f"No data found for field '{field_name}'")
+            
+        # Handle different data types appropriately
+        if isinstance(collection[0], np.ndarray):
+            data = np.concatenate(collection, axis=0)
+        else:
+            data = np.array(collection)
+            
+        return np.asarray(data, dtype=np.float32)
+
+    @property
+    def profiles(self):
+        """
+        Get concatenated distance profiles.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Profiles array (N, az_steps)
+            
+        Raises
+        ------
+        ValueError
+            If profiles not loaded
+        """
+        if not self._loaded_profiles:
+            raise ValueError("Profiles not loaded. Call load_profiles() first.")
+        
+        return np.concatenate([p.profiles for p in self.processors], axis=0)
+
+    @property
+    def profile_centers(self):
+        """
+        Get azimuth centers for profiles.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Centers array (N, az_steps)
+            
+        Raises
+        ------
+        ValueError
+            If profiles not loaded
+        """
+        if not self._loaded_profiles:
+            raise ValueError("Profiles not loaded. Call load_profiles() first.")
+        
+        return np.concatenate([p.profile_centers for p in self.processors], axis=0)
+
+    @property
+    def views(self):
+        """
+        Get concatenated conical views.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Views as uint8 array (N, H, W, 3)
+            
+        Raises
+        ------
+        ValueError
+            If views not loaded
+        """
+        if not self._loaded_views:
+            raise ValueError("Views not loaded. Call load_views() first.")
+        
+        return np.concatenate([p.views for p in self.processors], axis=0)
+
+    @property
+    def sonar(self):
+        """
+        Get concatenated sonar data.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Sonar data array (N, samples, 2) or (N, samples*2) if flattened
+             
+        Raises
+        ------
+        ValueError
+            If sonar not loaded
+        """
+        if not self._loaded_sonar:
+            raise ValueError("Sonar not loaded. Call load_sonar() first.")
+         
+        return np.concatenate([p.sonar_data for p in self.processors], axis=0)
+
+    @property
+    def rob_x(self):
+        """
+        Get concatenated robot X positions from all sessions.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Array of robot X positions in millimeters
+        """
+        return np.concatenate([p.rob_x for p in self.processors], axis=0)
+
+    @property
+    def rob_y(self):
+        """
+        Get concatenated robot Y positions from all sessions.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Array of robot Y positions in millimeters
+        """
+        return np.concatenate([p.rob_y for p in self.processors], axis=0)
+
+    @property
+    def rob_yaw_deg(self):
+        """
+        Get concatenated robot yaw orientations from all sessions.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Array of robot yaw orientations in degrees
+        """
+        return np.concatenate([p.rob_yaw_deg for p in self.processors], axis=0)
+
+    def save_cache(self):
+        """
+        Save all loaded data to cache.
+        
+        Notes
+        -----
+        Saves profiles, centers, and views if they have been loaded.
+        """
+        if not self.cache_dir:
+            print("⚠️  No cache directory specified")
+            return
+            
+        print(f"💾 Saving cache to {self.cache_dir}...")
+        
+        if self._loaded_profiles:
+            self._save_to_cache(self.get_profiles(), 'profiles')
+            self._save_to_cache(self.get_centers(), 'centers')
+            print("   ✅ Saved profiles and centers")
+            
+        if self._loaded_views:
+            self._save_to_cache(self.get_views(), 'views')
+            print("   ✅ Saved views")
+        
+        # Save metadata
+        meta_path = os.path.join(self.cache_dir, 'collection_meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump(self._cache_metadata, f, indent=2)
+        print("   ✅ Saved metadata")
+        
+        print("🎉 Cache saved successfully!")
+
+    def clear_cache(self):
+        """
+        Clear all cache files.
+        """
+        if not self.cache_dir or not os.path.exists(self.cache_dir):
+            return
+            
+        print(f"🧹 Clearing cache directory: {self.cache_dir}")
+        for file in os.listdir(self.cache_dir):
+            if file.startswith('collection_') or any(sess in file for sess in 
+                [os.path.basename(path) for path in self.session_paths]):
+                try:
+                    os.remove(os.path.join(self.cache_dir, file))
+                    print(f"   🗑️  Removed: {file}")
+                except:
+                    pass
+        print("✅ Cache cleared")
+
+
 
 class DataProcessor:
     def __init__(self, data_reader):
+        """
+        Initialize DataProcessor with minimal setup.
+        
+        Parameters
+        ----------
+        data_reader : str or DataReader
+            Path to data directory or DataReader instance
+            
+        Notes
+        -----
+        For additional functionality, explicitly call:
+        - load_arena() for arena metadata (needed for profiles/views)
+        - load_profiles(az_min, az_max, az_steps) for distance profiles
+        - load_views(radius_mm, opening_deg, output_size) for conical views
+        """
         if type(data_reader) == str: data_reader = DataReader(data_reader)
         self.session = data_reader.base_folder
         self.data_reader = data_reader
@@ -203,8 +818,21 @@ class DataProcessor:
         self.wall_mask, self.path_mask, self.meta = None, None, None
         self.wall_x, self.wall_y = None, None
         self.path_x, self.path_y = None, None
-        self.load_arena()
-
+        self.arena_loaded = False
+        
+        # Profile parameters (set when load_profiles is called)
+        self.profiles_loaded = False
+        self.profiles = None
+        self.profile_centers = None
+        
+        # View parameters (set when load_views is called)
+        self.views_loaded = False
+        self.views = None
+        
+        # Sonar parameters (set when load_sonar is called)
+        self.sonar_loaded = False
+        self.sonar_data = None
+        
         self.positions = read_robot_trajectory(data_reader)
         self.filenames = self.data_reader.get_all_filenames()
         self.n = len(self.filenames)
@@ -234,13 +862,71 @@ class DataProcessor:
         shutil.copy(original_path, dest_path)
         self.load_arena()
 
-    def load_arena(self):
+    def _load_meta_only(self):
+        """
+        Load only meta.json file (for coordinate conversion).
+        
+        This method loads just the meta data without requiring
+        arena_annotated.png, which is sufficient for view extraction.
+        
+        Required for: view extraction coordinate conversion
+        """
+        try:
+            env_dir = get_env_dir(self.data_reader)
+            meta_path = env_dir / "meta.json"
+            self.meta = json.load(open(meta_path))
+        except FileNotFoundError:
+            print('Could not find meta.json file')
+            
+    def load_arena_metadata(self):
+        """
+        Load arena metadata (masks and coordinates) from annotated image.
+        
+        This method loads the arena annotation data including:
+        - Wall and path masks from arena_annotated.png
+        - Meta data from meta.json
+        - Derived wall and path coordinates
+        
+        Required for: distance profile computation
+        
+        Notes
+        -----
+        This does NOT load the arena.png image - that's handled separately
+        by load_arena_image() for view extraction.
+        """
         try:
             self.wall_mask, self.path_mask, self.meta = load_arena_masks(self.data_reader)
             self.wall_x, self.wall_y = mask2coordinates(self.wall_mask, self.meta)
             self.path_x, self.path_y = mask2coordinates(self.path_mask, self.meta)
+            self.arena_metadata_loaded = True
         except FileNotFoundError:
-            print('Could not find the arena file')
+            print('Could not find the arena annotation files')
+            
+    def load_arena_image(self):
+        """
+        Load the actual arena overhead image.
+        
+        This method loads the arena.png image for view extraction.
+        
+        Required for: conical view extraction
+        
+        Returns
+        -------
+        numpy.ndarray
+            Arena image as RGB numpy array (H, W, 3)
+        
+        Notes
+        -----
+        This does NOT load arena metadata - that's handled separately
+        by load_arena_metadata() for profile computation.
+        """
+        arena_image_path = self.env_dir / "arena.png"
+        if not arena_image_path.exists():
+            raise FileNotFoundError(f"Arena image not found at {arena_image_path}")
+            
+        img_bgr = cv2.imread(str(arena_image_path))
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        return img_rgb
 
     def plot_trajectory(self, show=True):
         arrow_len = 50
@@ -260,7 +946,7 @@ class DataProcessor:
         plt.ylabel('Y (mm)')
         plt.grid(True)
 
-        for i in range(0, self.n, 10): plt.text(self.rob_x[i], self.rob_y[i], str(i), color='green', fontsize=8)
+        for i in range(0, self.n, 5): plt.text(self.rob_x[i], self.rob_y[i], str(i), color='green', fontsize=12)
         if show: plt.show()
         return plt.gcf()
 
@@ -272,6 +958,570 @@ class DataProcessor:
         extent = (min_x, max_x, min_y, max_y)
         return extent
 
+    def world_to_pixel(self, x_world, y_world):
+        """
+        Convert world coordinates (mm) to pixel coordinates in arena image.
+        
+        Parameters
+        ----------
+        x_world, y_world : float
+            World coordinates in millimeters
+            
+        Returns
+        -------
+        x_pixel, y_pixel : int
+            Pixel coordinates in arena image
+        """
+        min_x = self.meta["arena_bounds_mm"]["min_x"]
+        max_y = self.meta["arena_bounds_mm"]["max_y"]
+        mm_per_px = float(self.meta["map_mm_per_px"])
+        
+        x_pixel = int(round((x_world - min_x) / mm_per_px))
+        y_pixel = int(round((max_y - y_world) / mm_per_px))
+        
+        return x_pixel, y_pixel
+
+    def pixel_to_world(self, x_pixel, y_pixel):
+        """
+        Convert pixel coordinates to world coordinates (mm).
+        
+        Parameters
+        ----------
+        x_pixel, y_pixel : int
+            Pixel coordinates in arena image
+            
+        Returns
+        -------
+        x_world, y_world : float
+            World coordinates in millimeters
+        """
+        min_x = self.meta["arena_bounds_mm"]["min_x"]
+        max_y = self.meta["arena_bounds_mm"]["max_y"]
+        mm_per_px = float(self.meta["map_mm_per_px"])
+        
+        x_world = min_x + x_pixel * mm_per_px + 0.5 * mm_per_px
+        y_world = max_y - y_pixel * mm_per_px + 0.5 * mm_per_px
+        
+        return x_world, y_world
+
+    def load_profiles(self, az_min=-45, az_max=45, az_steps=20):
+        """
+        Load distance profiles for all robot positions.
+        
+        Parameters
+        ----------
+        az_min, az_max : float
+            Azimuth range in degrees for profile computation
+        az_steps : int
+            Number of azimuth steps in the profile
+            
+        Notes
+        -----
+        Automatically loads arena metadata if needed.
+        Results are cached for efficient reuse.
+        """
+        if self.profiles_loaded:
+            return  # Already loaded
+            
+        # Automatically load arena metadata if needed (for wall coordinates)
+        if not hasattr(self, 'arena_metadata_loaded') or not self.arena_metadata_loaded:
+            self.load_arena_metadata()
+        
+        print(f"📊 Loading distance profiles (azimuth: {az_min}° to {az_max}°, {az_steps} steps)...")
+        
+        # Compute profiles for all positions
+        profiles = []
+        centers = []
+        
+        for index in tqdm(range(self.n)):
+            centers_i, profile_i = self.get_profile_at(index, az_min, az_max, az_steps)
+            profiles.append(profile_i)
+            centers.append(centers_i)
+        
+        self.profiles = np.asarray(profiles, dtype=np.float32)
+        self.profile_centers = np.asarray(centers, dtype=np.float32)
+        self.profiles_loaded = True
+        
+        print(f"✅ Loaded {len(self.profiles)} distance profiles")
+        print(f"   Profile shape: {self.profiles.shape}")
+        print(f"   Centers shape: {self.profile_centers.shape}")
+
+    def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), plot_indices=None, indices=None, save_examples=False):
+        """
+        Load views for all robot positions.
+        
+        Parameters
+        ----------
+        radius_mm : float
+            Radius of views in millimeters
+        opening_deg : float
+            Opening angle of views in degrees
+        output_size : tuple
+            Output size of views as (width, height)
+        plot_indices : list, optional
+            If provided, shows visualization plots for these specific indices.
+            Replaces the old show_example parameter.
+        indices : list, optional
+            If provided, only load views for these specific indices. Useful for debugging.
+        save_examples : bool or str, optional
+            If True, saves example plots for all views.
+            If str, saves example plots and uses it as directory name.
+            Useful for debugging orientation issues.
+            
+        Notes
+        -----
+        Automatically loads arena metadata if needed.
+        Results are cached for efficient reuse.
+        """
+        if self.views_loaded:
+            return  # Already loaded
+            
+        # Store parameters
+        self.view_radius_mm = radius_mm
+        self.view_opening_deg = opening_deg
+        self.view_output_size = output_size
+        
+        print(f"🎯 Loading views (radius: {radius_mm}mm, opening: {opening_deg}°)...")
+        
+        # Load meta data if needed (for coordinate conversion)
+        if not hasattr(self, 'meta') or self.meta is None:
+            self._load_meta_only()
+        
+        # Load arena image if not already loaded
+        if not hasattr(self, 'arena_image_cache'):
+            self.arena_image_cache = self.load_arena_image()
+            self.arena_image_shape = self.arena_image_cache.shape
+        
+        # Determine which indices to process
+        if indices is None:
+            indices_to_process = range(self.n)
+        else:
+            indices_to_process = indices
+            print(f"   Processing only indices: {indices}")
+        
+        # Set up saving for plot_indices
+        save_plots = False
+        plots_dir = None
+        if plot_indices is not None:
+            import os
+            from datetime import datetime
+            
+            # Create directory for saved plots
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            session_name = os.path.basename(self.session)
+            plots_dir = os.path.join('Plots', f'conical_views_{session_name}_{timestamp}')
+            os.makedirs(plots_dir, exist_ok=True)
+            print(f"   💾 Saving visualization plots to: {plots_dir}")
+            save_plots = True
+        
+        # Set up saving if requested (separate from plot_indices)
+        if save_examples:
+            import os
+            from datetime import datetime
+            
+            # Create directory for saved examples
+            if isinstance(save_examples, str):
+                examples_dir = save_examples
+            else:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                examples_dir = f'conical_view_examples_{timestamp}'
+            
+            os.makedirs(examples_dir, exist_ok=True)
+            print(f"   💾 Saving example plots to: {examples_dir}")
+        
+        # Extract views for specified positions
+        views = []
+        
+        for index in tqdm(indices_to_process):
+            rob_x_i = self.rob_x[index]
+            rob_y_i = self.rob_y[index]
+            rob_yaw_i = self.rob_yaw_deg[index]
+            
+            # Determine if we should visualize and where to save
+            should_visualize = (plot_indices is not None and index in plot_indices)
+            save_path = None
+            if save_plots and should_visualize:
+                plot_filename = os.path.join(plots_dir, f'conical_view_{index:04d}.png')
+                save_path = plot_filename
+            
+            view = self.extract_conical_view(
+                rob_x_i, rob_y_i, rob_yaw_i,
+                radius_mm=self.view_radius_mm,
+                opening_angle_deg=self.view_opening_deg,
+                output_size=self.view_output_size,
+                visualize=should_visualize,
+                save_path=save_path
+            )
+            views.append(view)
+        
+        self.views = np.asarray(views, dtype=np.uint8)
+        self.views_loaded = True
+        
+        print(f"✅ Loaded {len(self.views)} views")
+        print(f"   Views shape: {self.views.shape}")
+        print(f"   Memory usage: {self.views.nbytes / 1024 / 1024:.2f} MB")
+        
+        return self.views
+
+    def load_sonar(self, flatten=False):
+        """
+        Load sonar data for all robot positions.
+        
+        Parameters
+        ----------
+        flatten : bool, optional
+            If True, flattens the sonar data from (N, samples, 2) to (N, samples*2)
+            for compatibility with some machine learning models.
+             
+        Notes
+        -----
+        Automatically extracts left and right channels based on configuration.
+        Results are cached for efficient reuse.
+        """
+        if self.sonar_loaded:
+            return  # Already loaded
+            
+        print(f"📡 Loading sonar data...")
+        
+        # Get configuration from first data point to determine channel mapping
+        data = self.data_reader.get_data_at(0)
+        configuration = data['sonar_package']['configuration']
+        left_channel = configuration.left_channel
+        right_channel = configuration.right_channel
+        
+        # Load sonar data for all positions
+        sonar_data = self.get_field('sonar_package', 'sonar_data')
+        sonar_data = np.array(sonar_data, dtype=np.float32)
+        
+        # Extract only the left and right channels
+        sonar_data = sonar_data[:, :, [left_channel, right_channel]]
+        
+        if flatten:
+            sonar_data = flatten_sonar(sonar_data)
+            print(f"   📏 Flattened sonar data to shape: {sonar_data.shape}")
+        else:
+            print(f"   📏 Sonar data shape: {sonar_data.shape}")
+        
+        self.sonar_data = sonar_data
+        self.sonar_loaded = True
+        
+        print(f"✅ Loaded sonar data for {len(sonar_data)} positions")
+        print(f"   Memory usage: {sonar_data.nbytes / 1024 / 1024:.2f} MB")
+
+    def create_conical_mask(self, center_x, center_y, radius_px, opening_angle_deg, orientation_deg=0):
+        """
+        Create a binary mask for a conical (pie-shaped) region.
+        
+        Parameters
+        ----------
+        center_x, center_y : int
+            Center of the cone in pixel coordinates
+        radius_px : int
+            Radius of the cone in pixels
+        opening_angle_deg : float
+            Opening angle of the cone in degrees
+        orientation_deg : float
+            Orientation of the cone (0 = right/east, 90 = up/north)
+            
+        Returns
+        -------
+        numpy.ndarray
+            Binary mask (True inside cone, False outside)
+        """
+        # Create empty mask
+        height, width = self.arena_image_shape[:2]
+        mask = np.zeros((height, width), dtype=bool)
+        
+        # Convert to radians
+        opening_angle_rad = np.deg2rad(opening_angle_deg)
+        orientation_rad = np.deg2rad(orientation_deg)
+        
+        # Create grid of coordinates relative to center
+        y, x = np.ogrid[:height, :width]
+        x_rel = x - center_x
+        y_rel = y - center_y
+        
+        # Calculate distance from center
+        distance = np.sqrt(x_rel**2 + y_rel**2)
+        
+        # Calculate angles relative to center (0 = right/east, increasing counter-clockwise)
+        # Note: In image coordinates, y increases DOWNWARD, so we negate y_rel to get
+        # the correct angle that matches the mathematical coordinate system used for robot orientation
+        angles = np.arctan2(-y_rel, x_rel)  # This gives angles in [-π, π] with 0 = right
+        
+        # Convert angles from [-π, π] to [0, 2π] range to match robot yaw convention
+        angles = np.mod(angles, 2 * np.pi)
+        
+        # Define cone boundaries
+        half_angle = opening_angle_rad / 2
+        lower_bound = orientation_rad - half_angle
+        upper_bound = orientation_rad + half_angle
+        
+        # Handle angle wrapping
+        in_cone = np.logical_or(
+            (angles >= lower_bound) & (angles <= upper_bound),
+            (lower_bound < 0) & (angles >= lower_bound + 2 * np.pi),
+            (upper_bound > 2 * np.pi) & (angles <= upper_bound - 2 * np.pi)
+        )
+        
+        # Combine with distance constraint
+        in_cone = in_cone & (distance <= radius_px)
+        
+        return in_cone
+
+    def extract_conical_view(self, rob_x, rob_y, rob_yaw_deg, 
+                           radius_mm=1500, opening_angle_deg=90,
+                           output_size=(128, 128), visualize=False, save_path=None):
+        """
+        Extract a conical (pie-shaped) view of the arena centered on robot position.
+        
+        Parameters
+        ----------
+        rob_x, rob_y : float
+            Robot position in world coordinates (mm)
+        rob_yaw_deg : float  
+            Robot orientation in degrees (0 = right/east, 90 = up/north)
+        radius_mm : float
+            Radius of the conical view in millimeters
+        opening_angle_deg : float
+            Opening angle of the cone in degrees
+        output_size : tuple
+            Target output size (width, height) for the conical view
+        visualize : bool
+            Whether to show visualization of the extraction process
+        save_path : str, optional
+            If provided, saves the visualization plot to this path instead of showing it
+            
+        Returns
+        -------
+        numpy.ndarray
+            Conical view as RGB image (output_size[1], output_size[0], 3)
+        """
+        # Load arena image if not already loaded
+        if not hasattr(self, 'arena_image_cache'):
+            self.arena_image_cache = self.load_arena_image()
+            self.arena_image_shape = self.arena_image_cache.shape
+        
+        arena_img = self.arena_image_cache
+        
+        # Convert robot position to pixel coordinates
+        center_x, center_y = self.world_to_pixel(rob_x, rob_y)
+        
+        # Convert radius from mm to pixels
+        mm_per_px = float(self.meta["map_mm_per_px"])
+        radius_px = int(round(radius_mm / mm_per_px))
+        
+        # Create conical mask
+        # The conical view should show what's FORWARD from the robot's perspective
+        # Use the SAME orientation as the trajectory plot (raw yaw angle)
+        # The conical view should point in the same direction as the robot's orientation arrow
+        # in the trajectory plot, which uses the raw yaw angle without correction
+        conical_mask = self.create_conical_mask(
+            center_x, center_y, radius_px, opening_angle_deg, rob_yaw_deg
+        )
+        
+        # Extract the conical region
+        conical_region = np.zeros_like(arena_img)
+        conical_region[conical_mask] = arena_img[conical_mask]
+        
+        # Create a larger bounding box to ensure we capture the full cone
+        # We'll need extra space for rotation
+        padding = radius_px // 2
+        min_x = max(0, center_x - radius_px - padding)
+        max_x = min(arena_img.shape[1], center_x + radius_px + padding)
+        min_y = max(0, center_y - radius_px - padding)
+        max_y = min(arena_img.shape[0], center_y + radius_px + padding)
+        
+        # Extract the region containing the cone with padding
+        region_with_padding = conical_region[min_y:max_y, min_x:max_x]
+        
+        # Calculate the center within this extracted region
+        region_center_x = center_x - min_x
+        region_center_y = center_y - min_y
+        
+        # Create rotation matrix to normalize orientation (forward = up)
+        # The rotation angle should be (90 - rob_yaw_deg) to make the cone point upward
+        # This is because we want to rotate the cone so its forward direction aligns with UP
+        rotation_angle = 90 - rob_yaw_deg
+        rotation_matrix = cv2.getRotationMatrix2D(
+            (region_center_x, region_center_y),
+            rotation_angle,
+            1.0
+        )
+        
+        # Apply rotation to normalize the view
+        rotated_region = cv2.warpAffine(
+            region_with_padding,
+            rotation_matrix,
+            (region_with_padding.shape[1], region_with_padding.shape[0]),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0)  # Black background for out-of-bounds areas
+        )
+        
+        # After rotation, the cone tip (robot position) should already be at the rotation center
+        # The rotation was performed around (region_center_x, region_center_y), which is the robot position
+        # So the cone tip should be at that location. We just need to ensure this point is centered.
+        
+        # The cone tip is at the rotation center: (region_center_x, region_center_y)
+        cone_tip_x = region_center_x
+        cone_tip_y = region_center_y
+        
+        # Calculate translation to center the cone tip precisely
+        target_center_x = rotated_region.shape[1] // 2
+        target_center_y = rotated_region.shape[0] // 2
+        
+        translation_x = target_center_x - cone_tip_x
+        translation_y = target_center_y - cone_tip_y
+        
+        # Apply the translation to center the cone tip precisely
+        translation_matrix = np.float32([[1, 0, translation_x], [0, 1, translation_y]])
+        centered_region = cv2.warpAffine(
+            rotated_region,
+            translation_matrix,
+            (rotated_region.shape[1], rotated_region.shape[0]),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0)  # Fill with black
+        )
+        
+        # Crop the center portion that contains the normalized, centered cone
+        crop_size = min(centered_region.shape[:2])
+        start_x = (centered_region.shape[1] - crop_size) // 2
+        start_y = (centered_region.shape[0] - crop_size) // 2
+        cropped_region = centered_region[start_y:start_y+crop_size, start_x:start_x+crop_size]
+        
+        # Resize to target output size
+        conical_view = cv2.resize(cropped_region, output_size, interpolation=cv2.INTER_AREA)
+        
+        if visualize:
+            self._visualize_conical_extraction(
+                arena_img, conical_mask, conical_view, 
+                center_x, center_y, radius_px, rob_yaw_deg, opening_angle_deg,
+                save_path=save_path
+            )
+        
+        return conical_view
+
+    def _visualize_conical_extraction(self, arena_img, conical_mask, conical_view, 
+                                     center_x, center_y, radius_px, rob_yaw_deg, opening_angle_deg,
+                                     save_path=None):
+        """
+        Visualize the conical view extraction process.
+        
+        Parameters
+        ----------
+        arena_img : numpy.ndarray
+            Original arena image
+        conical_mask : numpy.ndarray
+            Binary mask of conical region
+        conical_view : numpy.ndarray
+            Extracted conical view
+        center_x, center_y : int
+            Center coordinates in pixels
+        radius_px : int
+            Radius in pixels
+        rob_yaw_deg : float
+            Robot orientation in degrees
+        opening_angle_deg : float
+            Opening angle of the cone in degrees
+        save_path : str, optional
+            If provided, saves the plot to this path instead of showing it
+        """
+        import matplotlib.pyplot as plt
+        
+        # Create figure with simplified 1x2 layout
+        plt.figure(figsize=(12, 6))
+        
+        # Plot 1: Arena with conical mask overlay (combined the two arena views)
+        plt.subplot(1, 2, 1)
+        plt.imshow(arena_img)
+        plt.scatter(center_x, center_y, c='red', s=100, marker='x')
+        
+        # Draw cone outline - this must match exactly how the conical mask is created
+        # Use the same angle calculation as create_conical_mask for consistency
+        half_opening_rad = np.deg2rad(opening_angle_deg / 2)
+        orientation_rad = np.deg2rad(rob_yaw_deg)
+        
+        # Calculate cone boundaries using the corrected angle (same as create_conical_mask)
+        lower_bound = orientation_rad - half_opening_rad
+        upper_bound = orientation_rad + half_opening_rad
+        
+        # Generate angles within the cone boundaries
+        cone_theta = np.linspace(lower_bound, upper_bound, 100)
+        
+        # Convert polar coordinates to image coordinates
+        # Note: We use the same coordinate system as create_conical_mask
+        x_cone = center_x + radius_px * np.cos(cone_theta)
+        y_cone = center_y - radius_px * np.sin(cone_theta)  # Negate y for image coordinates
+        
+        plt.plot(x_cone, y_cone, 'r-', linewidth=2)
+        plt.plot([center_x, x_cone[0]], [center_y, y_cone[0]], 'r-', linewidth=2)
+        plt.plot([center_x, x_cone[-1]], [center_y, y_cone[-1]], 'r-', linewidth=2)
+        
+        # Draw robot orientation arrow (using corrected coordinate system to match cone)
+        arrow_length = 80
+        end_x = center_x + arrow_length * np.cos(np.deg2rad(rob_yaw_deg))
+        end_y = center_y - arrow_length * np.sin(np.deg2rad(rob_yaw_deg))  # Negate y for image coordinates
+        plt.arrow(center_x, center_y, end_x - center_x, end_y - center_y,
+                  head_width=8, head_length=12, fc='yellow', ec='yellow')
+        plt.text(end_x, end_y, f'Robot orientation: {rob_yaw_deg:.1f}°',
+                 color='yellow', bbox=dict(facecolor='black', alpha=0.7))
+        
+        # Overlay the conical mask with transparency
+        mask_display = np.zeros((*arena_img.shape[:2], 3), dtype=np.uint8)
+        mask_display[conical_mask] = [255, 0, 0]  # Red for cone region
+        plt.imshow(mask_display, alpha=0.3)
+        
+        plt.title(f'Arena with Conical Region ({opening_angle_deg}° opening)')
+        plt.axis('off')
+        
+        # Plot 2: Normalized conical view (forward direction always points UP)
+        plt.subplot(1, 2, 2)
+        plt.imshow(conical_view)
+        
+        # In the normalized view, the robot position (cone tip) should be exactly at the center
+        # This is because we rotate and translate to ensure the robot is at the center
+        center = (conical_view.shape[1] // 2, conical_view.shape[0] // 2)
+        
+        # Draw robot position (cone tip) at center (red X)
+        plt.scatter(center[0], center[1], c='red', s=100, marker='x', linewidth=2)
+        plt.text(center[0] + 10, center[1], f'Robot: ({center[0]}, {center[1]})',
+                color='red', bbox=dict(facecolor='white', alpha=0.7))
+        
+        # Draw arrow from robot position upward (yellow arrow) - this shows forward direction
+        arrow_length = min(conical_view.shape[:2]) // 4
+        end_y = center[1] - arrow_length
+        plt.arrow(center[0], center[1], 0, -arrow_length,
+                 head_width=10, head_length=15, fc='yellow', ec='yellow')
+        
+        # Add text to clarify this is a normalized view
+        plt.text(center[0], 20, 
+                'Normalized Conical View', 
+                color='white', 
+                bbox=dict(facecolor='black', alpha=0.7),
+                ha='center')
+        plt.text(center[0], 40, 
+                'Red X = Robot Position (should be at center)', 
+                color='white', 
+                bbox=dict(facecolor='black', alpha=0.7),
+                ha='center')
+        plt.text(center[0], 60, 
+                'Yellow Arrow = Forward Direction (always UP)', 
+                color='white', 
+                bbox=dict(facecolor='black', alpha=0.7),
+                ha='center')
+        
+        plt.title(f'Normalized Conical View ({conical_view.shape[1]}x{conical_view.shape[0]})')
+        plt.axis('off')
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
 
     def plot_arena(self, show=True):
         plt.figure()
@@ -283,6 +1533,182 @@ class DataProcessor:
         plt.axis('equal')
         if show: plt.show()
 
+    def plot_all_sonar(self, view=False, profile=False, output_dir='Plots', dpi=150, indices=None):
+        """
+        Generate and save plots for all sonar measurements with optional views and profiles.
+        
+        Parameters
+        ----------
+        view : bool, optional
+            If True, includes conical views in the plots (default: False)
+        profile : bool, optional
+            If True, includes distance profiles in the plots as polar plots (default: False)
+            Polar plots provide better visualization of the geometric relationship between
+            azimuth angles and distances, making it easier to understand the spatial
+            distribution of obstacles around the robot.
+        output_dir : str, optional
+            Directory to save plots (default: 'Plots')
+        dpi : int, optional
+            DPI for saved images (default: 150)
+        indices : range, list, or None, optional
+            Specifies which indices to plot. Can be:
+            - None: plot all measurements (default)
+            - range(start, stop, step): plot indices from start to stop-1 with given step
+            - list of integers: plot only the specified indices
+            Examples:
+                range(0, 10) - plot indices 0 through 9
+                range(0, 10, 2) - plot indices 0, 2, 4, 6, 8
+                [0, 5, 10, 15] - plot only these specific indices
+            
+        Notes
+        -----
+        - Creates a subdirectory with timestamp for organized storage
+        - Uses tqdm to show progress
+        - Saves plots as PNG files without displaying them
+        - Requires sonar data to be loaded first
+        - If view=True, requires views to be loaded
+        - If profile=True, requires profiles to be loaded
+        """
+        import os
+        import time
+        from datetime import datetime
+        
+        # Validate that sonar data is loaded
+        if not hasattr(self, 'sonar_data') or self.sonar_data is None:
+            raise ValueError("Sonar data not loaded. Call load_sonar() first.")
+        
+        # Validate view requirement
+        if view and (not hasattr(self, 'views') or self.views is None):
+            raise ValueError("Views not loaded. Call load_views() first or set view=False.")
+        
+        # Validate profile requirement  
+        if profile and (not hasattr(self, 'profiles') or self.profiles is None):
+            raise ValueError("Profiles not loaded. Call load_profiles() first or set profile=False.")
+        
+        # Create output directory with timestamp
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        session_name = os.path.basename(self.session)
+        plot_dir = os.path.join(output_dir, f'sonar_plots_{session_name}_{timestamp}')
+        os.makedirs(plot_dir, exist_ok=True)
+        
+        print(f"📊 Generating sonar plots for {len(self.sonar_data)} measurements...")
+        print(f"   Output directory: {plot_dir}")
+        print(f"   Options: view={view}, profile={profile}")
+        
+        # Determine plot layout based on options
+        n_subplots = 1  # Always have sonar plot
+        if view:
+            n_subplots += 1
+        if profile:
+            n_subplots += 1
+        
+        # Determine which indices to plot based on indices parameter
+        if indices is None:
+            indices_to_plot = range(len(self.sonar_data))
+        elif isinstance(indices, (list, tuple)):
+            # Convert list/tuple to range-like object
+            indices_to_plot = indices
+        elif hasattr(indices, 'start') and hasattr(indices, 'stop'):
+            # It's a range object
+            indices_to_plot = list(indices)
+        else:
+            raise ValueError(f"indices parameter must be None, list, or range object, got {type(indices)}")
+        
+        # Create plots for each specified measurement
+        for index in tqdm(indices_to_plot, desc="Plotting sonar data"):
+            sonar_data = self.sonar_data[index]
+            rob_x = self.rob_x[index]
+            rob_y = self.rob_y[index]
+            rob_yaw = self.rob_yaw_deg[index]
+            
+            # Create figure with appropriate layout
+            if n_subplots == 1:
+                fig, axs = plt.subplots(1, 1, figsize=(10, 6))
+                axs = [axs]  # Make it iterable
+            elif n_subplots == 2:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 6))
+            else:  # n_subplots == 3
+                fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+            
+            # Convert profile subplot to polar if needed
+            if profile and n_subplots == 3:
+                # For 3 subplots, profile is the last one (index 2)
+                # Need to recreate the subplot with polar projection
+                fig.delaxes(axs[2])
+                axs[2] = fig.add_subplot(1, 3, 3, polar=True)
+            elif profile and n_subplots == 2:
+                # For 2 subplots, profile is the second one (index 1)
+                # Need to recreate the subplot with polar projection
+                fig.delaxes(axs[1])
+                axs[1] = fig.add_subplot(1, 2, 2, polar=True)
+            
+            # Plot sonar data
+            ax = axs[0]
+            distance_axis = Utils.get_distance_axis(10000, sonar_data.shape[0])  # Assuming 10kHz sample rate
+            
+            # Plot both channels
+            ax.plot(distance_axis, sonar_data[:, 0], 'b-', alpha=0.7, label='Left Channel')
+            ax.plot(distance_axis, sonar_data[:, 1], 'r-', alpha=0.7, label='Right Channel')
+            
+            ax.set_title(f'Sonar Measurement #{index}')
+            ax.set_xlabel('Distance (m)')
+            ax.set_ylabel('Amplitude')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            # Add robot position info
+            pos_info = f'Pos: ({rob_x:.1f}, {rob_y:.1f}) mm\nYaw: {rob_yaw:.1f}°'
+            ax.text(0.02, 0.95, pos_info, transform=ax.transAxes, 
+                   verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            # Plot view if requested
+            current_plot = 1
+            if view:
+                ax = axs[current_plot]
+                view_img = self.views[index]
+                ax.imshow(view_img)
+                ax.set_title(f'Conical View #{index}')
+                ax.axis('off')
+                current_plot += 1
+            
+            # Plot profile if requested
+            if profile:
+                ax = axs[current_plot]
+                profile_data = self.profiles[index]
+                centers = self.profile_centers[index]
+                
+                # Convert to polar coordinates for better visualization
+                # Convert azimuth angles to radians and adjust for polar plot convention
+                theta = np.deg2rad(centers)
+                r = profile_data
+                
+                # Create polar plot
+                ax.set_theta_zero_location('N')  # 0° at top (forward direction)
+                ax.set_theta_direction(-1)      # Clockwise direction (more intuitive)
+                
+                # Plot the polar profile
+                ax.plot(theta, r, 'g-', linewidth=2)
+                ax.set_title(f'Distance Profile #{index} (Polar)')
+                ax.set_rlabel_position(45)  # Move radial labels away from plot
+                ax.grid(True, alpha=0.3)
+                
+                # Add azimuth angle labels
+                ax.set_xticks(np.deg2rad([0, 30, 60, 90, 120, 150, 180]))
+                ax.set_xticklabels(['0°', '30°', '60°', '90°', '120°', '150°', '180°'])
+            
+            # Save plot
+            plot_filename = os.path.join(plot_dir, f'sonar_{index:04d}.png')
+            plt.tight_layout()
+            plt.savefig(plot_filename, dpi=dpi, bbox_inches='tight')
+            plt.close(fig)
+        
+        num_plots_created = len(indices_to_plot) if hasattr(indices_to_plot, '__len__') else len(self.sonar_data)
+        print(f"✅ Saved {num_plots_created} sonar plots to: {plot_dir}")
+        print(f"   Total files: {len(os.listdir(plot_dir))}")
+        print(f"   Use: ls {plot_dir} to view files")
+        
+        return plot_dir
 
     def relative_wall(self, rob_x, rob_y, rob_yaw_deg, plot=False):
         rel_x, rel_y = world2robot(self.wall_x, self.wall_y, rob_x, rob_y, rob_yaw_deg)
@@ -299,14 +1725,12 @@ class DataProcessor:
             plt.show()
         return rel_x, rel_y
 
-
     def relative_wall_at(self, index, plot=False):
         selected_x = self.rob_x[index]
         selected_y = self.rob_y[index]
         selected_yaw_deg = self.rob_yaw_deg[index]
         rel_x, rel_y = self.relative_wall(selected_x, selected_y, selected_yaw_deg, plot=plot)
         return rel_x, rel_y
-
 
     def get_data_at(self, index):
         data = self.data_reader.get_data_at(index)
@@ -329,10 +1753,29 @@ class DataProcessor:
         sonar_data = self.get_field('sonar_package', 'sonar_data')
         sonar_data = np.array(sonar_data, dtype=np.float32)
         sonar_data = sonar_data[:, :, [left_channel, right_channel]]
-        if flatten: sonar_data = sonar_data.reshape(sonar_data.shape[0], -1)
+        if flatten: sonar_data = flatten_sonar(sonar_data)
         return sonar_data
 
-    def wall_scan(self, rob_x, rob_y, rob_yaw_deg, min_az_deg, max_az_deg, n):
+
+
+    def get_profile(self, rob_x, rob_y, rob_yaw_deg, min_az_deg, max_az_deg, n):
+        """
+        Get a distance profile from walls in the arena.
+        
+        Parameters
+        ----------
+        rob_x, rob_y, rob_yaw_deg : float
+            Robot position and orientation
+        min_az_deg, max_az_deg : float
+            Azimuth range for the profile in degrees
+        n : int
+            Number of azimuth steps in the profile
+            
+        Returns
+        -------
+        centers, min_distances : numpy.ndarray
+            Azimuth centers and corresponding minimum distances to walls
+        """
         selected_x = rob_x
         selected_y = rob_y
         selected_yaw_deg = rob_yaw_deg
@@ -352,11 +1795,30 @@ class DataProcessor:
 
         return centers, min_distances
 
-    def wall_scan_at(self, index, min_az_deg, max_az_deg, n):
+    def get_profile_at(self, index, min_az_deg, max_az_deg, n):
+        """
+        Get a distance profile for a specific robot position.
+        
+        Parameters
+        ----------
+        index : int
+            Index of the robot position
+        min_az_deg, max_az_deg : float
+            Azimuth range for the profile in degrees
+        n : int
+            Number of azimuth steps in the profile
+            
+        Returns
+        -------
+        centers, profile : numpy.ndarray
+            Azimuth centers and distance profile with NaN values filled
+        """
         selected_x = self.rob_x[index]
         selected_y = self.rob_y[index]
         selected_yaw_deg = self.rob_yaw_deg[index]
-        centers, profile = self.wall_scan(selected_x, selected_y, selected_yaw_deg, min_az_deg, max_az_deg, n)
+        centers, profile = self.get_profile(selected_x, selected_y, selected_yaw_deg, min_az_deg, max_az_deg, n)
+        profile = Utils.fill_nans_linear(profile)
+        profile = np.asarray(profile, dtype=np.float32)
         return centers, profile
 
     def get_position_at(self, index):
@@ -365,82 +1827,44 @@ class DataProcessor:
         selected_yaw_deg = self.rob_yaw_deg[index]
         return selected_x, selected_y, selected_yaw_deg
 
-    @functools.cache
-    def collate_data(self, az_min=-45, az_max=45, az_steps=None,d=150):
-        prepared_data = {}
-        sonar_block = self.get_sonar_data(flatten=False)
-        sonar = self.get_sonar_data(flatten=True)
-        corrected_iid = self.get_field('sonar_package', 'corrected_iid')
-        corrected_distance = self.get_field('sonar_package', 'corrected_distance')
-        distances, rotations = self.get_motion()
-        rob_x = self.rob_x
-        rob_y = self.rob_y
-        rob_yaw_deg = self.rob_yaw_deg
-        vector_field, polyline = self.get_vector_field(d=d)
 
-        prepared_data['rob_x'] = rob_x
-        prepared_data['rob_y'] = rob_y
-        prepared_data['rob_yaw_deg'] = rob_yaw_deg
-        prepared_data['sonar_block'] = sonar_block
-        prepared_data['sonar_data'] = sonar
-        prepared_data['rotations'] = rotations
-        prepared_data['distance'] = distances
-        prepared_data['vector_field'] = vector_field
-        prepared_data['polyline'] = polyline
-        prepared_data['corrected_iid'] = corrected_iid
-        prepared_data['corrected_distance'] = corrected_distance
-        if az_steps is None: return prepared_data
-        # Get profiles
-        profiles = []
-        max_directions = []
 
-        for index in tqdm(range(self.n)):
-            centers, profile = self.wall_scan_at(index, az_min, az_max, az_steps)
-            profile = Utils.fill_nans_linear(profile)
-            max_index = numpy.argmax(profile)
-            profile = np.asarray(profile, dtype=np.float32)
-            profiles.append(profile)
-            max_directions.append(profile[max_index])
-        prepared_data['profiles'] = np.asarray(profiles, dtype=np.float32)
-        prepared_data['centers'] = np.asarray(centers, dtype=np.float32)
-        prepared_data['max_directions'] = np.asarray(max_directions, dtype=np.float32)
-        return prepared_data
 
-    def get_vector_field(self, d=100, plot=False):
-        polyline = Guidance.build_polyline_from_xy(self.path_x, self.path_y, plot=plot)
-        rob_x = self.rob_x
-        rob_y = self.rob_y
-        rob_yaw_deg = self.rob_yaw_deg
-        df = Guidance.guidance_vector_field_batch(rob_x, rob_y, rob_yaw_deg, polyline, d, visualize=plot)
-        return df, polyline
+    # def get_vector_field(self, d=100, plot=False):
+    #     polyline = Guidance.build_polyline_from_xy(self.path_x, self.path_y, plot=plot)
+    #     rob_x = self.rob_x
+    #     rob_y = self.rob_y
+    #     rob_yaw_deg = self.rob_yaw_deg
+    #     df = Guidance.guidance_vector_field_batch(rob_x, rob_y, rob_yaw_deg, polyline, d, visualize=plot)
+    #     return df, polyline
 
-    def get_wall_vector_field(
-        self,
-        plot=False,
-        close_iter=2,
-        dilate_iter=2,
-        seed_xy=None,
-    ):
-        rob_x = self.rob_x
-        rob_y = self.rob_y
-        rob_yaw_deg = self.rob_yaw_deg
-        if seed_xy is None:
-            seed_xy = (
-                float(rob_x[0]),
-                float(rob_y[0]),
-            )
-        seed_col, seed_row = Vectors.world_to_pixel(seed_xy[0], seed_xy[1], self.meta)
-        df, dist, inside, mask = Vectors.wall_vector_field_batch(
-            rob_x,
-            rob_y,
-            rob_yaw_deg,
-            self.wall_mask,
-            self.meta,
-            seed_xy=(seed_col, seed_row),
-            close_iter=close_iter,
-            dilate_iter=dilate_iter,
-            visualize=plot,
-            invert_y=False,
-            title="Wall repulsion field (poses)",
-        )
-        return df, dist, inside, mask
+    # def get_wall_vector_field(
+    #         self,
+    #         plot=False,
+    #         close_iter=2,
+    #         dilate_iter=2,
+    #         seed_xy=None,
+    # ):
+    #     rob_x = self.rob_x
+    #     rob_y = self.rob_y
+    #     rob_yaw_deg = self.rob_yaw_deg
+    #     if seed_xy is None:
+    #         seed_xy = (
+    #             float(rob_x[0]),
+    #             float(rob_y[0]),
+    #         )
+    #     seed_col, seed_row = Vectors.world_to_pixel(seed_xy[0], seed_xy[1], self.meta)
+    #     df, dist, inside, mask = Vectors.wall_vector_field_batch(
+    #         rob_x,
+    #         rob_y,
+    #         rob_yaw_deg,
+    #         self.wall_mask,
+    #         self.meta,
+    #         seed_xy=(seed_col, seed_row),
+    #         close_iter=close_iter,
+    #         dilate_iter=dilate_iter,
+    #         visualize=plot,
+    #         invert_y=False,
+    #         title="Wall repulsion field (poses)",
+    #     )
+    #     return df, dist, inside, mask
