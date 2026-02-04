@@ -1247,7 +1247,7 @@ class DataProcessor:
         # Calculate angles relative to center (0 = right/east, increasing counter-clockwise)
         # Note: In image coordinates, y increases DOWNWARD, so we negate y_rel to get
         # the correct angle that matches the mathematical coordinate system used for robot orientation
-        angles = np.arctan2(-y_rel, x_rel)  # This gives angles in [-π, π] with 0 = right
+        angles = np.arctan2(-y_rel, x_rel)  # Back to original -y_rel
         
         # Convert angles from [-π, π] to [0, 2π] range to match robot yaw convention
         angles = np.mod(angles, 2 * np.pi)
@@ -1257,12 +1257,12 @@ class DataProcessor:
         lower_bound = orientation_rad - half_angle
         upper_bound = orientation_rad + half_angle
         
-        # Handle angle wrapping
-        in_cone = np.logical_or(
-            (angles >= lower_bound) & (angles <= upper_bound),
-            (lower_bound < 0) & (angles >= lower_bound + 2 * np.pi),
-            (upper_bound > 2 * np.pi) & (angles <= upper_bound - 2 * np.pi)
-        )
+        # Handle angle wrapping using circular distance
+        # Calculate the angular distance from the center orientation
+        angle_diff = np.abs(angles - orientation_rad)
+        angle_diff = np.minimum(angle_diff, 2 * np.pi - angle_diff)  # Circular distance
+        
+        in_cone = angle_diff <= half_angle
         
         # Combine with distance constraint
         in_cone = in_cone & (distance <= radius_px)
@@ -1324,40 +1324,60 @@ class DataProcessor:
         conical_region = np.zeros_like(arena_img)
         conical_region[conical_mask] = arena_img[conical_mask]
         
-        # Create a larger bounding box to ensure we capture the full cone
-        # We'll need extra space for rotation
-        padding = radius_px // 2
-        min_x = max(0, center_x - radius_px - padding)
-        max_x = min(arena_img.shape[1], center_x + radius_px + padding)
-        min_y = max(0, center_y - radius_px - padding)
-        max_y = min(arena_img.shape[0], center_y + radius_px + padding)
+        # NEW APPROACH: Extract all pixels in the conical mask (including black ones at boundaries)
+        # This ensures we capture the full conical region even when it extends beyond arena
         
-        # Extract the region containing the cone with padding
-        region_with_padding = conical_region[min_y:max_y, min_x:max_x]
+        # Get coordinates of ALL pixels in the conical mask (not just non-black)
+        y_coords, x_coords = np.where(conical_mask)
         
-        # Calculate the center within this extracted region
-        region_center_x = center_x - min_x
-        region_center_y = center_y - min_y
+        if len(x_coords) == 0:
+            # No pixels found, return empty view
+            empty_view = np.zeros((output_size[1], output_size[0], 3), dtype=np.uint8)
+            return empty_view
         
-        # Create rotation matrix to normalize orientation (forward = up)
-        # The rotation angle should be (90 - rob_yaw_deg) to make the cone point upward
-        # This is because we want to rotate the cone so its forward direction aligns with UP
-        rotation_angle = 90 - rob_yaw_deg
-        rotation_matrix = cv2.getRotationMatrix2D(
-            (region_center_x, region_center_y),
-            rotation_angle,
-            1.0
-        )
+        # Get the pixel values at these coordinates (including black boundary pixels)
+        valid_pixels = arena_img[conical_mask]
         
-        # Apply rotation to normalize the view
-        rotated_region = cv2.warpAffine(
-            region_with_padding,
-            rotation_matrix,
-            (region_with_padding.shape[1], region_with_padding.shape[0]),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0)  # Black background for out-of-bounds areas
-        )
+        # Convert to relative coordinates (relative to robot position)
+        x_rel = x_coords - center_x
+        y_rel = y_coords - center_y
+        
+        # Convert to polar coordinates for rotation
+        distances = np.sqrt(x_rel**2 + y_rel**2)
+        angles = np.arctan2(-y_rel, x_rel)  # Image coordinates: y increases downward
+        
+        # Rotate angles to normalize orientation (forward = up)
+        rotation_rad = np.deg2rad(90 - rob_yaw_deg)
+        rotated_angles = angles + rotation_rad
+        
+        # Convert back to Cartesian coordinates (relative to center)
+        x_rotated_rel = distances * np.cos(rotated_angles)
+        y_rotated_rel = -distances * np.sin(rotated_angles)  # Negative for image coordinates
+        
+        # Convert to absolute coordinates in a large canvas
+        canvas_size = 2 * radius_px  # Large enough to hold the rotated cone
+        canvas_center = canvas_size // 2
+        
+        x_rotated_abs = x_rotated_rel + canvas_center
+        y_rotated_abs = y_rotated_rel + canvas_center
+        
+        # Create a canvas for the rotated cone
+        rotated_canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
+        
+        # Place the rotated pixels on the canvas
+        valid_indices = (x_rotated_abs >= 0) & (x_rotated_abs < canvas_size) & \
+                       (y_rotated_abs >= 0) & (y_rotated_abs < canvas_size)
+        
+        x_valid = x_rotated_abs[valid_indices].astype(int)
+        y_valid = y_rotated_abs[valid_indices].astype(int)
+        
+        rotated_canvas[y_valid, x_valid] = valid_pixels[valid_indices]
+        
+        # The robot position is now at the center of the canvas
+        region_center_x = canvas_center
+        region_center_y = canvas_center
+        
+        rotated_region = rotated_canvas
         
         # After rotation, the cone tip (robot position) should already be at the rotation center
         # The rotation was performed around (region_center_x, region_center_y), which is the robot position
@@ -1688,7 +1708,7 @@ class DataProcessor:
                 ax.set_theta_direction(-1)      # Clockwise direction (more intuitive)
                 
                 # Plot the polar profile
-                ax.plot(theta, r, 'g-', linewidth=2)
+                ax.plot(theta, r, 'go', markersize=2)
                 ax.set_title(f'Distance Profile #{index} (Polar)')
                 ax.set_rlabel_position(45)  # Move radial labels away from plot
                 ax.grid(True, alpha=0.3)
