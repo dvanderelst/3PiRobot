@@ -8,6 +8,72 @@ import cv2
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
+from datetime import datetime
+
+
+def find_bounding_box_across_views(views_stack, black_threshold=10):
+    """
+    Find the minimal bounding box that contains all non-black pixels across a stack of views.
+    
+    This helper function is useful for neural network preprocessing to identify
+    the region of interest in conical views and crop out empty black borders.
+    
+    Parameters
+    ----------
+    views_stack : numpy.ndarray
+        Stack of views with shape (N, H, W, C) where C=3 for RGB
+    black_threshold : int, optional
+        Threshold for considering a pixel as black (0-255).
+        A pixel is considered black if all RGB channels are <= this threshold.
+        Default: 10 (allows for some noise in black areas)
+        
+    Returns
+    -------
+    tuple or None
+        Bounding box coordinates (x_min, y_min, x_max, y_max) as a tuple,
+        or None if no non-black pixels are found
+        
+    Examples
+    --------
+    >>> views = np.random.randint(0, 256, (10, 128, 128, 3), dtype=np.uint8)
+    >>> bbox = find_bounding_box_across_views(views)
+    >>> if bbox:
+    ...     x_min, y_min, x_max, y_max = bbox
+    ...     cropped_views = views[:, y_min:y_max, x_min:x_max, :]
+    """
+    # Validate input
+    if not isinstance(views_stack, np.ndarray) or views_stack.ndim != 4:
+        raise ValueError(f"Expected 4D array (N, H, W, C), got shape: {views_stack.shape}")
+    
+    if views_stack.shape[3] != 3:
+        raise ValueError(f"Expected 3 color channels (RGB), got: {views_stack.shape[3]}")
+    
+    # Create a mask where True indicates non-black pixels
+    # A pixel is non-black if ANY channel exceeds the black threshold
+    non_black_mask = np.any(views_stack > black_threshold, axis=3)
+    
+    # Find non-black pixels across the entire stack (collapse N dimension)
+    any_non_black = np.any(non_black_mask, axis=0)  # Shape: (H, W)
+    
+    # Find bounding box coordinates
+    non_black_rows, non_black_cols = np.where(any_non_black)
+    
+    if len(non_black_rows) == 0 or len(non_black_cols) == 0:
+        # No non-black pixels found
+        return None
+    
+    # Calculate bounding box
+    y_min, y_max = np.min(non_black_rows), np.max(non_black_rows)
+    x_min, x_max = np.min(non_black_cols), np.max(non_black_cols)
+    
+    # Add a small margin to be safe
+    margin = 2
+    y_min = max(0, y_min - margin)
+    y_max = min(views_stack.shape[1], y_max + margin)
+    x_min = max(0, x_min - margin)
+    x_max = min(views_stack.shape[2], x_max + margin)
+    
+    return (x_min, y_min, x_max, y_max)
 from matplotlib.colors import ListedColormap
 import os
 
@@ -316,7 +382,7 @@ class DataCollection:
         # Initialize processors (minimal setup)
         for session_path in session_paths:
             data_reader = DataReader(session_path)
-            processor = DataProcessor(data_reader)
+            processor = DataProcessor(data_reader, cache_dir=self.cache_dir, force_recompute=force_recompute)
             self.processors.append(processor)
         
         # Cache metadata
@@ -393,57 +459,29 @@ class DataCollection:
             print("📊 Using already loaded profiles")
             return self.get_profiles(), self.get_centers()
         
-        # Try to load from cache first (only if not forcing recompute)
-        if not effective_force_recompute:
-            cached_profiles = self._load_from_cache('profiles')
-            cached_centers = self._load_from_cache('centers')
-            
-            if cached_profiles is not None and cached_centers is not None:
-                # Store in processors for consistency
-                offset = 0
-                for i, processor in enumerate(self.processors):
-                    n_samples = processor.n
-                    processor.profiles = cached_profiles[offset:offset+n_samples]
-                    processor.profile_centers = cached_centers[offset:offset+n_samples]
-                    processor.profiles_loaded = True
-                    offset += n_samples
-                
-                self._loaded_profiles = True
-                return cached_profiles, cached_centers
-        
-        # Compute profiles
-        print(f"📊 Computing distance profiles (azimuth: {az_min}° to {az_max}°, {az_steps} steps)...")
+        # Compute profiles using processor-level caching
+        print(f"📊 Loading distance profiles (azimuth: {az_min}° to {az_max}°, {az_steps} steps)...")
         
         all_profiles = []
         all_centers = []
         
         for i, processor in enumerate(self.processors):
             print(f"   Processing session {i+1}/{len(self.processors)}...")
-            processor.load_profiles(az_min, az_max, az_steps)
+            processor.load_profiles(az_min, az_max, az_steps, force_recompute=effective_force_recompute)
             
             all_profiles.append(processor.profiles)
             all_centers.append(processor.profile_centers)
-            
-            # Save individual session cache
-            if self.cache_dir:
-                self._save_to_cache(processor.profiles, 'profiles', i)
-                self._save_to_cache(processor.profile_centers, 'centers', i)
         
         # Concatenate all results
         profiles = np.concatenate(all_profiles, axis=0)
         centers = np.concatenate(all_centers, axis=0)
         
-        # Save collection-level cache
-        if self.cache_dir:
-            self._save_to_cache(profiles, 'profiles')
-            self._save_to_cache(centers, 'centers')
-        
         self._loaded_profiles = True
         print(f"✅ Loaded profiles for {len(profiles)} total samples")
         print(f"   Profile shape: {profiles.shape}")
-        print(f"   Profile centers shape: {profile_centers.shape}")
+        print(f"   Profile centers shape: {centers.shape}")
         
-        return profiles, profile_centers
+        return profiles, centers
 
     def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), force_recompute=False, show_example=True):
         """
@@ -475,45 +513,19 @@ class DataCollection:
             print("🎯 Using already loaded views")
             return self.get_views()
         
-        # Try to load from cache first (only if not forcing recompute)
-        if not effective_force_recompute:
-            cached_views = self._load_from_cache('views')
-            if cached_views is not None:
-                # Store in processors for consistency
-                offset = 0
-                for i, processor in enumerate(self.processors):
-                    n_samples = processor.n
-                    processor.views = cached_views[offset:offset+n_samples]
-                    processor.views_loaded = True
-                    processor.view_radius_mm = radius_mm
-                    processor.view_opening_deg = opening_deg
-                    processor.view_output_size = output_size
-                    offset += n_samples
-                
-                self._loaded_views = True
-                return cached_views
-        
-        # Compute views
-        print(f"🎯 Computing conical views (radius: {radius_mm}mm, opening: {opening_deg}°)...")
+        # Compute views using processor-level caching
+        print(f"🎯 Loading conical views (radius: {radius_mm}mm, opening: {opening_deg}°)...")
         
         all_views = []
         
         for i, processor in enumerate(self.processors):
             print(f"   Processing session {i+1}/{len(self.processors)}...")
-            processor.load_views(radius_mm, opening_deg, output_size, show_example=show_example)
+            processor.load_views(radius_mm, opening_deg, output_size, show_example=show_example, force_recompute=effective_force_recompute)
             
             all_views.append(processor.views)
-            
-            # Save individual session cache
-            if self.cache_dir:
-                self._save_to_cache(processor.views, 'views', i)
         
         # Concatenate all results
         views = np.concatenate(all_views, axis=0)
-        
-        # Save collection-level cache
-        if self.cache_dir:
-            self._save_to_cache(views, 'views')
         
         self._loaded_views = True
         print(f"✅ Loaded views for {len(views)} total samples")
@@ -542,45 +554,22 @@ class DataCollection:
         global_force_recompute = self._cache_metadata.get('force_recompute', False)
         effective_force_recompute = force_recompute or global_force_recompute
         
-        # Add sonar to cache metadata
-        self._cache_metadata['sonar_flatten'] = flatten
+        if self._loaded_sonar and not effective_force_recompute:
+            print("📡 Using already loaded sonar data")
+            return self.get_sonar()
         
-        # Try to load from cache first (only if not forcing recompute)
-        if not effective_force_recompute:
-            cached_sonar = self._load_from_cache('sonar')
-            if cached_sonar is not None:
-                # Store in processors for consistency
-                offset = 0
-                for i, processor in enumerate(self.processors):
-                    n_samples = processor.n
-                    processor.sonar_data = cached_sonar[offset:offset+n_samples]
-                    processor.sonar_loaded = True
-                    offset += n_samples
-                 
-                self._loaded_sonar = True
-                print("📡 Using cached sonar data")
-                return cached_sonar
-        
-        # Compute sonar data
+        # Compute sonar data using processor-level caching
         print(f"📡 Loading sonar data (flatten={flatten})...")
         
         all_sonar = []
         
         for i, processor in enumerate(self.processors):
             print(f"   Processing session {i+1}/{len(self.processors)}...")
-            processor.load_sonar(flatten=flatten)
+            processor.load_sonar(flatten=flatten, force_recompute=effective_force_recompute)
             all_sonar.append(processor.sonar_data)
-            
-            # Save individual session cache
-            if self.cache_dir:
-                self._save_to_cache(processor.sonar_data, 'sonar', i)
         
         # Concatenate all results
         sonar_data = np.concatenate(all_sonar, axis=0)
-        
-        # Save collection-level cache
-        if self.cache_dir:
-            self._save_to_cache(sonar_data, 'sonar')
         
         self._loaded_sonar = True
         print(f"✅ Loaded sonar data for {len(sonar_data)} total samples")
@@ -749,7 +738,8 @@ class DataCollection:
         
         Notes
         -----
-        Saves profiles, centers, and views if they have been loaded.
+        Caching is now handled at the processor level, so this method
+        just ensures all processors have saved their cache.
         """
         if not self.cache_dir:
             print("⚠️  No cache directory specified")
@@ -757,14 +747,8 @@ class DataCollection:
             
         print(f"💾 Saving cache to {self.cache_dir}...")
         
-        if self._loaded_profiles:
-            self._save_to_cache(self.get_profiles(), 'profiles')
-            self._save_to_cache(self.get_centers(), 'centers')
-            print("   ✅ Saved profiles and centers")
-            
-        if self._loaded_views:
-            self._save_to_cache(self.get_views(), 'views')
-            print("   ✅ Saved views")
+        # Caching is now handled at processor level, no need to save here
+        # Processors automatically save their cache when data is loaded
         
         # Save metadata
         meta_path = os.path.join(self.cache_dir, 'collection_meta.json')
@@ -795,14 +779,20 @@ class DataCollection:
 
 
 class DataProcessor:
-    def __init__(self, data_reader):
+    def __init__(self, data_reader, cache_dir=None, force_recompute=False):
         """
-        Initialize DataProcessor with minimal setup.
+        Initialize DataProcessor with caching support.
         
         Parameters
         ----------
         data_reader : str or DataReader
             Path to data directory or DataReader instance
+        cache_dir : str, optional
+            Directory for caching processed data. If None, uses './cache' in working directory.
+            Set to False to disable caching entirely.
+        force_recompute : bool, optional
+            If True, clears any existing cache and forces recomputation of all data.
+            Useful for development and when cache might be stale.
             
         Notes
         -----
@@ -819,6 +809,16 @@ class DataProcessor:
         self.wall_x, self.wall_y = None, None
         self.path_x, self.path_y = None, None
         self.arena_loaded = False
+        
+        # Cache configuration
+        if cache_dir is None:
+            self.cache_dir = './cache'
+        elif cache_dir is False:
+            self.cache_dir = None  # Disable caching
+        else:
+            self.cache_dir = cache_dir
+        
+        self.force_recompute = force_recompute
         
         # Profile parameters (set when load_profiles is called)
         self.profiles_loaded = False
@@ -840,6 +840,90 @@ class DataProcessor:
         self.rob_y = self.positions.rob_y
         self.rob_yaw_deg = self.positions.rob_yaw_deg
         self.missing = self.positions.missing
+        
+        # Clear cache if force_recompute is True and caching is enabled
+        if self.force_recompute and self.cache_dir:
+            self.clear_cache()
+        
+        print(f"💾 DataProcessor initialized for session: {os.path.basename(self.session)}")
+        if self.cache_dir:
+            print(f"   Cache directory: {self.cache_dir}")
+        else:
+            print("   Caching disabled")
+        if self.force_recompute:
+            print("   🔥 Force recompute: ENABLED")
+
+    def _get_cache_path(self, data_type):
+        """Get cache file path for specific data type."""
+        if not self.cache_dir:
+            return None
+        
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        session_name = os.path.basename(self.session)
+        return os.path.join(self.cache_dir, f"{session_name}_{data_type}.npy")
+
+    def _save_to_cache(self, data, data_type, metadata=None):
+        """Save data to cache file with optional metadata."""
+        cache_path = self._get_cache_path(data_type)
+        if cache_path:
+            if metadata is not None:
+                # Save data and metadata as a dictionary using Python pickle
+                import pickle
+                cache_data = {'data': data, 'metadata': metadata}
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(cache_data, f)
+            else:
+                np.save(cache_path, data)
+            return True
+        return False
+
+    def _load_from_cache(self, data_type):
+        """Load data from cache file if available."""
+        cache_path = self._get_cache_path(data_type)
+        if cache_path and os.path.exists(cache_path):
+            try:
+                # Try Python pickle first (new format with metadata)
+                try:
+                    import pickle
+                    with open(cache_path, 'rb') as f:
+                        cache_data = pickle.load(f)
+                    
+                    if isinstance(cache_data, dict) and 'data' in cache_data:
+                        # New format with metadata
+                        data = cache_data['data']
+                        metadata = cache_data.get('metadata', {})
+                        print(f"💾 Loaded {data_type} from cache: {cache_path}")
+                        return data, metadata
+                except:
+                    pass
+                
+                # Fall back to numpy load (old format without metadata)
+                cache_data = np.load(cache_path, allow_pickle=True)
+                
+                # Handle old format (raw array)
+                print(f"💾 Loaded {data_type} from cache: {cache_path}")
+                return cache_data, {}
+            except Exception as e:
+                print(f"⚠️  Cache load failed for {data_type}: {e}")
+        return None, None
+
+    def clear_cache(self):
+        """Clear all cache files for this session."""
+        if not self.cache_dir or not os.path.exists(self.cache_dir):
+            return
+        
+        session_name = os.path.basename(self.session)
+        print(f"🧹 Clearing cache for session: {session_name}")
+        
+        for file in os.listdir(self.cache_dir):
+            if file.startswith(f"{session_name}_"):
+                try:
+                    os.remove(os.path.join(self.cache_dir, file))
+                    print(f"   🗑️  Removed: {file}")
+                except:
+                    pass
+        print("✅ Cache cleared")
 
     def print_data_overview(self):
         print('DATA IN DATA READER:')
@@ -1004,7 +1088,7 @@ class DataProcessor:
         
         return x_world, y_world
 
-    def load_profiles(self, az_min=-45, az_max=45, az_steps=20):
+    def load_profiles(self, az_min=-45, az_max=45, az_steps=20, force_recompute=False):
         """
         Load distance profiles for all robot positions.
         
@@ -1014,20 +1098,68 @@ class DataProcessor:
             Azimuth range in degrees for profile computation
         az_steps : int
             Number of azimuth steps in the profile
+        force_recompute : bool
+            If True, recompute even if cache exists
             
         Notes
         -----
         Automatically loads arena metadata if needed.
         Results are cached for efficient reuse.
         """
-        if self.profiles_loaded:
-            return  # Already loaded
+        # Check if we should force recompute (either globally or for this call)
+        effective_force_recompute = force_recompute or self.force_recompute
+        
+        if self.profiles_loaded and not effective_force_recompute:
+            print("📊 Using already loaded profiles")
+            return
             
+        # Try to load from cache first (only if not forcing recompute)
+        if not effective_force_recompute:
+            cached_profiles, profiles_metadata = self._load_from_cache('profiles')
+            cached_centers, centers_metadata = self._load_from_cache('centers')
+            
+            # Check if cached data exists and parameters match
+            if (cached_profiles is not None and cached_centers is not None and
+                profiles_metadata is not None and centers_metadata is not None):
+                
+                # Extract parameters from metadata
+                cached_params = {
+                    'az_min': profiles_metadata.get('az_min'),
+                    'az_max': profiles_metadata.get('az_max'), 
+                    'az_steps': profiles_metadata.get('az_steps')
+                }
+                
+                current_params = {
+                    'az_min': az_min,
+                    'az_max': az_max,
+                    'az_steps': az_steps
+                }
+                
+                # Check if parameters match
+                params_match = all(
+                    cached_params.get(k) == v 
+                    for k, v in current_params.items()
+                )
+                
+                if params_match:
+                    self.profiles = cached_profiles
+                    self.profile_centers = cached_centers
+                    self.profiles_loaded = True
+                    print(f"✅ Loaded {len(self.profiles)} distance profiles from cache")
+                    print(f"   Profile shape: {self.profiles.shape}")
+                    print(f"   Centers shape: {self.profile_centers.shape}")
+                    print(f"   Parameters matched: az_min={az_min}, az_max={az_max}, az_steps={az_steps}")
+                    return
+                else:
+                    print(f"⚠️  Cache parameters don't match - recomputing...")
+                    print(f"   Cached params: {cached_params}")
+                    print(f"   Requested params: {current_params}")
+        
         # Automatically load arena metadata if needed (for wall coordinates)
         if not hasattr(self, 'arena_metadata_loaded') or not self.arena_metadata_loaded:
             self.load_arena_metadata()
         
-        print(f"📊 Loading distance profiles (azimuth: {az_min}° to {az_max}°, {az_steps} steps)...")
+        print(f"📊 Computing distance profiles (azimuth: {az_min}° to {az_max}°, {az_steps} steps)...")
         
         # Compute profiles for all positions
         profiles = []
@@ -1042,11 +1174,29 @@ class DataProcessor:
         self.profile_centers = np.asarray(centers, dtype=np.float32)
         self.profiles_loaded = True
         
+        # Save to cache with metadata
+        if self.cache_dir:
+            from datetime import datetime
+            profiles_metadata = {
+                'az_min': az_min,
+                'az_max': az_max,
+                'az_steps': az_steps,
+                'timestamp': datetime.now().isoformat()
+            }
+            centers_metadata = {
+                'az_min': az_min,
+                'az_max': az_max, 
+                'az_steps': az_steps,
+                'timestamp': datetime.now().isoformat()
+            }
+            self._save_to_cache(self.profiles, 'profiles', metadata=profiles_metadata)
+            self._save_to_cache(self.profile_centers, 'centers', metadata=centers_metadata)
+        
         print(f"✅ Loaded {len(self.profiles)} distance profiles")
         print(f"   Profile shape: {self.profiles.shape}")
         print(f"   Centers shape: {self.profile_centers.shape}")
 
-    def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), plot_indices=None, indices=None, save_examples=False):
+    def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), plot_indices=None, indices=None, save_examples=False, force_recompute=False):
         """
         Load views for all robot positions.
         
@@ -1067,21 +1217,67 @@ class DataProcessor:
             If True, saves example plots for all views.
             If str, saves example plots and uses it as directory name.
             Useful for debugging orientation issues.
+        force_recompute : bool
+            If True, recompute even if cache exists
             
         Notes
         -----
         Automatically loads arena metadata if needed.
         Results are cached for efficient reuse.
         """
-        if self.views_loaded:
-            return  # Already loaded
+        # Check if we should force recompute (either globally or for this call)
+        effective_force_recompute = force_recompute or self.force_recompute
+        
+        if self.views_loaded and not effective_force_recompute:
+            print("🎯 Using already loaded views")
+            return self.views
             
+        # Try to load from cache first (only if not forcing recompute)
+        if not effective_force_recompute:
+            cached_views, views_metadata = self._load_from_cache('views')
+            
+            if cached_views is not None and views_metadata is not None:
+                # Extract parameters from metadata
+                cached_params = {
+                    'radius_mm': views_metadata.get('radius_mm'),
+                    'opening_deg': views_metadata.get('opening_deg'),
+                    'output_size': tuple(views_metadata.get('output_size', []))
+                }
+                
+                current_params = {
+                    'radius_mm': radius_mm,
+                    'opening_deg': opening_deg,
+                    'output_size': output_size
+                }
+                
+                # Check if parameters match
+                params_match = all(
+                    cached_params.get(k) == v 
+                    for k, v in current_params.items()
+                )
+                
+                if params_match:
+                    self.views = cached_views
+                    self.views_loaded = True
+                    self.view_radius_mm = radius_mm
+                    self.view_opening_deg = opening_deg
+                    self.view_output_size = output_size
+                    print(f"✅ Loaded {len(self.views)} views from cache")
+                    print(f"   Views shape: {self.views.shape}")
+                    print(f"   Memory usage: {self.views.nbytes / 1024 / 1024:.2f} MB")
+                    print(f"   Parameters matched: radius={radius_mm}mm, opening={opening_deg}°, size={output_size}")
+                    return self.views
+                else:
+                    print(f"⚠️  Cache parameters don't match - recomputing...")
+                    print(f"   Cached params: {cached_params}")
+                    print(f"   Requested params: {current_params}")
+        
         # Store parameters
         self.view_radius_mm = radius_mm
         self.view_opening_deg = opening_deg
         self.view_output_size = output_size
         
-        print(f"🎯 Loading views (radius: {radius_mm}mm, opening: {opening_deg}°)...")
+        print(f"🎯 Computing views (radius: {radius_mm}mm, opening: {opening_deg}°)...")
         
         # Load meta data if needed (for coordinate conversion)
         if not hasattr(self, 'meta') or self.meta is None:
@@ -1157,13 +1353,24 @@ class DataProcessor:
         self.views = np.asarray(views, dtype=np.uint8)
         self.views_loaded = True
         
+        # Save to cache with metadata
+        if self.cache_dir:
+            from datetime import datetime
+            views_metadata = {
+                'radius_mm': radius_mm,
+                'opening_deg': opening_deg,
+                'output_size': list(output_size),
+                'timestamp': datetime.now().isoformat()
+            }
+            self._save_to_cache(self.views, 'views', metadata=views_metadata)
+        
         print(f"✅ Loaded {len(self.views)} views")
         print(f"   Views shape: {self.views.shape}")
         print(f"   Memory usage: {self.views.nbytes / 1024 / 1024:.2f} MB")
         
         return self.views
 
-    def load_sonar(self, flatten=False):
+    def load_sonar(self, flatten=False, force_recompute=False):
         """
         Load sonar data for all robot positions.
         
@@ -1172,14 +1379,41 @@ class DataProcessor:
         flatten : bool, optional
             If True, flattens the sonar data from (N, samples, 2) to (N, samples*2)
             for compatibility with some machine learning models.
+        force_recompute : bool
+            If True, recompute even if cache exists
+           
              
         Notes
         -----
         Automatically extracts left and right channels based on configuration.
         Results are cached for efficient reuse.
         """
-        if self.sonar_loaded:
-            return  # Already loaded
+        # Check if we should force recompute (either globally or for this call)
+        effective_force_recompute = force_recompute or self.force_recompute
+        
+        if self.sonar_loaded and not effective_force_recompute:
+            print("📡 Using already loaded sonar data")
+            return
+            
+        # Try to load from cache first (only if not forcing recompute)
+        if not effective_force_recompute:
+            cached_sonar, sonar_metadata = self._load_from_cache('sonar')
+            
+            if cached_sonar is not None and sonar_metadata is not None:
+                # Check if flatten parameter matches
+                cached_flatten = sonar_metadata.get('flatten', False)
+                if cached_flatten == flatten:
+                    self.sonar_data = cached_sonar
+                    self.sonar_loaded = True
+                    print("📡 Using cached sonar data")
+                    print(f"   📏 Sonar data shape: {self.sonar_data.shape}")
+                    print(f"   Memory usage: {self.sonar_data.nbytes / 1024 / 1024:.2f} MB")
+                    print(f"   Parameters matched: flatten={flatten}")
+                    return
+                else:
+                    print(f"⚠️  Cache flatten parameter doesn't match - recomputing...")
+                    print(f"   Cached flatten: {cached_flatten}")
+                    print(f"   Requested flatten: {flatten}")
             
         print(f"📡 Loading sonar data...")
         
@@ -1204,6 +1438,15 @@ class DataProcessor:
         
         self.sonar_data = sonar_data
         self.sonar_loaded = True
+        
+        # Save to cache with metadata
+        if self.cache_dir:
+            from datetime import datetime
+            sonar_metadata = {
+                'flatten': flatten,
+                'timestamp': datetime.now().isoformat()
+            }
+            self._save_to_cache(self.sonar_data, 'sonar', metadata=sonar_metadata)
         
         print(f"✅ Loaded sonar data for {len(sonar_data)} positions")
         print(f"   Memory usage: {sonar_data.nbytes / 1024 / 1024:.2f} MB")
@@ -1611,6 +1854,10 @@ class DataProcessor:
         session_name = os.path.basename(self.session)
         plot_dir = os.path.join(output_dir, f'sonar_plots_{session_name}_{timestamp}')
         os.makedirs(plot_dir, exist_ok=True)
+        
+        # Ensure sonar data is loaded
+        if not hasattr(self, 'sonar_data') or self.sonar_data is None:
+            self.load_sonar(flatten=False)
         
         print(f"📊 Generating sonar plots for {len(self.sonar_data)} measurements...")
         print(f"   Output directory: {plot_dir}")
