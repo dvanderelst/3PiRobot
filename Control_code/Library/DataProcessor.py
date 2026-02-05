@@ -1135,9 +1135,27 @@ class DataProcessor:
                     'az_steps': az_steps
                 }
                 
-                # Check if parameters match
+                # Check if parameters match - handle numpy array comparisons safely
+                def params_equal(a, b):
+                    """Safe comparison that handles numpy arrays and other types"""
+                    try:
+                        # Try direct comparison first
+                        return a == b
+                    except (ValueError, TypeError):
+                        # If direct comparison fails (e.g., numpy array), try alternative methods
+                        if hasattr(a, '__array__') and hasattr(b, '__array__'):
+                            # Both are numpy arrays, use numpy's array_equal
+                            import numpy as np
+                            return np.array_equal(a, b)
+                        elif hasattr(a, '__iter__') and hasattr(b, '__iter__'):
+                            # Both are iterable, convert to tuples and compare
+                            return tuple(a) == tuple(b)
+                        else:
+                            # Fallback to string comparison if all else fails
+                            return str(a) == str(b)
+                
                 params_match = all(
-                    cached_params.get(k) == v 
+                    params_equal(cached_params.get(k), v) 
                     for k, v in current_params.items()
                 )
                 
@@ -1196,7 +1214,7 @@ class DataProcessor:
         print(f"   Profile shape: {self.profiles.shape}")
         print(f"   Centers shape: {self.profile_centers.shape}")
 
-    def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), plot_indices=None, indices=None, save_examples=False, force_recompute=False):
+    def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), plot_indices=None, indices=None, save_examples=False, force_recompute=False, show_example=True):
         """
         Load views for all robot positions.
         
@@ -1828,17 +1846,13 @@ class DataProcessor:
         - Creates a subdirectory with timestamp for organized storage
         - Uses tqdm to show progress
         - Saves plots as PNG files without displaying them
-        - Requires sonar data to be loaded first
+        - Automatically loads sonar data if not already loaded
         - If view=True, requires views to be loaded
         - If profile=True, requires profiles to be loaded
         """
         import os
         import time
         from datetime import datetime
-        
-        # Validate that sonar data is loaded
-        if not hasattr(self, 'sonar_data') or self.sonar_data is None:
-            raise ValueError("Sonar data not loaded. Call load_sonar() first.")
         
         # Validate view requirement
         if view and (not hasattr(self, 'views') or self.views is None):
@@ -1847,6 +1861,11 @@ class DataProcessor:
         # Validate profile requirement  
         if profile and (not hasattr(self, 'profiles') or self.profiles is None):
             raise ValueError("Profiles not loaded. Call load_profiles() first or set profile=False.")
+        
+        # Automatically load sonar data if not already loaded
+        if not hasattr(self, 'sonar_data') or self.sonar_data is None:
+            print("📡 Loading sonar data for plotting...")
+            self.load_sonar()
         
         # Create output directory with timestamp
         os.makedirs(output_dir, exist_ok=True)

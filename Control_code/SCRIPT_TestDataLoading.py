@@ -8,6 +8,13 @@ dc.load_profiles(az_steps=19)
 
 views = dc.views
 profiles = dc.profiles
+centers = dc.profile_centers
+
+for session in sessions:
+    dp = DataProcessor.DataProcessor(session)
+    dp.load_views(radius_mm=4000, opening_deg=90, output_size=(128, 128))
+    dp.load_profiles(az_min=-45, az_max=45, az_steps=19)
+    dp.plot_all_sonar(view=True, profile=True)
 
 # Data validation and sanity checks
 print("\n=== DATA VALIDATION ===")
