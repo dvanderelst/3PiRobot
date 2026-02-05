@@ -271,9 +271,12 @@ def plot_training_history(history):
     plt.ylabel('MAE')
     plt.legend()
     
-    # Plot learning rate
+    # Plot learning rate (if available)
     plt.subplot(2, 2, 4)
-    plt.plot(history.history['lr'], label='Learning Rate')
+    if 'lr' in history.history:
+        plt.plot(history.history['lr'], label='Learning Rate')
+    else:
+        plt.plot([], label='Learning Rate (not tracked)')
     plt.title('Learning Rate')
     plt.xlabel('Epoch')
     plt.ylabel('Learning Rate')
