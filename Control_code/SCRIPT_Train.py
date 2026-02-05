@@ -38,7 +38,7 @@ PATIENCE = 15
 
 # Output configuration - easily switch between targets
 # Options: 'distance', 'iid', or 'both'
-OUTPUT_TARGET = 'both'  # Change this to 'distance' or 'iid' to train on single output
+OUTPUT_TARGET = 'distance'  # Change this to 'distance' or 'iid' to train on single output
 
 print("📊 Loading data...")
 dc = DataProcessor.DataCollection(sessions)
@@ -337,49 +337,90 @@ def plot_scatter_predictions(y_true, y_pred, target_name, filename):
 def plot_training_history(history):
     """Plot training and validation metrics"""
     
-    plt.figure(figsize=(15, 10))
-    
-    # Plot loss
-    plt.subplot(2, 2, 1)
-    plt.plot(history.history['loss'], label='Training Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.title('Model Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    
-    # Plot distance MAE
-    plt.subplot(2, 2, 2)
-    plt.plot(history.history['distance_output_mae'], label='Training Distance MAE')
-    plt.plot(history.history['val_distance_output_mae'], label='Validation Distance MAE')
-    plt.title('Distance MAE')
-    plt.xlabel('Epoch')
-    plt.ylabel('MAE')
-    plt.legend()
-    
-    # Plot IID MAE
-    plt.subplot(2, 2, 3)
-    plt.plot(history.history['iid_output_mae'], label='Training IID MAE')
-    plt.plot(history.history['val_iid_output_mae'], label='Validation IID MAE')
-    plt.title('IID MAE')
-    plt.xlabel('Epoch')
-    plt.ylabel('MAE')
-    plt.legend()
-    
-    # Plot learning rate (if available)
-    plt.subplot(2, 2, 4)
-    if 'lr' in history.history:
-        plt.plot(history.history['lr'], label='Learning Rate')
-    else:
-        plt.plot([], label='Learning Rate (not tracked)')
-    plt.title('Learning Rate')
-    plt.xlabel('Epoch')
-    plt.ylabel('Learning Rate')
-    plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    if OUTPUT_TARGET == 'both':
+        plt.figure(figsize=(15, 10))
+        
+        # Plot loss
+        plt.subplot(2, 2, 1)
+        plt.plot(history.history['loss'], label='Training Loss')
+        plt.plot(history.history['val_loss'], label='Validation Loss')
+        plt.title('Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        # Plot distance MAE
+        plt.subplot(2, 2, 2)
+        plt.plot(history.history['distance_output_mae'], label='Training Distance MAE')
+        plt.plot(history.history['val_distance_output_mae'], label='Validation Distance MAE')
+        plt.title('Distance MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('MAE')
+        plt.legend()
+        
+        # Plot IID MAE
+        plt.subplot(2, 2, 3)
+        plt.plot(history.history['iid_output_mae'], label='Training IID MAE')
+        plt.plot(history.history['val_iid_output_mae'], label='Validation IID MAE')
+        plt.title('IID MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('MAE')
+        plt.legend()
+        
+        # Plot learning rate (if available)
+        plt.subplot(2, 2, 4)
+        if 'lr' in history.history:
+            plt.plot(history.history['lr'], label='Learning Rate')
+        else:
+            plt.plot([], label='Learning Rate (not tracked)')
+        plt.title('Learning Rate')
+        plt.xlabel('Epoch')
+        plt.ylabel('Learning Rate')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+    else:  # Single output
+        plt.figure(figsize=(12, 8))
+        
+        # Plot loss
+        plt.subplot(2, 2, 1)
+        plt.plot(history.history['loss'], label='Training Loss')
+        plt.plot(history.history['val_loss'], label='Validation Loss')
+        plt.title('Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        # Plot MAE
+        target_name = 'Distance' if OUTPUT_TARGET == 'distance' else 'IID'
+        mae_key = 'mae'
+        val_mae_key = 'val_mae'
+        
+        plt.subplot(2, 2, 2)
+        plt.plot(history.history[mae_key], label=f'Training {target_name} MAE')
+        plt.plot(history.history[val_mae_key], label=f'Validation {target_name} MAE')
+        plt.title(f'{target_name} MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('MAE')
+        plt.legend()
+        
+        # Plot learning rate (if available)
+        plt.subplot(2, 2, 3)
+        if 'lr' in history.history:
+            plt.plot(history.history['lr'], label='Learning Rate')
+        else:
+            plt.plot([], label='Learning Rate (not tracked)')
+        plt.title('Learning Rate')
+        plt.xlabel('Epoch')
+        plt.ylabel('Learning Rate')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
+        plt.show()
 
 # Save the model and scalers
 def save_model_and_scalers(model, profile_scaler, distance_scaler, iid_scaler):
