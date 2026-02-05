@@ -81,12 +81,12 @@ print(f"🎯 Training set size: {len(X_train)}")
 print(f"🎯 Test set size: {len(X_test)}")
 
 # Preprocess the data
-X_train_norm, y_distance_train_norm, y_iid_train_norm, _, distance_scaler, iid_scaler = preprocess_data(
+X_train_norm, y_distance_train_norm, y_iid_train_norm, profile_scaler, distance_scaler, iid_scaler = preprocess_data(
     X_train, y_distance_train, y_iid_train
 )
 
 # For test data, only transform (don't fit)
-X_test_norm = distance_scaler.transform(X_test)  # Using distance scaler for consistency
+X_test_norm = profile_scaler.transform(X_test)  # Use the profile scaler, not distance scaler
 
 # Build the neural network model
 def build_sonar_predictor(input_shape):
@@ -201,11 +201,11 @@ history = model.fit(
 )
 
 # Evaluate the model
-def evaluate_model(model, X_test, y_distance_test, y_iid_test, distance_scaler, iid_scaler):
+def evaluate_model(model, X_test, y_distance_test, y_iid_test, profile_scaler, distance_scaler, iid_scaler):
     """Evaluate model performance on test data"""
     
     # Normalize test data
-    X_test_norm = distance_scaler.transform(X_test)
+    X_test_norm = profile_scaler.transform(X_test)
     
     # Make predictions
     y_distance_pred_norm, y_iid_pred_norm = model.predict(X_test_norm)
@@ -284,7 +284,7 @@ def plot_training_history(history):
     plt.show()
 
 # Save the model and scalers
-def save_model_and_scalers(model, distance_scaler, iid_scaler, profile_scaler):
+def save_model_and_scalers(model, profile_scaler, distance_scaler, iid_scaler):
     """Save model and preprocessing scalers"""
     
     # Create models directory if it doesn't exist
@@ -313,13 +313,13 @@ if __name__ == "__main__":
     print("🎯 Starting sonar prediction model training...")
     
     # Train and evaluate
-    metrics = evaluate_model(model, X_test, y_distance_test, y_iid_test, distance_scaler, iid_scaler)
+    metrics = evaluate_model(model, X_test, y_distance_test, y_iid_test, profile_scaler, distance_scaler, iid_scaler)
     
     # Plot training history
     plot_training_history(history)
     
     # Save model and scalers
-    model_name = save_model_and_scalers(model, distance_scaler, iid_scaler, profile_scaler)
+    model_name = save_model_and_scalers(model, profile_scaler, distance_scaler, iid_scaler)
     
     print("✅ Training complete!")
     print(f"📁 Model and artifacts saved with prefix: {model_name}")
