@@ -36,6 +36,10 @@ BATCH_SIZE = 32
 EPOCHS = 100
 PATIENCE = 15
 
+# Output configuration - easily switch between targets
+# Options: 'distance', 'iid', or 'both'
+OUTPUT_TARGET = 'both'  # Change this to 'distance' or 'iid' to train on single output
+
 print("📊 Loading data...")
 dc = DataProcessor.DataCollection(sessions)
 dc.load_views(radius_mm=4000, opening_deg=90, output_size=(256, 256))
@@ -89,8 +93,13 @@ X_train_norm, y_distance_train_norm, y_iid_train_norm, profile_scaler, distance_
 X_test_norm = profile_scaler.transform(X_test)  # Use the profile scaler, not distance scaler
 
 # Build the neural network model
-def build_sonar_predictor(input_shape):
-    """Build a neural network for sonar prediction"""
+def build_sonar_predictor(input_shape, output_target='both'):
+    """Build a neural network for sonar prediction
+    
+    Args:
+        input_shape: Shape of input data
+        output_target: 'distance', 'iid', or 'both'
+    """
     
     # Input layer
     inputs = keras.Input(shape=input_shape, name='profiles_input')
@@ -107,39 +116,58 @@ def build_sonar_predictor(input_shape):
     x = layers.Dense(32, activation='relu', name='dense_3')(x)
     x = layers.BatchNormalization()(x)
     
-    # Output layers - two separate heads for distance and IID
-    distance_output = layers.Dense(1, name='distance_output')(x)
-    iid_output = layers.Dense(1, name='iid_output')(x)
+    # Output layers - configurable based on target
+    if output_target == 'both':
+        # Two separate heads for distance and IID
+        distance_output = layers.Dense(1, name='distance_output')(x)
+        iid_output = layers.Dense(1, name='iid_output')(x)
+        outputs = [distance_output, iid_output]
+    elif output_target == 'distance':
+        # Single output for distance only
+        outputs = layers.Dense(1, name='distance_output')(x)
+    elif output_target == 'iid':
+        # Single output for IID only
+        outputs = layers.Dense(1, name='iid_output')(x)
+    else:
+        raise ValueError(f"Unknown output_target: {output_target}")
     
     # Create model
-    model = keras.Model(inputs=inputs, outputs=[distance_output, iid_output], name='sonar_predictor')
+    model = keras.Model(inputs=inputs, outputs=outputs, name='sonar_predictor')
     
     return model
 
 # Create the model
-model = build_sonar_predictor(input_shape=(X_train.shape[1],))
+model = build_sonar_predictor(input_shape=(X_train.shape[1],), output_target=OUTPUT_TARGET)
 
 print("🏗️  Model architecture:")
 model.summary()
 
 # Compile the model with appropriate loss functions and metrics
-def custom_loss_weights(y_true, y_pred):
-    """Custom loss weights to balance distance and IID prediction"""
-    # Distance prediction is more important, so give it higher weight
-    return {'distance_output': 0.7, 'iid_output': 0.3}
+def get_compilation_config(output_target):
+    """Get compilation configuration based on output target"""
+    if output_target == 'both':
+        return {
+            'optimizer': keras.optimizers.Adam(learning_rate=0.001),
+            'loss': {
+                'distance_output': 'mean_squared_error',
+                'iid_output': 'mean_squared_error'
+            },
+            'loss_weights': {'distance_output': 0.7, 'iid_output': 0.3},
+            'metrics': {
+                'distance_output': ['mae', 'mse'],
+                'iid_output': ['mae', 'mse']
+            }
+        }
+    else:  # Single output
+        target_name = 'distance_output' if output_target == 'distance' else 'iid_output'
+        return {
+            'optimizer': keras.optimizers.Adam(learning_rate=0.001),
+            'loss': 'mean_squared_error',
+            'metrics': ['mae', 'mse']
+        }
 
-model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=0.001),
-    loss={
-        'distance_output': 'mean_squared_error',
-        'iid_output': 'mean_squared_error'
-    },
-    loss_weights=custom_loss_weights(None, None),
-    metrics={
-        'distance_output': ['mae', 'mse'],
-        'iid_output': ['mae', 'mse']
-    }
-)
+compilation_config = get_compilation_config(OUTPUT_TARGET)
+model.compile(**compilation_config)
 
 # Callbacks for training
 def get_callbacks():
@@ -180,13 +208,21 @@ def get_callbacks():
 
 # Prepare data for Keras
 print("📦 Preparing data for training...")
-train_data = {
-    'profiles_input': X_train_norm
-}
-train_targets = {
-    'distance_output': y_distance_train_norm,
-    'iid_output': y_iid_train_norm
-}
+if OUTPUT_TARGET == 'both':
+    train_data = {
+        'profiles_input': X_train_norm
+    }
+    train_targets = {
+        'distance_output': y_distance_train_norm,
+        'iid_output': y_iid_train_norm
+    }
+else:
+    # Single output - use simpler data structure
+    train_data = X_train_norm
+    if OUTPUT_TARGET == 'distance':
+        train_targets = y_distance_train_norm
+    else:  # 'iid'
+        train_targets = y_iid_train_norm
 
 # Train the model
 print("🚀 Starting training...")
@@ -207,38 +243,97 @@ def evaluate_model(model, X_test, y_distance_test, y_iid_test, profile_scaler, d
     # Normalize test data
     X_test_norm = profile_scaler.transform(X_test)
     
-    # Make predictions
-    y_distance_pred_norm, y_iid_pred_norm = model.predict(X_test_norm)
-    
-    # Inverse transform predictions to original scale
-    y_distance_pred = distance_scaler.inverse_transform(y_distance_pred_norm)
-    y_iid_pred = iid_scaler.inverse_transform(y_iid_pred_norm)
-    
-    # Calculate metrics
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-    
-    distance_mae = mean_absolute_error(y_distance_test, y_distance_pred)
-    distance_mse = mean_squared_error(y_distance_test, y_distance_pred)
-    distance_r2 = r2_score(y_distance_test, y_distance_pred)
-    
-    iid_mae = mean_absolute_error(y_iid_test, y_iid_pred)
-    iid_mse = mean_squared_error(y_iid_test, y_iid_pred)
-    iid_r2 = r2_score(y_iid_test, y_iid_pred)
-    
-    print("📊 Model Evaluation Results:")
-    print(f"   Distance Prediction - MAE: {distance_mae:.4f}, MSE: {distance_mse:.4f}, R²: {distance_r2:.4f}")
-    print(f"   IID Prediction - MAE: {iid_mae:.4f}, MSE: {iid_mse:.4f}, R²: {iid_r2:.4f}")
-    
-    return {
-        'distance_mae': distance_mae,
-        'distance_mse': distance_mse,
-        'distance_r2': distance_r2,
-        'iid_mae': iid_mae,
-        'iid_mse': iid_mse,
-        'iid_r2': iid_r2
-    }
+    # Make predictions based on output target
+    if OUTPUT_TARGET == 'both':
+        y_distance_pred_norm, y_iid_pred_norm = model.predict(X_test_norm)
+        # Inverse transform predictions to original scale
+        y_distance_pred = distance_scaler.inverse_transform(y_distance_pred_norm)
+        y_iid_pred = iid_scaler.inverse_transform(y_iid_pred_norm)
+        
+        # Calculate metrics for both outputs
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+        
+        distance_mae = mean_absolute_error(y_distance_test, y_distance_pred)
+        distance_mse = mean_squared_error(y_distance_test, y_distance_pred)
+        distance_r2 = r2_score(y_distance_test, y_distance_pred)
+        
+        iid_mae = mean_absolute_error(y_iid_test, y_iid_pred)
+        iid_mse = mean_squared_error(y_iid_test, y_iid_pred)
+        iid_r2 = r2_score(y_iid_test, y_iid_pred)
+        
+        print("📊 Model Evaluation Results:")
+        print(f"   Distance Prediction - MAE: {distance_mae:.4f}, MSE: {distance_mse:.4f}, R²: {distance_r2:.4f}")
+        print(f"   IID Prediction - MAE: {iid_mae:.4f}, MSE: {iid_mse:.4f}, R²: {iid_r2:.4f}")
+        
+        # Create scatter plots
+        plot_scatter_predictions(y_distance_test, y_distance_pred.flatten(), 'Distance', 'scatter_distance.png')
+        plot_scatter_predictions(y_iid_test, y_iid_pred.flatten(), 'IID', 'scatter_iid.png')
+        
+        return {
+            'distance_mae': distance_mae,
+            'distance_mse': distance_mse,
+            'distance_r2': distance_r2,
+            'iid_mae': iid_mae,
+            'iid_mse': iid_mse,
+            'iid_r2': iid_r2
+        }
+        
+    else:  # Single output
+        y_pred_norm = model.predict(X_test_norm)
+        
+        # Inverse transform predictions
+        if OUTPUT_TARGET == 'distance':
+            y_pred = distance_scaler.inverse_transform(y_pred_norm)
+            y_true = y_distance_test
+            target_name = 'Distance'
+        else:  # 'iid'
+            y_pred = iid_scaler.inverse_transform(y_pred_norm)
+            y_true = y_iid_test
+            target_name = 'IID'
+        
+        # Calculate metrics
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+        
+        mae = mean_absolute_error(y_true, y_pred)
+        mse = mean_squared_error(y_true, y_pred)
+        r2 = r2_score(y_true, y_pred)
+        
+        print(f"📊 Model Evaluation Results ({target_name}):")
+        print(f"   MAE: {mae:.4f}, MSE: {mse:.4f}, R²: {r2:.4f}")
+        
+        # Create scatter plot
+        plot_scatter_predictions(y_true, y_pred.flatten(), target_name, f'scatter_{OUTPUT_TARGET}.png')
+        
+        return {
+            f'{OUTPUT_TARGET}_mae': mae,
+            f'{OUTPUT_TARGET}_mse': mse,
+            f'{OUTPUT_TARGET}_r2': r2
+        }
 
 # Plot training history
+def plot_scatter_predictions(y_true, y_pred, target_name, filename):
+    """Plot scatter plot of predicted vs actual values"""
+    plt.figure(figsize=(8, 8))
+    
+    # Calculate R² score
+    from sklearn.metrics import r2_score
+    r2 = r2_score(y_true, y_pred)
+    
+    # Plot scatter
+    plt.scatter(y_true, y_pred, alpha=0.6, edgecolors='w', linewidth=0.5)
+    plt.plot([min(y_true), max(y_true)], [min(y_true), max(y_true)], 'r--', linewidth=2)
+    
+    plt.xlabel(f'Actual {target_name}')
+    plt.ylabel(f'Predicted {target_name}')
+    plt.title(f'Predicted vs Actual {target_name} (R² = {r2:.3f})')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"📊 Saved scatter plot: {filename}")
+
 def plot_training_history(history):
     """Plot training and validation metrics"""
     
