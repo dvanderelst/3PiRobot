@@ -27,6 +27,36 @@ from datetime import datetime
 
 from Library import DataProcessor
 
+# ============================================
+# CONFIGURATION SETTINGS (Easily modifiable)
+# ============================================
+
+# Data Configuration
+SESSIONS = ['session03', 'session04', 'session06', 'session07']  # Sessions to use
+OPENING_ANGLE = 90  # degrees (field of view)
+PROFILE_STEPS = 20  # number of azimuth steps in profiles
+
+# Data Split Configuration
+TEST_SIZE = 0.2  # Fraction of data for testing
+VAL_SIZE = 0.1  # Fraction of training data for validation
+RANDOM_STATE = 42  # Random seed for reproducibility
+
+# Model Architecture Configuration
+INPUT_SIZE = 200  # Flattened sonar data (100 samples × 2 channels)
+HIDDEN_SIZES = [256, 128, 64]  # Hidden layer sizes
+OUTPUT_SIZE = PROFILE_STEPS  # Predict distance at each azimuth step
+DROPOUT_RATE = 0.2  # Dropout rate for regularization
+
+# Training Configuration
+EPOCHS = 200  # Maximum number of epochs
+BATCH_SIZE = 32  # Batch size for training
+LEARNING_RATE = 0.001  # Initial learning rate
+PATIENCE = 15  # Early stopping patience
+
+# ============================================
+# END CONFIGURATION SETTINGS
+# ============================================
+
 def create_mlp_model(input_size, hidden_sizes, output_size, dropout_rate=0.2):
     """
     Create an MLP model with configurable architecture.
@@ -350,40 +380,32 @@ def main():
     print("🤖 MLP Training: Sonar → Distance Profiles")
     print("=" * 50)
     
-    # Configuration
-    sessions = ['session03', 'session04', 'session06', 'session07']
-    opening_angle = 90  # degrees
-    profile_steps = 20  # number of azimuth steps
-    test_size = 0.2
-    val_size = 0.1
-    random_state = 42
+    # Use global configuration settings
+    global SESSIONS, OPENING_ANGLE, PROFILE_STEPS, TEST_SIZE, VAL_SIZE, RANDOM_STATE
+    global INPUT_SIZE, HIDDEN_SIZES, OUTPUT_SIZE, DROPOUT_RATE
+    global EPOCHS, BATCH_SIZE, LEARNING_RATE, PATIENCE
     
-    # Model architecture
-    input_size = 200  # Flattened sonar data (100 samples × 2 channels)
-    hidden_sizes = [256, 128, 64]  # Hidden layer sizes
-    output_size = profile_steps  # Predict distance at each azimuth step
-    
-    print(f"📊 Loading data from sessions: {sessions}")
+    print(f"📊 Loading data from sessions: {SESSIONS}")
     
     # Load data
-    dc = DataProcessor.DataCollection(sessions)
+    dc = DataProcessor.DataCollection(SESSIONS)
     
     # Load sonar data (flattened)
     sonar_data = dc.load_sonar(flatten=True)
     print(f"   Sonar data shape: {sonar_data.shape}")
     
     # Load distance profiles
-    profiles, centers = dc.load_profiles(opening_angle=opening_angle, steps=profile_steps)
+    profiles, centers = dc.load_profiles(opening_angle=OPENING_ANGLE, steps=PROFILE_STEPS)
     print(f"   Profiles shape: {profiles.shape}")
     print(f"   Centers shape: {centers.shape}")
     
     # Split data into train, validation, and test sets
     print(f"\n🔀 Splitting data...")
     X_train, X_test, y_train, y_test = train_test_split(
-        sonar_data, profiles, test_size=test_size, random_state=random_state
+        sonar_data, profiles, test_size=TEST_SIZE, random_state=RANDOM_STATE
     )
     X_train, X_val, y_train, y_val = train_test_split(
-        X_train, y_train, test_size=val_size/(1-test_size), random_state=random_state
+        X_train, y_train, test_size=VAL_SIZE/(1-TEST_SIZE), random_state=RANDOM_STATE
     )
     
     print(f"   Training set: {len(X_train)} samples")
@@ -414,23 +436,22 @@ def main():
     val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
     test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
     
-    batch_size = 32
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
     # Create model
     print(f"\n🤖 Creating MLP model...")
-    print(f"   Architecture: {input_size} → {' → '.join(map(str, hidden_sizes))} → {output_size}")
+    print(f"   Architecture: {INPUT_SIZE} → {' → '.join(map(str, HIDDEN_SIZES))} → {OUTPUT_SIZE}")
     
-    model = create_mlp_model(input_size, hidden_sizes, output_size)
+    model = create_mlp_model(INPUT_SIZE, HIDDEN_SIZES, OUTPUT_SIZE, DROPOUT_RATE)
     print(f"   Total parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Train model
     print(f"\n🎓 Training model...")
     history = train_model(
         model, train_loader, val_loader,
-        epochs=200, lr=0.001, patience=15
+        epochs=EPOCHS, lr=LEARNING_RATE, patience=PATIENCE
     )
     
     # Evaluate model
@@ -511,16 +532,20 @@ def main():
     
     # Save configuration
     config = {
-        'sessions': sessions,
-        'opening_angle': opening_angle,
-        'profile_steps': profile_steps,
-        'input_size': input_size,
-        'hidden_sizes': hidden_sizes,
-        'output_size': output_size,
-        'test_size': test_size,
-        'val_size': val_size,
-        'random_state': random_state,
-        'batch_size': batch_size,
+        'sessions': SESSIONS,
+        'opening_angle': OPENING_ANGLE,
+        'profile_steps': PROFILE_STEPS,
+        'input_size': INPUT_SIZE,
+        'hidden_sizes': HIDDEN_SIZES,
+        'output_size': OUTPUT_SIZE,
+        'dropout_rate': DROPOUT_RATE,
+        'test_size': TEST_SIZE,
+        'val_size': VAL_SIZE,
+        'random_state': RANDOM_STATE,
+        'batch_size': BATCH_SIZE,
+        'epochs': EPOCHS,
+        'learning_rate': LEARNING_RATE,
+        'patience': PATIENCE,
         'training_samples': len(X_train),
         'validation_samples': len(X_val),
         'test_samples': len(X_test),
