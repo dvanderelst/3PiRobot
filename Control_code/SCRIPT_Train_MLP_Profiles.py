@@ -46,14 +46,21 @@ INPUT_SIZE = 200  # Flattened sonar data (100 samples × 2 channels)
 HIDDEN_SIZES = [256, 128, 64]  # Hidden layer sizes
 OUTPUT_SIZE = PROFILE_STEPS  # Predict distance at each azimuth step
 DROPOUT_RATE = 0.2  # Dropout rate for regularization
-
 # Training Configuration
 EPOCHS = 200  # Maximum number of epochs
 BATCH_SIZE = 32  # Batch size for training
 LEARNING_RATE = 0.001  # Initial learning rate
 PATIENCE = 15  # Early stopping patience
 
+# World-Frame Visualization Configuration
+WORLD_FRAME_SESSION = 'session07'  # Session for world-frame visualization
+WORLD_FRAME_NUM_EXAMPLES = 15  # Number of examples to show
+WORLD_FRAME_PLOT_INDICES = None  # Specific indices (None for automatic)
+WORLD_FRAME_MAX_PLOT_MM = 3000.0  # Max distance to plot (only clips extreme outliers)
+
 # ============================================
+# END CONFIGURATION SETTINGS
+# ========================================================================================
 # END CONFIGURATION SETTINGS
 # ============================================
 
@@ -385,6 +392,168 @@ def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bi
     # Create correlation scatter plots for best and worst azimuths
     create_azimuth_correlation_plots(azimuths, predictions, targets, az_bin_correlations, results_dir)
 
+def plot_world_frame_comparison(results_dir, predictions=None, targets=None, 
+                              eval_session='session07', opening_angle=45, profile_steps=9,
+                              max_plot_mm=3000.0, num_examples=5, plot_indices=None):
+    """
+    Plot world-frame comparison showing both predicted and real profiles.
+    
+    This function shows profiles with their robot positions, allowing comparison
+    between model predictions and ground truth in the actual spatial context.
+    
+    Args:
+        results_dir: Directory to save the plot
+        predictions: Model predictions (optional, if None, shows only real profiles)
+        targets: Ground truth targets (optional, if None, shows only real profiles)
+        eval_session: Session name for examples
+        opening_angle: Opening angle for profiles
+        profile_steps: Number of azimuth steps
+        max_plot_mm: Maximum distance to plot
+        num_examples: Number of examples to show
+        plot_indices: Specific indices to plot (overrides num_examples)
+    """
+    try:
+        from Library import DataProcessor
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+        
+        print(f"🗺️ Creating world-frame comparison...")
+        
+        # Determine which indices to plot
+        if plot_indices is not None:
+            example_indices = np.array(plot_indices)
+        else:
+            example_indices = np.arange(min(num_examples, len(predictions) if predictions is not None else num_examples))  # Respect config
+        
+        print(f"Plotting {len(example_indices)} examples: {example_indices}")
+        
+        # Load evaluation session data
+        dc = DataProcessor.DataCollection([eval_session])
+        eval_proc = None
+        
+        for p in dc.processors:
+            if os.path.basename(p.session) == eval_session:
+                eval_proc = p
+                break
+
+        if eval_proc is None:
+            print("⚠️  Could not find evaluation session")
+            return
+        
+        # Load the data
+        eval_proc.load_profiles(opening_angle=opening_angle, steps=profile_steps)
+        
+        # Get robot positions
+        if not hasattr(eval_proc, 'rob_x') or eval_proc.rob_x is None:
+            print("⚠️  No robot position data available")
+            return
+        
+        all_rob_x = eval_proc.rob_x.astype(float)
+        all_rob_y = eval_proc.rob_y.astype(float)
+        all_rob_yaw = eval_proc.rob_yaw_deg.astype(float)
+        
+        # Create world-frame plot
+        plt.figure(figsize=(12, 10))
+        cmap = plt.get_cmap('tab10')
+        
+        profiles_plotted = 0
+        
+        for k in range(len(example_indices)):
+            idx = example_indices[k]
+            color = cmap(k % cmap.N)
+            az_deg = np.linspace(-opening_angle/2, opening_angle/2, profile_steps)
+            rob_x = all_rob_x[idx]
+            rob_y = all_rob_y[idx]
+            rob_yaw = all_rob_yaw[idx]
+            
+            # Get profiles to plot
+            if predictions is not None and targets is not None:
+                # Plot both predicted and real profiles
+                # Use the same index for consistent mapping
+                if idx < len(predictions) and idx < len(targets):
+                    pred_profile = predictions[idx]
+                    true_profile = targets[idx]
+                else:
+                    print(f"⚠️  Index {idx} out of range for predictions/targets, skipping")
+                    continue
+                
+                # Apply clipping
+                if max_plot_mm is not None:
+                    pred_profile = np.where(pred_profile > 3000.0, np.nan, pred_profile)
+                    true_profile = np.where(true_profile > 3000.0, np.nan, true_profile)
+                
+                # Plot predicted (dashed) and true (solid)
+                try:
+                    x_pred, y_pred = DataProcessor.robot2world(az_deg, pred_profile, rob_x, rob_y, rob_yaw)
+                    x_true, y_true = DataProcessor.robot2world(az_deg, true_profile, rob_x, rob_y, rob_yaw)
+                    
+                    plt.plot(x_true, y_true, color=color, linewidth=2, linestyle='-', alpha=0.8, label='True' if k == 0 else "")
+                    plt.plot(x_pred, y_pred, color=color, linewidth=2, linestyle='--', alpha=0.8, label='Predicted' if k == 0 else "")
+                    profiles_plotted += 1
+                    
+                except Exception as e:
+                    print(f"⚠️  Error plotting comparison {k}: {e}")
+                    continue
+                    
+            else:
+                # Plot only real profiles (fallback mode)
+                actual_profile = eval_proc.profiles[idx]
+                
+                if max_plot_mm is not None:
+                    actual_profile = np.where(actual_profile > 3000.0, np.nan, actual_profile)
+                
+                try:
+                    x_true, y_true = DataProcessor.robot2world(az_deg, actual_profile, rob_x, rob_y, rob_yaw)
+                    plt.plot(x_true, y_true, color=color, linewidth=2, linestyle='-', alpha=0.8)
+                    profiles_plotted += 1
+                except Exception as e:
+                    print(f"⚠️  Error plotting example {k}: {e}")
+                    continue
+            
+            # Add a marker at the robot position
+            plt.plot(rob_x, rob_y, 'ko', markersize=6, alpha=0.8)
+        
+        # Plot robot positions for all examples
+        plt.plot(all_rob_x[example_indices], all_rob_y[example_indices],
+                 'k.', markersize=8, alpha=0.6, label='Robot positions')
+        
+        # Add legend and formatting
+        legend_elems = [
+            Line2D([0], [0], color='k', linestyle='-', linewidth=2, label='True profile'),
+            Line2D([0], [0], color='k', linestyle='--', linewidth=2, label='Predicted profile'),
+            Line2D([0], [0], color='k', marker='o', linestyle='None', markersize=6, label='Robot position'),
+        ]
+        plt.legend(handles=legend_elems, loc='best')
+        
+        plt.axis('equal')
+        plt.xlabel("X [mm]")
+        plt.ylabel("Y [mm]")
+        
+        if predictions is not None and targets is not None:
+            title = f"World-frame comparison: {eval_session} (True vs Predicted)"
+        else:
+            title = f"World-frame examples: {eval_session} (Real profiles)"
+            
+        plt.title(title)
+        
+        # Set appropriate axis limits based on robot position ranges
+        x_min, x_max = all_rob_x.min() - 500, all_rob_x.max() + 500
+        y_min, y_max = all_rob_y.min() - 500, all_rob_y.max() + 500
+        plt.xlim(x_min, x_max)
+        plt.ylim(y_min, y_max)
+        
+        plt.grid(True, alpha=0.3)
+        
+        plot_path = os.path.join(results_dir, f'world_frame_comparison_{eval_session}.png')
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"🗺️  Saved world-frame comparison to: {plot_path}")
+        print(f"📊  Profiles plotted: {profiles_plotted}/{len(example_indices)}")
+        
+    except Exception as e:
+        print(f"⚠️  Could not create world-frame comparison: {e}")
+
 def create_azimuth_correlation_plots(azimuths, predictions, targets, correlations, results_dir):
     """
     Create scatter plots showing correlation between predicted and target values
@@ -484,6 +653,89 @@ def create_best_worst_correlation_plots(azimuths, predictions, targets, correlat
     plot_path = os.path.join(results_dir, 'best_worst_correlation_scatter.png')
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
+
+def generate_predictions_for_indices(model, session_name, indices, x_scaler, opening_angle, profile_steps):
+    """
+    Generate predictions for specific indices from a session.
+    
+    Args:
+        model: Trained model
+        session_name: Session name to load data from
+        indices: List of indices to generate predictions for
+        x_scaler: StandardScaler fitted on training data
+        opening_angle: Opening angle for profiles
+        profile_steps: Number of azimuth steps
+        
+    Returns:
+        tuple: (predictions, targets) for the specified indices
+    """
+    try:
+        # Load data from the specific session
+        dc = DataProcessor.DataCollection([session_name])
+        session_proc = None
+        
+        for p in dc.processors:
+            if session_name in p.session:
+                session_proc = p
+                break
+        
+        if session_proc is None:
+            raise ValueError(f"Could not find session: {session_name}")
+        
+        # Load sonar data and profiles for this session
+        session_proc.load_sonar(flatten=True)  # This loads into session_proc.sonar_data
+        session_proc.load_profiles(opening_angle=opening_angle, steps=profile_steps)
+        
+        # Get the loaded data
+        sonar_data = session_proc.sonar_data
+        profiles = session_proc.profiles
+        
+        # Check if we have valid data
+        if sonar_data is None or profiles is None:
+            raise ValueError("No valid data loaded from session")
+        
+        if len(sonar_data) == 0 or len(profiles) == 0:
+            raise ValueError("Empty data loaded from session")
+        
+        print(f"🎯 Generating predictions for {len(indices)} specific indices from {session_name}")
+        print(f"   Session data: {len(sonar_data)} sonar samples, {len(profiles)} profiles")
+        
+        # Prepare data for the specified indices
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
+        model.eval()
+        
+        predictions = []
+        targets = []
+        
+        with torch.no_grad():
+            for idx in indices:
+                if idx >= len(sonar_data) or idx >= len(profiles):
+                    print(f"⚠️  Index {idx} out of range for session data, skipping")
+                    continue
+                
+                # Get sonar data for this index
+                sonar_sample = sonar_data[idx:idx+1]  # Keep 2D shape
+                
+                # Scale the data
+                sonar_scaled = x_scaler.transform(sonar_sample)
+                sonar_tensor = torch.FloatTensor(sonar_scaled).to(device)
+                
+                # Generate prediction
+                prediction = model(sonar_tensor)
+                predictions.append(prediction.cpu().numpy()[0])  # Remove batch dimension
+                targets.append(profiles[idx])
+        
+        if len(predictions) == 0:
+            raise ValueError("No valid predictions generated")
+        
+        return np.array(predictions), np.array(targets)
+        
+    except Exception as e:
+        print(f"❌ Could not generate predictions for indices: {e}")
+        # Fallback: return empty arrays
+        return np.array([]), np.array([])
+
 
 def main():
     """
@@ -611,6 +863,35 @@ def main():
     plot_azimuth_diagnostics(azimuths, evaluation['az_bin_errors'], 
                            evaluation['az_bin_correlations'], evaluation['az_bin_r2_scores'], 
                            evaluation['predictions'], evaluation['targets'], results_dir)
+
+    # Create world-frame comparison
+    # First, generate predictions for the specific session indices we want to visualize
+    if WORLD_FRAME_PLOT_INDICES is not None:
+        # User wants specific indices - generate predictions for those
+        session_predictions, session_targets = generate_predictions_for_indices(
+            model, eval_session, WORLD_FRAME_PLOT_INDICES, 
+            x_scaler, opening_angle, profile_steps
+        )
+        plot_world_frame_comparison(
+            results_dir, 
+            predictions=session_predictions, 
+            targets=session_targets,
+            eval_session=WORLD_FRAME_SESSION,
+            num_examples=len(WORLD_FRAME_PLOT_INDICES),
+            plot_indices=WORLD_FRAME_PLOT_INDICES,
+            max_plot_mm=WORLD_FRAME_MAX_PLOT_MM
+        )
+    else:
+        # Use default behavior with test set predictions
+        plot_world_frame_comparison(
+            results_dir, 
+            predictions=evaluation["predictions"], 
+            targets=evaluation["targets"],
+            eval_session=WORLD_FRAME_SESSION,
+            num_examples=WORLD_FRAME_NUM_EXAMPLES,
+            plot_indices=None,
+            max_plot_mm=WORLD_FRAME_MAX_PLOT_MM
+        )
     
     # Save results
     print(f"\n💾 Saving results to: {results_dir}")
