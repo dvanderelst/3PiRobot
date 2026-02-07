@@ -33,8 +33,8 @@ from Library import DataProcessor
 
 # Data Configuration
 SESSIONS = ['session03', 'session04', 'session06', 'session07']  # Sessions to use
-OPENING_ANGLE = 90  # degrees (field of view)
-PROFILE_STEPS = 20  # number of azimuth steps in profiles
+OPENING_ANGLE = 45  # degrees (field of view)
+PROFILE_STEPS = 9  # number of azimuth steps in profiles
 
 # Data Split Configuration
 TEST_SIZE = 0.2  # Fraction of data for testing
@@ -255,12 +255,13 @@ def evaluate_model(model, test_loader):
         'targets': targets
     }
 
-def plot_training_history(history):
+def plot_training_history(history, results_dir='.'):
     """
     Plot training history.
     
     Args:
         history: Training history dictionary
+        results_dir: Directory to save plots
     """
     plt.figure(figsize=(12, 8))
     
@@ -283,10 +284,11 @@ def plot_training_history(history):
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('training_history.png', dpi=150, bbox_inches='tight')
+    plot_path = os.path.join(results_dir, 'training_history.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
 
-def plot_prediction_examples(predictions, targets, num_examples=5):
+def plot_prediction_examples(predictions, targets, num_examples=5, results_dir='.'):
     """
     Plot example predictions vs targets.
     
@@ -294,6 +296,7 @@ def plot_prediction_examples(predictions, targets, num_examples=5):
         predictions: Model predictions
         targets: Ground truth targets
         num_examples: Number of examples to plot
+        results_dir: Directory to save plots
     """
     # Select random examples
     indices = np.random.choice(len(predictions), num_examples, replace=False)
@@ -324,10 +327,11 @@ def plot_prediction_examples(predictions, targets, num_examples=5):
             plt.legend(loc='upper right')
     
     plt.tight_layout()
-    plt.savefig('prediction_examples.png', dpi=150, bbox_inches='tight')
+    plot_path = os.path.join(results_dir, 'prediction_examples.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
 
-def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bin_r2_scores):
+def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bin_r2_scores, results_dir='.'):
     """
     Plot per-azimuth-bin diagnostics.
     
@@ -336,6 +340,7 @@ def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bi
         az_bin_errors: Mean absolute errors per azimuth bin
         az_bin_correlations: Pearson correlations per azimuth bin
         az_bin_r2_scores: R² scores per azimuth bin
+        results_dir: Directory to save plots
     """
     plt.figure(figsize=(15, 10))
     
@@ -370,7 +375,8 @@ def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bi
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('azimuth_diagnostics.png', dpi=150, bbox_inches='tight')
+    plot_path = os.path.join(results_dir, 'azimuth_diagnostics.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
 
 def main():
@@ -487,20 +493,20 @@ def main():
     print(f"   Best Azimuth: {best_az:.1f}° (corr: {np.max(evaluation['az_bin_correlations']):.3f})")
     print(f"   Worst Azimuth: {worst_az:.1f}° (corr: {np.min(evaluation['az_bin_correlations']):.3f})")
     
-    # Plot results
-    print(f"\n📈 Generating plots...")
-    plot_training_history(history)
-    plot_prediction_examples(evaluation['predictions'], evaluation['targets'])
-    plot_azimuth_diagnostics(azimuths, evaluation['az_bin_errors'], 
-                           evaluation['az_bin_correlations'], evaluation['az_bin_r2_scores'])
-    
-    # Save results
-    print(f"\n💾 Saving results...")
-    
     # Create results directory with timestamp
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     results_dir = f'mlp_profiles_results_{timestamp}'
     os.makedirs(results_dir, exist_ok=True)
+    
+    # Plot results
+    print(f"\n📈 Generating plots...")
+    plot_training_history(history, results_dir)
+    plot_prediction_examples(evaluation['predictions'], evaluation['targets'], num_examples=5, results_dir=results_dir)
+    plot_azimuth_diagnostics(azimuths, evaluation['az_bin_errors'], 
+                           evaluation['az_bin_correlations'], evaluation['az_bin_r2_scores'], results_dir)
+    
+    # Save results
+    print(f"\n💾 Saving results to: {results_dir}")
     
     # Save model
     model_path = os.path.join(results_dir, 'mlp_profiles_model.pth')
@@ -556,11 +562,7 @@ def main():
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2)
     
-    # Copy plots to results directory
-    import shutil
-    shutil.copy('training_history.png', os.path.join(results_dir, 'training_history.png'))
-    shutil.copy('prediction_examples.png', os.path.join(results_dir, 'prediction_examples.png'))
-    shutil.copy('azimuth_diagnostics.png', os.path.join(results_dir, 'azimuth_diagnostics.png'))
+    # Plots are now saved directly to results directory
     
     print(f"\n🎉 Training complete!")
     print(f"   Results saved to: {results_dir}")
