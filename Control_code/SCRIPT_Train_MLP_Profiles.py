@@ -331,21 +331,24 @@ def plot_prediction_examples(predictions, targets, num_examples=5, results_dir='
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
 
-def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bin_r2_scores, results_dir='.'):
+def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bin_r2_scores, predictions, targets, results_dir='.'):
     """
-    Plot per-azimuth-bin diagnostics.
+    Plot per-azimuth-bin diagnostics with correlation scatter plots.
     
     Args:
         azimuths: Array of azimuth angles
         az_bin_errors: Mean absolute errors per azimuth bin
         az_bin_correlations: Pearson correlations per azimuth bin
         az_bin_r2_scores: R² scores per azimuth bin
+        predictions: Model predictions array
+        targets: Ground truth targets array
         results_dir: Directory to save plots
     """
-    plt.figure(figsize=(15, 10))
+    # Create main diagnostics figure
+    plt.figure(figsize=(15, 12))
     
     # Error plot
-    plt.subplot(3, 1, 1)
+    plt.subplot(4, 1, 1)
     plt.bar(azimuths, az_bin_errors, width=4, alpha=0.7, color='skyblue', edgecolor='navy')
     plt.axhline(np.mean(az_bin_errors), color='red', linestyle='--', label='Mean Error')
     plt.xlabel('Azimuth (degrees)')
@@ -355,7 +358,7 @@ def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bi
     plt.grid(True, alpha=0.3)
     
     # Correlation plot
-    plt.subplot(3, 1, 2)
+    plt.subplot(4, 1, 2)
     plt.bar(azimuths, az_bin_correlations, width=4, alpha=0.7, color='lightgreen', edgecolor='darkgreen')
     plt.axhline(0, color='black', linestyle='-', linewidth=1)
     plt.xlabel('Azimuth (degrees)')
@@ -365,7 +368,7 @@ def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bi
     plt.grid(True, alpha=0.3)
     
     # R² score plot
-    plt.subplot(3, 1, 3)
+    plt.subplot(4, 1, 3)
     plt.bar(azimuths, az_bin_r2_scores, width=4, alpha=0.7, color='lightcoral', edgecolor='darkred')
     plt.axhline(0, color='black', linestyle='-', linewidth=1)
     plt.xlabel('Azimuth (degrees)')
@@ -376,6 +379,58 @@ def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bi
     
     plt.tight_layout()
     plot_path = os.path.join(results_dir, 'azimuth_diagnostics.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Create correlation scatter plots for best and worst azimuths
+    create_azimuth_correlation_plots(azimuths, predictions, targets, az_bin_correlations, results_dir)
+
+def create_azimuth_correlation_plots(azimuths, predictions, targets, correlations, results_dir):
+    """
+    Create scatter plots showing correlation between predicted and target values
+    for the best and worst performing azimuth bins.
+    
+    Args:
+        azimuths: Array of azimuth angles
+        predictions: Model predictions array
+        targets: Ground truth targets array
+        correlations: Pearson correlations per azimuth bin
+        results_dir: Directory to save plots
+    """
+    # Find best and worst azimuth indices
+    best_idx = np.argmax(correlations)
+    worst_idx = np.argmin(correlations)
+    best_az = azimuths[best_idx]
+    worst_az = azimuths[worst_idx]
+    
+    plt.figure(figsize=(15, 6))
+    
+    # Best azimuth correlation plot
+    plt.subplot(1, 2, 1)
+    plt.scatter(targets[:, best_idx], predictions[:, best_idx], alpha=0.5, color='blue')
+    plt.plot([min(targets[:, best_idx]), max(targets[:, best_idx])], 
+             [min(targets[:, best_idx]), max(targets[:, best_idx])], 
+             'r--', linewidth=2, label='Perfect correlation')
+    plt.xlabel('Target Distance (mm)')
+    plt.ylabel('Predicted Distance (mm)')
+    plt.title(f'Best Azimuth: {best_az:.1f}° (corr: {correlations[best_idx]:.3f})')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Worst azimuth correlation plot
+    plt.subplot(1, 2, 2)
+    plt.scatter(targets[:, worst_idx], predictions[:, worst_idx], alpha=0.5, color='orange')
+    plt.plot([min(targets[:, worst_idx]), max(targets[:, worst_idx])], 
+             [min(targets[:, worst_idx]), max(targets[:, worst_idx])], 
+             'r--', linewidth=2, label='Perfect correlation')
+    plt.xlabel('Target Distance (mm)')
+    plt.ylabel('Predicted Distance (mm)')
+    plt.title(f'Worst Azimuth: {worst_az:.1f}° (corr: {correlations[worst_idx]:.3f})')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plot_path = os.path.join(results_dir, 'azimuth_correlation_scatter.png')
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -503,7 +558,8 @@ def main():
     plot_training_history(history, results_dir)
     plot_prediction_examples(evaluation['predictions'], evaluation['targets'], num_examples=5, results_dir=results_dir)
     plot_azimuth_diagnostics(azimuths, evaluation['az_bin_errors'], 
-                           evaluation['az_bin_correlations'], evaluation['az_bin_r2_scores'], results_dir)
+                           evaluation['az_bin_correlations'], evaluation['az_bin_r2_scores'], 
+                           evaluation['predictions'], evaluation['targets'], results_dir)
     
     # Save results
     print(f"\n💾 Saving results to: {results_dir}")
