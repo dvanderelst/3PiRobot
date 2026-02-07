@@ -197,11 +197,30 @@ def evaluate_model(model, test_loader):
     mean_absolute_error = np.mean(profile_errors)
     std_absolute_error = np.std(profile_errors)
     
+    # Calculate per-azimuth-bin metrics
+    az_bin_errors = np.mean(np.abs(predictions - targets), axis=0)
+    az_bin_correlations = []
+    az_bin_r2_scores = []
+    
+    for i in range(predictions.shape[1]):
+        # Pearson correlation
+        corr = np.corrcoef(predictions[:, i], targets[:, i])[0, 1]
+        az_bin_correlations.append(corr)
+        
+        # R² score
+        ss_res = np.sum((targets[:, i] - predictions[:, i]) ** 2)
+        ss_tot = np.sum((targets[:, i] - np.mean(targets[:, i])) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        az_bin_r2_scores.append(r2)
+    
     return {
         'test_loss': test_loss,
         'mean_absolute_error': mean_absolute_error,
         'std_absolute_error': std_absolute_error,
         'profile_errors': profile_errors,
+        'az_bin_errors': az_bin_errors,
+        'az_bin_correlations': az_bin_correlations,
+        'az_bin_r2_scores': az_bin_r2_scores,
         'predictions': predictions,
         'targets': targets
     }
@@ -276,6 +295,52 @@ def plot_prediction_examples(predictions, targets, num_examples=5):
     
     plt.tight_layout()
     plt.savefig('prediction_examples.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bin_r2_scores):
+    """
+    Plot per-azimuth-bin diagnostics.
+    
+    Args:
+        azimuths: Array of azimuth angles
+        az_bin_errors: Mean absolute errors per azimuth bin
+        az_bin_correlations: Pearson correlations per azimuth bin
+        az_bin_r2_scores: R² scores per azimuth bin
+    """
+    plt.figure(figsize=(15, 10))
+    
+    # Error plot
+    plt.subplot(3, 1, 1)
+    plt.bar(azimuths, az_bin_errors, width=4, alpha=0.7, color='skyblue', edgecolor='navy')
+    plt.axhline(np.mean(az_bin_errors), color='red', linestyle='--', label='Mean Error')
+    plt.xlabel('Azimuth (degrees)')
+    plt.ylabel('Mean Absolute Error (mm)')
+    plt.title('Per-Azimuth-Bin Prediction Error')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Correlation plot
+    plt.subplot(3, 1, 2)
+    plt.bar(azimuths, az_bin_correlations, width=4, alpha=0.7, color='lightgreen', edgecolor='darkgreen')
+    plt.axhline(0, color='black', linestyle='-', linewidth=1)
+    plt.xlabel('Azimuth (degrees)')
+    plt.ylabel('Pearson Correlation')
+    plt.title('Per-Azimuth-Bin Correlation (Predicted vs Target)')
+    plt.ylim(-1, 1)
+    plt.grid(True, alpha=0.3)
+    
+    # R² score plot
+    plt.subplot(3, 1, 3)
+    plt.bar(azimuths, az_bin_r2_scores, width=4, alpha=0.7, color='lightcoral', edgecolor='darkred')
+    plt.axhline(0, color='black', linestyle='-', linewidth=1)
+    plt.xlabel('Azimuth (degrees)')
+    plt.ylabel('R² Score')
+    plt.title('Per-Azimuth-Bin R² Score')
+    plt.ylim(-1, 1)
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('azimuth_diagnostics.png', dpi=150, bbox_inches='tight')
     plt.close()
 
 def main():
@@ -376,10 +441,37 @@ def main():
     print(f"   Mean Absolute Error: {evaluation['mean_absolute_error']:.1f}mm")
     print(f"   Std Absolute Error: {evaluation['std_absolute_error']:.1f}mm")
     
+    # Print per-azimuth-bin diagnostics
+    print(f"\n📈 Per-Azimuth-Bin Diagnostics:")
+    azimuths = np.linspace(-45, 45, len(evaluation['az_bin_errors']))
+    
+    print(f"   {'Azimuth':<10} {'MAE (mm)':<12} {'Correlation':<12} {'R² Score':<10}")
+    print(f"   {'-'*45}")
+    
+    for i, (az, err, corr, r2) in enumerate(zip(azimuths, 
+                                                  evaluation['az_bin_errors'],
+                                                  evaluation['az_bin_correlations'],
+                                                  evaluation['az_bin_r2_scores'])):
+        print(f"   {az:6.1f}°      {err:8.1f}      {corr:8.3f}       {r2:6.3f}")
+    
+    # Calculate and print summary statistics
+    mean_corr = np.mean(evaluation['az_bin_correlations'])
+    mean_r2 = np.mean(evaluation['az_bin_r2_scores'])
+    best_az = azimuths[np.argmax(evaluation['az_bin_correlations'])]
+    worst_az = azimuths[np.argmin(evaluation['az_bin_correlations'])]
+    
+    print(f"\n   Summary Statistics:")
+    print(f"   Mean Correlation: {mean_corr:.3f}")
+    print(f"   Mean R² Score: {mean_r2:.3f}")
+    print(f"   Best Azimuth: {best_az:.1f}° (corr: {np.max(evaluation['az_bin_correlations']):.3f})")
+    print(f"   Worst Azimuth: {worst_az:.1f}° (corr: {np.min(evaluation['az_bin_correlations']):.3f})")
+    
     # Plot results
     print(f"\n📈 Generating plots...")
     plot_training_history(history)
     plot_prediction_examples(evaluation['predictions'], evaluation['targets'])
+    plot_azimuth_diagnostics(azimuths, evaluation['az_bin_errors'], 
+                           evaluation['az_bin_correlations'], evaluation['az_bin_r2_scores'])
     
     # Save results
     print(f"\n💾 Saving results...")
@@ -405,7 +497,16 @@ def main():
             'test_loss': float(evaluation['test_loss']),
             'mean_absolute_error': float(evaluation['mean_absolute_error']),
             'std_absolute_error': float(evaluation['std_absolute_error']),
-            'profile_errors': [float(err) for err in evaluation['profile_errors']]
+            'profile_errors': [float(err) for err in evaluation['profile_errors']],
+            'az_bin_errors': [float(err) for err in evaluation['az_bin_errors']],
+            'az_bin_correlations': [float(corr) for corr in evaluation['az_bin_correlations']],
+            'az_bin_r2_scores': [float(r2) for r2 in evaluation['az_bin_r2_scores']],
+            'mean_correlation': float(mean_corr),
+            'mean_r2_score': float(mean_r2),
+            'best_azimuth_deg': float(best_az),
+            'best_correlation': float(np.max(evaluation['az_bin_correlations'])),
+            'worst_azimuth_deg': float(worst_az),
+            'worst_correlation': float(np.min(evaluation['az_bin_correlations']))
         }, f, indent=2)
     
     # Save configuration
@@ -434,6 +535,7 @@ def main():
     import shutil
     shutil.copy('training_history.png', os.path.join(results_dir, 'training_history.png'))
     shutil.copy('prediction_examples.png', os.path.join(results_dir, 'prediction_examples.png'))
+    shutil.copy('azimuth_diagnostics.png', os.path.join(results_dir, 'azimuth_diagnostics.png'))
     
     print(f"\n🎉 Training complete!")
     print(f"   Results saved to: {results_dir}")

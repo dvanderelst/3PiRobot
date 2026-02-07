@@ -109,6 +109,25 @@ def test_model_loading():
     print(f"   Mean Absolute Error: {evaluation['mean_absolute_error']:.1f}mm")
     print(f"   Std Absolute Error: {evaluation['std_absolute_error']:.1f}mm")
     
+    # Check if azimuth diagnostics are available
+    if 'az_bin_correlations' in evaluation:
+        print(f"\n📊 Per-Azimuth-Bin Diagnostics:")
+        print(f"   Mean Correlation: {evaluation['mean_correlation']:.3f}")
+        print(f"   Mean R² Score: {evaluation['mean_r2_score']:.3f}")
+        print(f"   Best Azimuth: {evaluation['best_azimuth_deg']:.1f}° (corr: {evaluation['best_correlation']:.3f})")
+        print(f"   Worst Azimuth: {evaluation['worst_azimuth_deg']:.1f}° (corr: {evaluation['worst_correlation']:.3f})")
+        
+        # Check that all azimuth bins have reasonable metrics
+        min_corr = min(evaluation['az_bin_correlations'])
+        max_corr = max(evaluation['az_bin_correlations'])
+        
+        if min_corr > 0.3 and max_corr > 0.7:
+            print(f"   ✅ Correlation range looks reasonable")
+        else:
+            print(f"   ⚠️  Correlation range might need attention")
+    else:
+        print(f"   ⚠️  No azimuth diagnostics found (older model)")
+    
     return True
 
 def test_data_consistency():
