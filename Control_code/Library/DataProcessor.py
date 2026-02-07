@@ -433,15 +433,15 @@ class DataCollection:
                 print(f"⚠️  Cache load failed for {data_type}: {e}")
         return None
 
-    def load_profiles(self, az_min=-45, az_max=45, az_steps=20, force_recompute=False):
+    def load_profiles(self, opening_angle, steps=20, force_recompute=False):
         """
         Load distance profiles for all sessions with caching.
         
         Parameters
         ----------
-        az_min, az_max : float
-            Azimuth range in degrees
-        az_steps : int
+        opening_angle : float
+            Opening angle in degrees (uses +/- opening_angle/2)
+        steps : int
             Number of azimuth steps
         force_recompute : bool
             If True, recompute even if cache exists
@@ -449,7 +449,7 @@ class DataCollection:
         Returns
         -------
         tuple
-            (profiles, centers) where profiles is (N, az_steps) and centers is (N, az_steps)
+            (profiles, centers) where profiles is (N, steps) and centers is (N, steps)
         """
         # Check if we should force recompute (either globally or for this call)
         global_force_recompute = self._cache_metadata.get('force_recompute', False)
@@ -460,14 +460,14 @@ class DataCollection:
             return self.get_profiles(), self.get_centers()
         
         # Compute profiles using processor-level caching
-        print(f"📊 Loading distance profiles (azimuth: {az_min}° to {az_max}°, {az_steps} steps)...")
+        print(f"📊 Loading distance profiles (opening_angle: {opening_angle}°, {steps} steps)...")
         
         all_profiles = []
         all_centers = []
         
         for i, processor in enumerate(self.processors):
             print(f"   Processing session {i+1}/{len(self.processors)}...")
-            processor.load_profiles(az_min, az_max, az_steps, force_recompute=effective_force_recompute)
+            processor.load_profiles(opening_angle=opening_angle, steps=steps, force_recompute=effective_force_recompute)
             
             all_profiles.append(processor.profiles)
             all_centers.append(processor.profile_centers)
@@ -483,7 +483,7 @@ class DataCollection:
         
         return profiles, centers
 
-    def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), force_recompute=False, show_example=True):
+    def load_views(self, radius_mm=1500, opening_angle=90, output_size=(128, 128), force_recompute=False, show_example=True):
         """
         Load conical views for all sessions with caching.
         
@@ -491,7 +491,7 @@ class DataCollection:
         ----------
         radius_mm : float
             Radius of views in millimeters
-        opening_deg : float
+        opening_angle : float
             Opening angle of views in degrees
         output_size : tuple
             Output size as (width, height)
@@ -514,13 +514,13 @@ class DataCollection:
             return self.get_views()
         
         # Compute views using processor-level caching
-        print(f"🎯 Loading conical views (radius: {radius_mm}mm, opening: {opening_deg}°)...")
+        print(f"🎯 Loading conical views (radius: {radius_mm}mm, opening: {opening_angle}°)...")
         
         all_views = []
         
         for i, processor in enumerate(self.processors):
             print(f"   Processing session {i+1}/{len(self.processors)}...")
-            processor.load_views(radius_mm, opening_deg, output_size, show_example=show_example, force_recompute=effective_force_recompute)
+            processor.load_views(radius_mm, opening_angle, output_size=output_size, show_example=show_example, force_recompute=effective_force_recompute)
             
             all_views.append(processor.views)
         
@@ -556,7 +556,7 @@ class DataCollection:
         
         if self._loaded_sonar and not effective_force_recompute:
             print("📡 Using already loaded sonar data")
-            return self.get_sonar()
+            return self.sonar
         
         # Compute sonar data using processor-level caching
         print(f"📡 Loading sonar data (flatten={flatten})...")
@@ -578,35 +578,42 @@ class DataCollection:
         
         return sonar_data
 
-    def get_field(self, field_name):
+    def get_field(self, *fields):
         """
         Get concatenated field data from all processors.
         
         Parameters
         ----------
-        field_name : str
-            Name of field to retrieve (e.g., 'rob_x', 'sonar_data')
+        *fields : str
+            Path of keys to traverse (e.g., 'position', 'x' for nested access)
             
         Returns
         -------
         numpy.ndarray
             Concatenated field data
+            
+        Notes
+        -----
+        This method gets data from all processors in the collection.
+        For filename-specific filtering, use the DataProcessor.get_field() method
+        on individual processors or create a DataCollection with only the desired sessions.
         """
         collection = []
         for processor in self.processors:
-            if hasattr(processor, field_name):
-                data = getattr(processor, field_name)
+            if len(fields) == 1 and hasattr(processor, fields[0]):
+                # Direct attribute access for single fields
+                data = getattr(processor, fields[0])
                 collection.append(data)
             else:
-                # Try to get from data reader
+                # Try to get from data reader (supports nested fields)
                 try:
-                    data = processor.get_field(field_name)
+                    data = processor.get_field(*fields)
                     collection.append(data)
                 except:
-                    raise ValueError(f"Field '{field_name}' not found in processors")
+                    raise ValueError(f"Field '{'.'.join(fields)}' not found in processors")
         
         if not collection:
-            raise ValueError(f"No data found for field '{field_name}'")
+            raise ValueError(f"No data found for field '{'.'.join(fields)}'")
             
         # Handle different data types appropriately
         if isinstance(collection[0], np.ndarray):
@@ -624,7 +631,7 @@ class DataCollection:
         Returns
         -------
         numpy.ndarray
-            Profiles array (N, az_steps)
+        Profiles array (N, steps)
             
         Raises
         ------
@@ -644,7 +651,7 @@ class DataCollection:
         Returns
         -------
         numpy.ndarray
-            Centers array (N, az_steps)
+        Centers array (N, steps)
             
         Raises
         ------
@@ -798,8 +805,8 @@ class DataProcessor:
         -----
         For additional functionality, explicitly call:
         - load_arena() for arena metadata (needed for profiles/views)
-        - load_profiles(az_min, az_max, az_steps) for distance profiles
-        - load_views(radius_mm, opening_deg, output_size) for conical views
+        - load_profiles(opening_angle, steps) for distance profiles
+        - load_views(radius_mm, opening_angle, output_size) for conical views
         """
         if type(data_reader) == str: data_reader = DataReader(data_reader)
         self.session = data_reader.base_folder
@@ -936,8 +943,26 @@ class DataProcessor:
         rotations = np.asarray(rotations)
         return distances, rotations
 
-    def get_field(self, *fields):
-        values = self.data_reader.get_field(*fields)
+    def get_field(self, *fields, filenames=None):
+        """
+        Get field data from data reader.
+        
+        Parameters
+        ----------
+        *fields : str
+            Path of keys to traverse (e.g., 'position', 'x')
+        filenames : list of str, optional
+            Specific filenames to load. If None, all files are loaded.
+            
+        Returns
+        -------
+        numpy.ndarray
+            Field data
+        """
+        if filenames is not None:
+            values = self.data_reader.get_field(*fields, filenames=filenames)
+        else:
+            values = self.data_reader.get_field(*fields)
         values = np.asarray(values)
         return values
 
@@ -1088,15 +1113,15 @@ class DataProcessor:
         
         return x_world, y_world
 
-    def load_profiles(self, az_min=-45, az_max=45, az_steps=20, force_recompute=False):
+    def load_profiles(self, opening_angle, steps=20, force_recompute=False):
         """
         Load distance profiles for all robot positions.
         
         Parameters
         ----------
-        az_min, az_max : float
-            Azimuth range in degrees for profile computation
-        az_steps : int
+        opening_angle : float
+            Opening angle in degrees (uses +/- opening_angle/2)
+        steps : int
             Number of azimuth steps in the profile
         force_recompute : bool
             If True, recompute even if cache exists
@@ -1106,6 +1131,9 @@ class DataProcessor:
         Automatically loads arena metadata if needed.
         Results are cached for efficient reuse.
         """
+        az_min = -0.5 * opening_angle
+        az_max = 0.5 * opening_angle
+
         # Check if we should force recompute (either globally or for this call)
         effective_force_recompute = force_recompute or self.force_recompute
         
@@ -1124,15 +1152,13 @@ class DataProcessor:
                 
                 # Extract parameters from metadata
                 cached_params = {
-                    'az_min': profiles_metadata.get('az_min'),
-                    'az_max': profiles_metadata.get('az_max'), 
-                    'az_steps': profiles_metadata.get('az_steps')
+                    'opening_angle': profiles_metadata.get('opening_angle'),
+                    'steps': profiles_metadata.get('steps')
                 }
                 
                 current_params = {
-                    'az_min': az_min,
-                    'az_max': az_max,
-                    'az_steps': az_steps
+                    'opening_angle': opening_angle,
+                    'steps': steps
                 }
                 
                 # Check if parameters match - handle numpy array comparisons safely
@@ -1166,7 +1192,7 @@ class DataProcessor:
                     print(f"✅ Loaded {len(self.profiles)} distance profiles from cache")
                     print(f"   Profile shape: {self.profiles.shape}")
                     print(f"   Centers shape: {self.profile_centers.shape}")
-                    print(f"   Parameters matched: az_min={az_min}, az_max={az_max}, az_steps={az_steps}")
+                    print(f"   Parameters matched: opening_angle={opening_angle}, steps={steps}")
                     return
                 else:
                     print(f"⚠️  Cache parameters don't match - recomputing...")
@@ -1177,16 +1203,36 @@ class DataProcessor:
         if not hasattr(self, 'arena_metadata_loaded') or not self.arena_metadata_loaded:
             self.load_arena_metadata()
         
-        print(f"📊 Computing distance profiles (azimuth: {az_min}° to {az_max}°, {az_steps} steps)...")
+        print(f"📊 Computing distance profiles (opening_angle: {opening_angle}°, {steps} steps)...")
         
-        # Compute profiles for all positions
-        profiles = []
-        centers = []
+        # Compute profiles for all positions using parallel processing
+        import multiprocessing
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        for index in tqdm(range(self.n)):
-            centers_i, profile_i = self.get_profile_at(index, az_min, az_max, az_steps)
-            profiles.append(profile_i)
-            centers.append(centers_i)
+        def compute_profile_wrapper(index):
+            """Wrapper function for parallel profile computation"""
+            centers_i, profile_i = self.get_profile_at(index, az_min, az_max, steps)
+            return index, centers_i, profile_i
+        
+        # Use ThreadPoolExecutor for parallel processing
+        num_workers = min(multiprocessing.cpu_count(), self.n)
+        
+        print(f"   🚀 Using {num_workers} workers for parallel profile computation")
+        
+        # Pre-allocate lists
+        profiles = [None] * self.n
+        centers = [None] * self.n
+        
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            future_to_index = {executor.submit(compute_profile_wrapper, index): index 
+                              for index in range(self.n)}
+            
+            # Process completed tasks as they come in
+            for future in tqdm(as_completed(future_to_index), total=self.n, desc="Computing profiles"):
+                index, centers_i, profile_i = future.result()
+                profiles[index] = profile_i
+                centers[index] = centers_i
         
         self.profiles = np.asarray(profiles, dtype=np.float32)
         self.profile_centers = np.asarray(centers, dtype=np.float32)
@@ -1196,15 +1242,13 @@ class DataProcessor:
         if self.cache_dir:
             from datetime import datetime
             profiles_metadata = {
-                'az_min': az_min,
-                'az_max': az_max,
-                'az_steps': az_steps,
+                'opening_angle': opening_angle,
+                'steps': steps,
                 'timestamp': datetime.now().isoformat()
             }
             centers_metadata = {
-                'az_min': az_min,
-                'az_max': az_max, 
-                'az_steps': az_steps,
+                'opening_angle': opening_angle,
+                'steps': steps,
                 'timestamp': datetime.now().isoformat()
             }
             self._save_to_cache(self.profiles, 'profiles', metadata=profiles_metadata)
@@ -1214,7 +1258,7 @@ class DataProcessor:
         print(f"   Profile shape: {self.profiles.shape}")
         print(f"   Centers shape: {self.profile_centers.shape}")
 
-    def load_views(self, radius_mm=1500, opening_deg=90, output_size=(128, 128), plot_indices=None, indices=None, save_examples=False, force_recompute=False, show_example=True):
+    def load_views(self, radius_mm=1500, opening_angle=90, output_size=(128, 128), plot_indices=None, indices=None, save_examples=False, force_recompute=False, show_example=True):
         """
         Load views for all robot positions.
         
@@ -1222,7 +1266,7 @@ class DataProcessor:
         ----------
         radius_mm : float
             Radius of views in millimeters
-        opening_deg : float
+        opening_angle : float
             Opening angle of views in degrees
         output_size : tuple
             Output size of views as (width, height)
@@ -1258,13 +1302,13 @@ class DataProcessor:
                 # Extract parameters from metadata
                 cached_params = {
                     'radius_mm': views_metadata.get('radius_mm'),
-                    'opening_deg': views_metadata.get('opening_deg'),
+                    'opening_angle': views_metadata.get('opening_angle'),
                     'output_size': tuple(views_metadata.get('output_size', []))
                 }
                 
                 current_params = {
                     'radius_mm': radius_mm,
-                    'opening_deg': opening_deg,
+                    'opening_angle': opening_angle,
                     'output_size': output_size
                 }
                 
@@ -1278,12 +1322,12 @@ class DataProcessor:
                     self.views = cached_views
                     self.views_loaded = True
                     self.view_radius_mm = radius_mm
-                    self.view_opening_deg = opening_deg
+                    self.view_opening_angle = opening_angle
                     self.view_output_size = output_size
                     print(f"✅ Loaded {len(self.views)} views from cache")
                     print(f"   Views shape: {self.views.shape}")
                     print(f"   Memory usage: {self.views.nbytes / 1024 / 1024:.2f} MB")
-                    print(f"   Parameters matched: radius={radius_mm}mm, opening={opening_deg}°, size={output_size}")
+                    print(f"   Parameters matched: radius={radius_mm}mm, opening={opening_angle}°, size={output_size}")
                     return self.views
                 else:
                     print(f"⚠️  Cache parameters don't match - recomputing...")
@@ -1292,10 +1336,10 @@ class DataProcessor:
         
         # Store parameters
         self.view_radius_mm = radius_mm
-        self.view_opening_deg = opening_deg
+        self.view_opening_angle = opening_angle
         self.view_output_size = output_size
         
-        print(f"🎯 Computing views (radius: {radius_mm}mm, opening: {opening_deg}°)...")
+        print(f"🎯 Computing views (radius: {radius_mm}mm, opening: {opening_angle}°)...")
         
         # Load meta data if needed (for coordinate conversion)
         if not hasattr(self, 'meta') or self.meta is None:
@@ -1343,10 +1387,12 @@ class DataProcessor:
             os.makedirs(examples_dir, exist_ok=True)
             print(f"   💾 Saving example plots to: {examples_dir}")
         
-        # Extract views for specified positions
-        views = []
+        # Extract views for specified positions using parallel processing
+        import multiprocessing
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        for index in tqdm(indices_to_process):
+        def extract_view_wrapper(index):
+            """Wrapper function for parallel view extraction"""
             rob_x_i = self.rob_x[index]
             rob_y_i = self.rob_y[index]
             rob_yaw_i = self.rob_yaw_deg[index]
@@ -1361,12 +1407,31 @@ class DataProcessor:
             view = self.extract_conical_view(
                 rob_x_i, rob_y_i, rob_yaw_i,
                 radius_mm=self.view_radius_mm,
-                opening_angle_deg=self.view_opening_deg,
+                opening_angle_deg=self.view_opening_angle,
                 output_size=self.view_output_size,
                 visualize=should_visualize,
                 save_path=save_path
             )
-            views.append(view)
+            return index, view
+        
+        # Use ThreadPoolExecutor for parallel processing
+        # Threads are more efficient than processes for this I/O-bound task
+        num_workers = min(multiprocessing.cpu_count(), len(indices_to_process))
+        
+        print(f"   🚀 Using {num_workers} workers for parallel view extraction")
+        
+        views = [None] * len(indices_to_process)  # Pre-allocate list
+        
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            future_to_index = {executor.submit(extract_view_wrapper, index): index 
+                              for index in indices_to_process}
+            
+            # Process completed tasks as they come in
+            for future in tqdm(as_completed(future_to_index), total=len(indices_to_process), 
+                             desc="Extracting views"):
+                index, view = future.result()
+                views[index] = view
         
         self.views = np.asarray(views, dtype=np.uint8)
         self.views_loaded = True
@@ -1376,7 +1441,7 @@ class DataProcessor:
             from datetime import datetime
             views_metadata = {
                 'radius_mm': radius_mm,
-                'opening_deg': opening_deg,
+                'opening_angle': opening_angle,
                 'output_size': list(output_size),
                 'timestamp': datetime.now().isoformat()
             }
@@ -1435,18 +1500,13 @@ class DataProcessor:
             
         print(f"📡 Loading sonar data...")
         
-        # Get configuration from first data point to determine channel mapping
-        data = self.data_reader.get_data_at(0)
-        configuration = data['sonar_package']['configuration']
-        left_channel = configuration.left_channel
-        right_channel = configuration.right_channel
-        
         # Load sonar data for all positions
         sonar_data = self.get_field('sonar_package', 'sonar_data')
         sonar_data = np.array(sonar_data, dtype=np.float32)
         
-        # Extract only the left and right channels
-        sonar_data = sonar_data[:, :, [left_channel, right_channel]]
+        # sonar_data is already stored as [emitter, left, right] in Client.read_buffers
+        # Keep only the left/right channels by fixed indices.
+        sonar_data = sonar_data[:, :, [1, 2]]
         
         if flatten:
             sonar_data = flatten_sonar(sonar_data)
@@ -1866,6 +1926,16 @@ class DataProcessor:
         if not hasattr(self, 'sonar_data') or self.sonar_data is None:
             print("📡 Loading sonar data for plotting...")
             self.load_sonar()
+
+        # Load corrected distance/IID if available
+        try:
+            if not hasattr(self, 'sonar_distance') or self.sonar_distance is None:
+                self.sonar_distance = np.array(self.get_field('sonar_package', 'corrected_distance'))
+            if not hasattr(self, 'sonar_iid') or self.sonar_iid is None:
+                self.sonar_iid = np.array(self.get_field('sonar_package', 'corrected_iid'))
+        except Exception:
+            self.sonar_distance = None
+            self.sonar_iid = None
         
         # Create output directory with timestamp
         os.makedirs(output_dir, exist_ok=True)
@@ -1901,6 +1971,7 @@ class DataProcessor:
         else:
             raise ValueError(f"indices parameter must be None, list, or range object, got {type(indices)}")
         
+        # Create plots for each specified measurement
         # Create plots for each specified measurement
         for index in tqdm(indices_to_plot, desc="Plotting sonar data"):
             sonar_data = self.sonar_data[index]
@@ -1945,6 +2016,10 @@ class DataProcessor:
             
             # Add robot position info
             pos_info = f'Pos: ({rob_x:.1f}, {rob_y:.1f}) mm\nYaw: {rob_yaw:.1f}°'
+            if self.sonar_distance is not None and self.sonar_iid is not None:
+                dist_val = float(self.sonar_distance[index])
+                iid_val = float(self.sonar_iid[index])
+                pos_info += f'\nDist: {dist_val:.3f} m\nIID: {iid_val:.3f} dB'
             ax.text(0.02, 0.95, pos_info, transform=ax.transAxes, 
                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             
