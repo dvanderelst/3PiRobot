@@ -388,7 +388,58 @@ def plot_azimuth_diagnostics(azimuths, az_bin_errors, az_bin_correlations, az_bi
 def create_azimuth_correlation_plots(azimuths, predictions, targets, correlations, results_dir):
     """
     Create scatter plots showing correlation between predicted and target values
-    for the best and worst performing azimuth bins.
+    for ALL azimuth bins.
+    
+    Args:
+        azimuths: Array of azimuth angles
+        predictions: Model predictions array
+        targets: Ground truth targets array
+        correlations: Pearson correlations per azimuth bin
+        results_dir: Directory to save plots
+    """
+    n_bins = len(azimuths)
+    
+    # Create grid of scatter plots for all azimuths
+    plt.figure(figsize=(20, 15))
+    
+    # Calculate grid size (5 columns x 4 rows for 20 bins)
+    cols = 5
+    rows = int(np.ceil(n_bins / cols))
+    
+    for i in range(n_bins):
+        plt.subplot(rows, cols, i + 1)
+        
+        # Scatter plot with color indicating correlation strength
+        corr = correlations[i]
+        if corr > 0.7:
+            color = 'blue'  # High correlation
+        elif corr > 0.5:
+            color = 'green'  # Medium correlation
+        else:
+            color = 'orange'  # Low correlation
+        
+        plt.scatter(targets[:, i], predictions[:, i], alpha=0.4, color=color, s=20)
+        
+        # Perfect correlation line
+        data_range = [min(targets[:, i]), max(targets[:, i])]
+        plt.plot(data_range, data_range, 'r--', linewidth=1, alpha=0.7)
+        
+        plt.xlabel('Target (mm)', fontsize=8)
+        plt.ylabel('Predicted (mm)', fontsize=8)
+        plt.title(f'{azimuths[i]:.0f}° (corr: {corr:.2f})', fontsize=10)
+        plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plot_path = os.path.join(results_dir, 'all_azimuth_correlation_scatter.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Also create the best/worst comparison plot
+    create_best_worst_correlation_plots(azimuths, predictions, targets, correlations, results_dir)
+
+def create_best_worst_correlation_plots(azimuths, predictions, targets, correlations, results_dir):
+    """
+    Create comparison scatter plots for best and worst performing azimuth bins.
     
     Args:
         azimuths: Array of azimuth angles
@@ -430,7 +481,7 @@ def create_azimuth_correlation_plots(azimuths, predictions, targets, correlation
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plot_path = os.path.join(results_dir, 'azimuth_correlation_scatter.png')
+    plot_path = os.path.join(results_dir, 'best_worst_correlation_scatter.png')
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
 
