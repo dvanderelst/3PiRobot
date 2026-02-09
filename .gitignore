@@ -1,6 +1,7 @@
 
 *.idea*
 *__pycache*
+*/.*/
 
 ############## Control_code sub repo
 Control_code/Library/RobotCalibration/

@@ -96,6 +96,9 @@ def locate_echo(sonar_package, selection_mode='first'):
     iid = float(log_integrals[1] - log_integrals[0])
     if not crossed: iid = 0
     raw_distance = float(raw_distance_axis[onset])
+    if not crossed:
+        # No echo found: report max range instead of last window onset
+        raw_distance = float(raw_distance_axis[-1])
 
     location_results['integration_window_samples'] = integration_window_samples
     location_results['echo_located'] = True
@@ -321,7 +324,6 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
     if file_name is not None: plt.savefig(file_name, bbox_inches='tight')
     if not close_after: plt.show()
     if close_after: plt.close()
-
 
 
 

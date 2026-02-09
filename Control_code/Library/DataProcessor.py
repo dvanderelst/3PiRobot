@@ -433,7 +433,7 @@ class DataCollection:
                 print(f"⚠️  Cache load failed for {data_type}: {e}")
         return None
 
-    def load_profiles(self, opening_angle, steps=20, force_recompute=False):
+    def load_profiles(self, opening_angle, steps=20, force_recompute=False, fill_nans=True):
         """
         Load distance profiles for all sessions with caching.
         
@@ -445,6 +445,8 @@ class DataCollection:
             Number of azimuth steps
         force_recompute : bool
             If True, recompute even if cache exists
+        fill_nans : bool
+            If True, fill NaNs in profiles. If False, keep NaNs (useful for masks).
             
         Returns
         -------
@@ -467,7 +469,12 @@ class DataCollection:
         
         for i, processor in enumerate(self.processors):
             print(f"   Processing session {i+1}/{len(self.processors)}...")
-            processor.load_profiles(opening_angle=opening_angle, steps=steps, force_recompute=effective_force_recompute)
+            processor.load_profiles(
+                opening_angle=opening_angle,
+                steps=steps,
+                force_recompute=effective_force_recompute,
+                fill_nans=fill_nans,
+            )
             
             all_profiles.append(processor.profiles)
             all_centers.append(processor.profile_centers)
@@ -1113,7 +1120,7 @@ class DataProcessor:
         
         return x_world, y_world
 
-    def load_profiles(self, opening_angle, steps=20, force_recompute=False):
+    def load_profiles(self, opening_angle, steps=20, force_recompute=False, fill_nans=True):
         """
         Load distance profiles for all robot positions.
         
@@ -1125,6 +1132,8 @@ class DataProcessor:
             Number of azimuth steps in the profile
         force_recompute : bool
             If True, recompute even if cache exists
+        fill_nans : bool
+            If True, fill NaNs in profiles. If False, keep NaNs (useful for masks).
             
         Notes
         -----
@@ -1153,12 +1162,14 @@ class DataProcessor:
                 # Extract parameters from metadata
                 cached_params = {
                     'opening_angle': profiles_metadata.get('opening_angle'),
-                    'steps': profiles_metadata.get('steps')
+                    'steps': profiles_metadata.get('steps'),
+                    'fill_nans': profiles_metadata.get('fill_nans', True),
                 }
                 
                 current_params = {
                     'opening_angle': opening_angle,
-                    'steps': steps
+                    'steps': steps,
+                    'fill_nans': fill_nans,
                 }
                 
                 # Check if parameters match - handle numpy array comparisons safely
@@ -1211,7 +1222,7 @@ class DataProcessor:
         
         def compute_profile_wrapper(index):
             """Wrapper function for parallel profile computation"""
-            centers_i, profile_i = self.get_profile_at(index, az_min, az_max, steps)
+            centers_i, profile_i = self.get_profile_at(index, az_min, az_max, steps, fill_nans=fill_nans)
             return index, centers_i, profile_i
         
         # Use ThreadPoolExecutor for parallel processing
@@ -1244,11 +1255,13 @@ class DataProcessor:
             profiles_metadata = {
                 'opening_angle': opening_angle,
                 'steps': steps,
+                'fill_nans': fill_nans,
                 'timestamp': datetime.now().isoformat()
             }
             centers_metadata = {
                 'opening_angle': opening_angle,
                 'steps': steps,
+                'fill_nans': fill_nans,
                 'timestamp': datetime.now().isoformat()
             }
             self._save_to_cache(self.profiles, 'profiles', metadata=profiles_metadata)
@@ -2156,7 +2169,7 @@ class DataProcessor:
 
         return centers, min_distances
 
-    def get_profile_at(self, index, min_az_deg, max_az_deg, n):
+    def get_profile_at(self, index, min_az_deg, max_az_deg, n, fill_nans=True):
         """
         Get a distance profile for a specific robot position.
         
@@ -2178,7 +2191,8 @@ class DataProcessor:
         selected_y = self.rob_y[index]
         selected_yaw_deg = self.rob_yaw_deg[index]
         centers, profile = self.get_profile(selected_x, selected_y, selected_yaw_deg, min_az_deg, max_az_deg, n)
-        profile = Utils.fill_nans_linear(profile)
+        if fill_nans:
+            profile = Utils.fill_nans_linear(profile)
         profile = np.asarray(profile, dtype=np.float32)
         return centers, profile
 
