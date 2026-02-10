@@ -462,6 +462,74 @@ class WifiServer:
                 self.log.debug("[ESP] msgpack.loads error:", e)
         return msgs
 
+    def read_single_message(self):
+        """
+        Wait for and return exactly one complete message.
+        Blocks until a complete message is received.
+        
+        Returns:
+            dict: The parsed message, or None if error occurs
+        """
+        while True:
+            # Check for available data
+            if self.uartio.any():
+                self._buf += self.uartio.read()
+
+            # Look for message start marker
+            if b"+IPD," in self._buf:
+                # Try to parse one complete message
+                message = self._parse_one_message()
+                if message is not None:
+                    return message
+
+            # Small delay to prevent CPU overload
+            time.sleep_ms(1)
+
+    def _parse_one_message(self):
+        """
+        Parse exactly one message from the buffer.
+        
+        Returns:
+            dict: The parsed message, or None if incomplete/malformed
+        """
+        if b"+IPD," not in self._buf:
+            return None
+
+        # Find the start of the message
+        i = self._buf.find(b"+IPD,")
+        chunk = self._buf[i:]
+
+        # Check for header/body separator
+        if b":" not in chunk:
+            return None
+
+        # Parse header to get length
+        header, rest = chunk.split(b":", 1)
+        try:
+            length = int(header.split(b",")[-1])
+        except Exception:
+            self._buf = b""  # Clear buffer on parse error
+            return None
+
+        # Check if we have complete message
+        if len(rest) < length:
+            return None
+
+        # Extract complete message
+        payload = rest[:length]
+        self._buf = rest[length:]  # Keep remaining data in buffer
+
+        # Parse msgpack payload
+        if len(payload) >= 2:
+            plen = struct.unpack(">H", payload[:2])[0]
+            if len(payload) >= 2 + plen:
+                try:
+                    return msgpack.loads(payload[2:2+plen])
+                except Exception:
+                    pass  # Silently ignore malformed messages
+
+        return None
+
     def send_data(self, obj, conn_id=0, max_chunk_size=1460):
         """Send a msgpack-encoded object in chunks with 2-byte length prefix per chunk."""
         try:

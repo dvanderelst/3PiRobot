@@ -85,11 +85,130 @@ class Client:
             got += rcvd
         return mv, wait_s, read_s
 
-    def _send_dict(self, dct):
-        """Prefix-frame a msgpack dict and send it."""
+    def _send_dict(self, dct, require_ack=False):
+        """
+        Prefix-frame a msgpack dict and send it.
+        
+        Args:
+            dct: Dictionary to send
+            require_ack: If True, wait for acknowledgment before returning
+            
+        Returns:
+            str: The acquire_id if require_ack=True and ACK received
+            None: If require_ack=False or no ACK expected
+        """
         packed = msgpack.packb(dct)
         prefix = struct.pack(">H", len(packed))
         self.sock.sendall(prefix + packed)
+        
+        # If acknowledgment is required, wait for it
+        if require_ack:
+            acquire_id = dct.get('acquire_id')
+            if acquire_id:
+                ack = self._wait_for_acknowledgment(acquire_id)
+                if not ack:
+                    raise TimeoutError(f"No acknowledgment received for command {acquire_id}")
+                return acquire_id
+        return None
+
+    def _wait_for_acknowledgment(self, acquire_id, timeout=5.0):
+        """
+        Wait for acknowledgment of a specific command.
+        
+        Args:
+            acquire_id: The command ID to wait for
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            dict: The acknowledgment message, or None if timeout
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # Check if socket has data available
+            if self.sock and select.select([self.sock], [], [], 0.1)[0]:
+                try:
+                    msg = self._recv_msgpack()
+                    if msg and msg.get('ack_id') == acquire_id:
+                        return msg
+                except Exception as e:
+                    # Log socket errors but continue waiting
+                    if hasattr(self, 'print_message'):
+                        self.print_message(f"Error receiving ACK: {e}", "DEBUG")
+                    continue
+        return None
+
+    def _wait_for_completion_ack(self, acquire_id, timeout=15.0):
+        """
+        Wait for acquisition completion acknowledgment.
+        
+        Args:
+            acquire_id: The command ID to wait for
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            dict: The completion acknowledgment message, or None if timeout
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # Check if socket has data available
+            if self.sock and select.select([self.sock], [], [], 0.1)[0]:
+                try:
+                    msg = self._recv_msgpack()
+                    # Check if this is a completion ACK
+                    if msg and msg.get('ack_id') == acquire_id and msg.get('status') == 'acquisition_complete':
+                        return msg
+                    # If it's just a regular ACK, ignore it and continue waiting
+                    elif msg and msg.get('ack_id') == acquire_id:
+                        continue
+                    else:
+                        # Unexpected message type
+                        self.print_message(f"Unexpected message received: {msg}", "DEBUG")
+                        continue
+                except Exception as e:
+                    # Log socket errors but continue waiting
+                    if hasattr(self, 'print_message'):
+                        self.print_message(f"Error receiving completion ACK: {e}", "DEBUG")
+                    continue
+        
+        # Timeout occurred
+        self.print_message(f"Timeout waiting for completion ACK {acquire_id} after {timeout}s", "WARNING")
+        return None
+
+    def _wait_for_data_response(self, timeout=10.0):
+        """
+        Wait for a data response from the robot.
+        
+        Args:
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            dict: The response message, or None if timeout
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # Check if socket has data available
+            if self.sock and select.select([self.sock], [], [], 0.1)[0]:
+                try:
+                    msg = self._recv_msgpack()
+                    # Check if this is a data response (has 'data' and 'timing_info' fields)
+                    if msg and 'data' in msg and 'timing_info' in msg:
+                        return msg
+                    # If it's an ACK message, just ignore it and continue waiting
+                    elif msg and 'ack_id' in msg:
+                        continue
+                    else:
+                        # Unexpected message type
+                        self.print_message(f"Unexpected message received: {msg}", "DEBUG")
+                        continue
+                except Exception as e:
+                    # Log socket errors but continue waiting
+                    if hasattr(self, 'print_message'):
+                        self.print_message(f"Error receiving data: {e}", "DEBUG")
+                    continue
+        
+        # Timeout occurred
+        self.print_message(f"Timeout waiting for data response after {timeout}s", "WARNING")
+        return None
 
     def _recv_msgpack(self):
         t0 = time.perf_counter()
@@ -171,7 +290,28 @@ class Client:
 
         acquire_id = Utils.make_code(n=8)
         cmd_dict= {'acquire_id': acquire_id, 'action': action, 'sample_rate': sample_rate, 'samples': samples}
-        self._send_dict(cmd_dict)
+        
+        # Send command and wait for initial acknowledgment
+        try:
+            returned_id = self._send_dict(cmd_dict, require_ack=True)
+            if returned_id != acquire_id:
+                raise RuntimeError(f"ACK ID mismatch: sent {acquire_id}, received {returned_id}")
+        except TimeoutError as e:
+            self.print_message(f"Timeout waiting for initial ACK: {str(e)}", "ERROR")
+            raise
+        
+        # Wait for acquisition completion acknowledgment
+        try:
+            completion_ack = self._wait_for_completion_ack(acquire_id)
+            if not completion_ack:
+                raise TimeoutError(f"No completion acknowledgment for acquisition {acquire_id}")
+            
+            # Brief delay to ensure robot is ready for next command
+            time.sleep(0.05)  # 50ms delay to allow robot to finish processing
+        except TimeoutError as e:
+            self.print_message(f"Timeout waiting for completion: {str(e)}", "ERROR")
+            raise
+        
         self._samples_in_buffers = samples  # remember for later
         current_time = time.time()
         duration = (current_time - start_time) * 1000.0
@@ -192,7 +332,12 @@ class Client:
         duration = (current_time - start_time) * 1000.0
         msg = f"Sent read command took {duration:.1f}ms"
         self.print_message(msg, category='INFO')
-        sonar_package = self._recv_msgpack()
+        
+        # Brief delay to ensure robot has received the command
+        time.sleep(0.05)  # 50ms delay to allow robot to process the read command
+        
+        # Wait for the actual data response (not just ACK)
+        sonar_package = self._wait_for_data_response(timeout=10.0)
         
         # Handle timeout case gracefully
         if sonar_package is None:
