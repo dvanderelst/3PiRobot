@@ -38,6 +38,21 @@ def set_free_run(val_ms, state):
         state['display'].write(4, 'Free: off')
 
 
+def send_command_acknowledgment(bridge, acquire_id, verbose=True):
+    """
+    Send immediate acknowledgment for a received command.
+    
+    Args:
+        bridge: The WiFi bridge instance
+        acquire_id: The command ID to acknowledge
+        verbose: Whether to print debug messages
+    """
+    ack_msg = {'ack_id': acquire_id, 'status': 'received'}
+    bridge.send_data(ack_msg)
+    if verbose:
+        print(f"[Main] Sent ACK for: {acquire_id}")
+
+
 
 def main(selected_ssid=None):
     beeper = beeps.Beeper()
@@ -110,9 +125,8 @@ def main(selected_ssid=None):
         now = ticks_ms()
         if ticks_diff(now, last_cmd_received) > 2500:
             last_cmd_received = ticks_ms()
-            if drive.is_moving():  # Only print if robot was actually moving
-                if verbose: print(f"[Main] Stopping robot due to inactivity")
-                drive.stop()
+            print(f"[Main] Received command: {cmd}")  # Always print for debugging
+            if verbose: print(f"[Main] Received: {cmd}")
 
         # ── Command Processing ──
         if cmd:
@@ -200,7 +214,6 @@ def main(selected_ssid=None):
                 if verbose: print('[Main] Acknowledgment received')
 
             if verbose: print(f'[Main] Processed command {cmd}')
-
 
         # ── Free-running pulsing (drift-free absolute schedule) ──
         if state['next_due'] is not None and ticks_diff(now, state['next_due']) >= 0:

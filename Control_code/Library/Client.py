@@ -85,11 +85,31 @@ class Client:
             got += rcvd
         return mv, wait_s, read_s
 
-    def _send_dict(self, dct):
-        """Prefix-frame a msgpack dict and send it."""
+    def _send_dict(self, dct, require_ack=False):
+        """
+        Prefix-frame a msgpack dict and send it.
+        
+        Args:
+            dct: Dictionary to send
+            require_ack: If True, wait for acknowledgment before returning
+            
+        Returns:
+            str: The acquire_id if require_ack=True and ACK received
+            None: If require_ack=False or no ACK expected
+        """
         packed = msgpack.packb(dct)
         prefix = struct.pack(">H", len(packed))
         self.sock.sendall(prefix + packed)
+        
+        # If acknowledgment is required, wait for it
+        if require_ack:
+            acquire_id = dct.get('acquire_id')
+            if acquire_id:
+                ack = self._wait_for_acknowledgment(acquire_id)
+                if not ack:
+                    raise TimeoutError(f"No acknowledgment received for command {acquire_id}")
+                return acquire_id
+        return None
 
     def _wait_for_message(self, predicate, timeout=10.0):
         end_time = time.time() + timeout
