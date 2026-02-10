@@ -51,7 +51,7 @@ class Client:
         self.ip = self.configuration.ip
         if ip is not None: self.ip = ip
         self.sock = socket.socket()
-        self.sock.settimeout(5)
+        self.sock.settimeout(10)  # Increased from 5 to 10 seconds for better reliability
         self.sock.connect((self.ip, 1234))
         self.calibration = {}
         self.robot_number = robot_number
@@ -163,10 +163,9 @@ class Client:
 
     def acquire(self, action):
         # assure that action is either 'ping' or 'listen'
-        start_time = time.time()
         error_message = f"Invalid action '{action}'. Action must be either 'ping' or 'listen'."
         if action not in ['ping', 'listen']: raise ValueError(error_message)
-        start = time.time()
+        start_time = time.time()
         sample_rate = self.configuration.sample_rate
         samples = self.configuration.samples
 
@@ -175,21 +174,32 @@ class Client:
         self._send_dict(cmd_dict)
         self._samples_in_buffers = samples  # remember for later
         current_time = time.time()
-        duration = (current_time - start) * 1000.0
+        duration = (current_time - start_time) * 1000.0
         msg = f"Sent {action} command (id={acquire_id}, sr={sample_rate}, samples={samples}) took {duration:.1f}ms"
         self.print_message(msg, category='INFO')
         return acquire_id
 
     def read_buffers(self, plot=False):
-        start_time = time.time()
         samples = self._samples_in_buffers
         emitter_channel = self.configuration.emitter_channel
         left_channel = self.configuration.left_channel
         right_channel = self.configuration.right_channel
 
         cmd_dict = {'action': 'read'}
+        start_time = time.time()
         self._send_dict(cmd_dict)
+        current_time = time.time()
+        duration = (current_time - start_time) * 1000.0
+        msg = f"Sent read command took {duration:.1f}ms"
+        self.print_message(msg, category='INFO')
         sonar_package = self._recv_msgpack()
+        
+        # Handle timeout case gracefully
+        if sonar_package is None:
+            msg = "Timeout: No response received from robot when reading buffers"
+            self.print_message(msg, category='WARNING')
+            return None
+            
         self._send_dict({'action': 'acknowledge'})  # send ack back
         # Flatten timing info into the main dict
         timing_info = sonar_package.pop('timing_info')
@@ -233,6 +243,11 @@ class Client:
 
         if do_ping: self.acquire(action='ping')
         sonar_package = self.read_buffers()
+        
+        # Handle timeout case
+        if sonar_package is None:
+            self.print_message("No sonar data received - timeout occurred", "WARNING")
+            return None
 
         # If no calibration, return the bare package so downstream can still inspect/plot raw
         if not calibration:

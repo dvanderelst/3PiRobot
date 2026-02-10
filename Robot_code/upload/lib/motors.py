@@ -16,6 +16,8 @@ class Motors:
         self.wheel_base_mm     = 84.5
         self.wheel_diameter_mm = 32
         self._update_derived_constants()
+        self._last_left_pwm = 0  # Track last set PWM values
+        self._last_right_pwm = 0
 
     def _update_derived_constants(self):
         self.wheel_base_m = self.wheel_base_mm / 1000
@@ -44,6 +46,9 @@ class Motors:
         l_cmd = self._mps_to_pwm(left_mps)
         r_cmd = self._mps_to_pwm(right_mps)
         self.motors.set_speeds(l_cmd, r_cmd)
+        # Track the last set PWM values
+        self._last_left_pwm = l_cmd
+        self._last_right_pwm = r_cmd
         if self.verbose: print(f"[PWM] L {left_mps:+.3f} m/s → {l_cmd:+4d} | R {right_mps:+.3f} m/s → {r_cmd:+4d}")
 
     def set_kinematics(self, lin_mps: float = 0.0, rot_dps: float = 0.0):
@@ -92,4 +97,11 @@ class Motors:
 
     def stop(self):
         self.motors.set_speeds(0, 0)
+        # Update tracked PWM values to reflect stopped state
+        self._last_left_pwm = 0
+        self._last_right_pwm = 0
         if self.verbose: print("[STOP]")
+
+    def is_moving(self):
+        """Check if robot is moving based on tracked PWM values"""
+        return self._last_left_pwm != 0 or self._last_right_pwm != 0

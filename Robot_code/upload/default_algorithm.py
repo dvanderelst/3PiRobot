@@ -101,6 +101,7 @@ def main(selected_ssid=None):
         # ── Wi-Fi Commands ──
         new_cmds = bridge.read_messages()
         if new_cmds: command_queue.extend(new_cmds)
+        if len(command_queue)>0: print(f"[Main] commands: {len(command_queue)} in queue: {command_queue}")
 
         # ── Safety: Bumpers ──
         bump_left, bump_right = bump.read()
@@ -112,8 +113,9 @@ def main(selected_ssid=None):
         now = ticks_ms()
         if ticks_diff(now, last_cmd_received) > 2500:
             last_cmd_received = ticks_ms()
-            if verbose: print(f"[Main] Stopping robot due to inactivity")
-            drive.stop()
+            if drive.is_moving():  # Only print if robot was actually moving
+                if verbose: print(f"[Main] Stopping robot due to inactivity")
+                drive.stop()
 
         # ── Command Processing ──
         if command_queue:
@@ -199,6 +201,10 @@ def main(selected_ssid=None):
 
                 elif action == 'acknowledge':
                     if verbose: print('[Main] Acknowledgment received')
+
+                print(f'[main] Processed command {cmd}')
+            print(f'[main] Processed all commands, queue now empty')
+
 
         # ── Free-running pulsing (drift-free absolute schedule) ──
         if state['next_due'] is not None and ticks_diff(now, state['next_due']) >= 0:
