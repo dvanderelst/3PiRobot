@@ -91,6 +91,39 @@ class Client:
         prefix = struct.pack(">H", len(packed))
         self.sock.sendall(prefix + packed)
 
+    def _wait_for_message(self, predicate, timeout=10.0):
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            if self.sock and select.select([self.sock], [], [], 0.1)[0]:
+                msg = self._recv_msgpack()
+                if msg and predicate(msg):
+                    return msg
+        return None
+
+    def _send_command(self, action, params=None, wait_for_response=True, timeout=15.0, max_retries=1, retry_delay=0.2):
+        """
+        Send a command and optionally wait for its response.
+        Retries the whole command if no response is received.
+        """
+        last_cmd_id = None
+        for attempt in range(max_retries):
+            cmd_id = Utils.make_code(n=8)
+            last_cmd_id = cmd_id
+            cmd = {'id': cmd_id, 'action': action}
+            if params:
+                cmd.update(params)
+            self._send_dict(cmd)
+            if not wait_for_response:
+                return cmd_id
+            resp = self._wait_for_message(lambda m: m.get('id') == cmd_id, timeout=timeout)
+            if resp:
+                return resp
+            if attempt < max_retries - 1:
+                backoff = retry_delay * (attempt + 1)
+                self.print_message(f"No response for {action} (id={cmd_id}); retrying in {backoff:.1f}s", "WARNING")
+                time.sleep(backoff)
+        return None if wait_for_response else last_cmd_id
+
     def _recv_msgpack(self):
         t0 = time.perf_counter()
         # 1) Header (2 bytes)
@@ -132,8 +165,12 @@ class Client:
         Drive with linear + rotational velocity (open-loop).
         """
         start = time.time()
-        dictionary = {'action': 'kinematics', 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
-        self._send_dict(dictionary)
+        self._send_command(
+            'kinematics',
+            params={'linear_speed': linear_speed, 'rotation_speed': rotation_speed},
+            wait_for_response=True,
+            timeout=5.0
+        )
         msg = f"Set_kinematics took {time.time() - start:.4f}s"
         self.print_message(msg, category='INFO')
 
@@ -145,7 +182,12 @@ class Client:
         """Change a setting on the robot."""
         start = time.time()
         parameter = str(parameter)
-        self._send_dict({'action': 'parameter', parameter: value})
+        self._send_command(
+            'parameter',
+            params={parameter: value},
+            wait_for_response=True,
+            timeout=5.0
+        )
         msg = f"Changed settings in {time.time() - start:.4f}s"
         self.print_message(msg, category='INFO')
 
@@ -153,15 +195,22 @@ class Client:
         """Change the free ping period on the robot."""
         self.change_robot_setting('free_ping_period', period)
 
-    def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0):
+    def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0, wait_for_completion=True, timeout=30.0, post_delay_s=0.05):
         start = time.time()
         angle = int(angle)
-        dictionary = {'action': 'step', 'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
-        self._send_dict(dictionary)
+        params = {'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
+        if wait_for_completion:
+            resp = self._send_command('step', params=params, wait_for_response=True, timeout=timeout, max_retries=1)
+            if not resp or resp.get('status') != 'done':
+                raise TimeoutError("No completion response for step")
+            if post_delay_s and post_delay_s > 0:
+                time.sleep(post_delay_s)
+        else:
+            self._send_command('step', params=params, wait_for_response=False)
         msg = f"Step (d={distance}, a={angle}) took {time.time() - start:.4f}s"
         self.print_message(msg, category='INFO')
 
-    def acquire(self, action):
+    def acquire(self, action, wait_for_completion=True, timeout=15.0):
         # assure that action is either 'ping' or 'listen'
         error_message = f"Invalid action '{action}'. Action must be either 'ping' or 'listen'."
         if action not in ['ping', 'listen']: raise ValueError(error_message)
@@ -169,38 +218,32 @@ class Client:
         sample_rate = self.configuration.sample_rate
         samples = self.configuration.samples
 
-        acquire_id = Utils.make_code(n=8)
-        cmd_dict= {'acquire_id': acquire_id, 'action': action, 'sample_rate': sample_rate, 'samples': samples}
-        self._send_dict(cmd_dict)
+        params = {'sample_rate': sample_rate, 'samples': samples}
+        if wait_for_completion:
+            resp = self._send_command(action, params=params, wait_for_response=True, timeout=timeout, max_retries=3)
+            if not resp:
+                raise TimeoutError(f"No response received for {action}")
+        else:
+            resp = self._send_command(action, params=params, wait_for_response=False)
         self._samples_in_buffers = samples  # remember for later
         current_time = time.time()
         duration = (current_time - start_time) * 1000.0
-        msg = f"Sent {action} command (id={acquire_id}, sr={sample_rate}, samples={samples}) took {duration:.1f}ms"
+        msg = f"Sent {action} command (sr={sample_rate}, samples={samples}) took {duration:.1f}ms"
         self.print_message(msg, category='INFO')
-        return acquire_id
+        return resp
 
-    def read_buffers(self, plot=False):
+    def _decode_sonar_response(self, sonar_package, plot=False):
+        if sonar_package is None:
+            return None
+        if 'data' not in sonar_package or 'timing_info' not in sonar_package:
+            return None
+
         samples = self._samples_in_buffers
         emitter_channel = self.configuration.emitter_channel
         left_channel = self.configuration.left_channel
         right_channel = self.configuration.right_channel
 
-        cmd_dict = {'action': 'read'}
         start_time = time.time()
-        self._send_dict(cmd_dict)
-        current_time = time.time()
-        duration = (current_time - start_time) * 1000.0
-        msg = f"Sent read command took {duration:.1f}ms"
-        self.print_message(msg, category='INFO')
-        sonar_package = self._recv_msgpack()
-        
-        # Handle timeout case gracefully
-        if sonar_package is None:
-            msg = "Timeout: No response received from robot when reading buffers"
-            self.print_message(msg, category='WARNING')
-            return None
-            
-        self._send_dict({'action': 'acknowledge'})  # send ack back
         # Flatten timing info into the main dict
         timing_info = sonar_package.pop('timing_info')
         sonar_package.update(timing_info)
@@ -229,20 +272,28 @@ class Client:
         sonar_package['configuration'] = self.configuration
         if plot:
             plot_settings = {'y_max': 30000, 'y_min': 5000}
-            Process.plot_sonar_data(raw_distance_axis, sonar_package, plot_settings)
+            AcousticProcessing.plot_sonar_data(raw_distance_axis, sonar_package, plot_settings)
             plt.show()
         return sonar_package
 
+    def read_buffers(self, plot=False):
+        self.print_message("read_buffers is not supported in the new protocol", "WARNING")
+        return None
+
     def listen(self, plot=False):
-        self.acquire(action='listen')
-        sonar_package = self.read_buffers(plot=plot)
+        sonar_package = self.acquire(action='listen', wait_for_completion=True)
+        sonar_package = self._decode_sonar_response(sonar_package, plot=plot)
         return sonar_package
 
-    def read_and_process(self, do_ping=True, plot=False, close_after=False, selection_mode='first'):
+    def read_and_process(self, do_ping=True, plot=False, close_after=False, selection_mode='first', wait_for_completion=True):
         calibration = self.calibration
 
-        if do_ping: self.acquire(action='ping')
-        sonar_package = self.read_buffers()
+        sonar_package = None
+        if do_ping:
+            sonar_package = self.acquire(action='ping', wait_for_completion=wait_for_completion)
+            sonar_package = self._decode_sonar_response(sonar_package, plot=False)
+        else:
+            self.print_message("read_and_process requires do_ping=True in the new protocol", "WARNING")
         
         # Handle timeout case
         if sonar_package is None:
@@ -268,6 +319,3 @@ class Client:
             AcousticProcessing.plot_sonar_package(sonar_package, file_name=file_name, close_after=close_after)
 
         return sonar_package
-
-
-

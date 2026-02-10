@@ -1,5 +1,5 @@
 import passwords
-verbose = 2
+verbose = 0
 
 
 ssid_list = {

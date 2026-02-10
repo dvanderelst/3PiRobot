@@ -27,7 +27,9 @@ parameters = ControlParameters.Parameters()
 parameters.plot()
 
 
-for x in range(5): client.acquire('ping'); time.sleep(0.5)
+for x in range(5):
+    client.acquire('ping')
+    time.sleep(0.5)
 
 rotation = 0 # to avoid pycharm complaining
 for step in range(max_steps):
@@ -35,6 +37,11 @@ for step in range(max_steps):
     #client.acquire('ping')
     #time.sleep(0.25)
     sonar_package = client.read_and_process(do_ping=True, plot=do_plot, selection_mode=selection_mode)
+    if sonar_package is None:
+        print(f"Warning: No data received at step {step}, skipping this iteration...")
+        position = tracker.get_position(robot_number)
+        writer.save_data(sonar_package=None, position=position, motion={'distance': 0, 'rotation': 0})
+        continue
     corrected_iid = sonar_package['corrected_iid']
     corrected_distance = sonar_package['corrected_distance']
     side_code = sonar_package['side_code']
@@ -43,7 +50,7 @@ for step in range(max_steps):
     rob_y = position['y']
     rob_yaw_deg = position['yaw_deg']
 
-    print(f"Step {step}: IID {corrected_iid}, Distance {corrected_distance:.2f} m, Side {side_code}, Position X:{rob_x}, Y:{rob_y}, Yaw:{rob_yaw_deg}")
+    #print(f"Step {step}: IID {corrected_iid}, Distance {corrected_distance:.2f} m, Side {side_code}, Position X:{rob_x}, Y:{rob_y}, Yaw:{rob_yaw_deg}")
 
     step_distance = parameters.translation_magnitude(corrected_distance)
     rotation_magnitude = parameters.rotation_magnitude(corrected_distance)
@@ -69,6 +76,5 @@ for step in range(max_steps):
 
     motion = {'distance':step_distance, 'rotation':rotation}
     writer.save_data(sonar_package=sonar_package, position=position, motion=motion)
-
 
 

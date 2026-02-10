@@ -73,8 +73,6 @@ def main(selected_ssid=None):
     led.set(2, current_led_color)
     last_heartbeat = ticks_ms()
 
-    command_queue = []
-
     display.write(0, 'Ready')
 
     # ── Free-run pulser state ──
@@ -100,8 +98,7 @@ def main(selected_ssid=None):
 
         # ── Wi-Fi Commands ──
         new_cmds = bridge.read_messages()
-        if new_cmds: command_queue.extend(new_cmds)
-        if len(command_queue)>0: print(f"[Main] commands: {len(command_queue)} in queue: {command_queue}")
+        cmd = new_cmds[0] if new_cmds else None
 
         # ── Safety: Bumpers ──
         bump_left, bump_right = bump.read()
@@ -118,92 +115,91 @@ def main(selected_ssid=None):
                 drive.stop()
 
         # ── Command Processing ──
-        if command_queue:
+        if cmd:
             last_cmd_received = ticks_ms()
-            cmds = command_queue
-            command_queue = []
-            if verbose: print(f"[Main] Received: {cmds}")
+            if verbose: print(f"[Main] Received: {cmd}")
 
+            cmd_id = cmd.get('id') or cmd.get('acquire_id')
+            def send_reply(status, **extra):
+                if cmd_id is None:
+                    return
+                resp = {'id': cmd_id, 'status': status}
+                resp.update(extra)
+                bridge.send_data(resp)
 
-            for cmd in cmds:
-                action = cmd.get('action')
-                # Drive continuously (teleop-style)
-                if action == 'kinematics':
-                    display.write(0, 'kinematics')
-                    rotation_speed = cmd.get('rotation_speed')
-                    linear_speed = cmd.get('linear_speed')
-                    drive.set_kinematics(linear_speed, rotation_speed)
+            action = cmd.get('action')
+            # Drive continuously (teleop-style)
+            if action == 'kinematics':
+                display.write(0, 'kinematics')
+                rotation_speed = cmd.get('rotation_speed')
+                linear_speed = cmd.get('linear_speed')
+                drive.set_kinematics(linear_speed, rotation_speed)
+                send_reply('ok')
 
                 # Parameter updates (wheel geometry, free-run period)
-                elif action == 'parameter':
-                    wheel_diameter_mm = cmd.get('wheel_diameter_mm', None)
-                    wheel_base_mm     = cmd.get('wheel_base_mm', None)
-                    new_free_ping_period = cmd.get('free_ping_period', None)
+            elif action == 'parameter':
+                wheel_diameter_mm = cmd.get('wheel_diameter_mm', None)
+                wheel_base_mm     = cmd.get('wheel_base_mm', None)
+                new_free_ping_period = cmd.get('free_ping_period', None)
 
-                    if wheel_diameter_mm is not None:
-                        drive.set_wheel_diameter(wheel_diameter_mm)
-                        display.write(0, 'Set wheel diam')
+                if wheel_diameter_mm is not None:
+                    drive.set_wheel_diameter(wheel_diameter_mm)
+                    display.write(0, 'Set wheel diam')
 
-                    if wheel_base_mm is not None:
-                        drive.set_wheel_base(wheel_base_mm)
-                        display.write(0, 'Set wheel base')
+                if wheel_base_mm is not None:
+                    drive.set_wheel_base(wheel_base_mm)
+                    display.write(0, 'Set wheel base')
 
-                    if new_free_ping_period is not None:
-                        set_free_run(new_free_ping_period, state)
+                if new_free_ping_period is not None:
+                    set_free_run(new_free_ping_period, state)
+                send_reply('ok')
 
                 # Discrete move/turn steps
-                elif action == 'step':
-                    display.write(0, 'step')
-                    rotation_speed = cmd.get('rotation_speed', 0)
-                    linear_speed = cmd.get('linear_speed', 0)
-                    distance = cmd.get('distance', 0)
-                    angle = cmd.get('angle', 0)
+            elif action == 'step':
+                display.write(0, 'step')
+                rotation_speed = cmd.get('rotation_speed', 0)
+                linear_speed = cmd.get('linear_speed', 0)
+                distance = cmd.get('distance', 0)
+                angle = cmd.get('angle', 0)
 
-                    if abs(angle) > 0 and rotation_speed == 0: rotation_speed = 90
-                    if abs(distance) > 0 and linear_speed == 0: linear_speed = 0.1
+                if abs(angle) > 0 and rotation_speed == 0: rotation_speed = 90
+                if abs(distance) > 0 and linear_speed == 0: linear_speed = 0.1
 
-                    if abs(angle) > 0: drive.turn_angle(angle, rotation_speed)
-                    if abs(angle) > 0 and abs(distance) > 0: time.sleep(0.1)
-                    if abs(distance) > 0: drive.drive_distance(distance, linear_speed)
+                if abs(angle) > 0: drive.turn_angle(angle, rotation_speed)
+                if abs(angle) > 0 and abs(distance) > 0: time.sleep(0.1)
+                if abs(distance) > 0: drive.drive_distance(distance, linear_speed)
+                send_reply('done')
 
                 # Acoustic actions: 'ping' (emit→gate→capture) or 'listen' (capture only)
-                elif action in ['ping', 'listen']:
-                    # Extract parameters for acquisition
-                    sample_rate = cmd.get('sample_rate')
-                    samples = cmd.get('samples')
-                    # ── Pause free-run to prevent any overlap with acquisition ──
-                    prev_period = state['period']
-                    if prev_period > 0:
-                        # Small guard from the *last* free-run pulse to let ringing settle
-                        since_last = ticks_diff(ticks_ms(), state['last_mark'])
-                        if since_last < measure_guard_ms: time.sleep_ms(int(measure_guard_ms - since_last))
-                        # Disable free-run during the acquisition
-                        set_free_run(0, state)
+            elif action in ['ping', 'listen']:
+                # Extract parameters for acquisition
+                sample_rate = cmd.get('sample_rate')
+                samples = cmd.get('samples')
+                # ── Pause free-run to prevent any overlap with acquisition ──
+                prev_period = state['period']
+                if prev_period > 0:
+                    # Small guard from the *last* free-run pulse to let ringing settle
+                    since_last = ticks_diff(ticks_ms(), state['last_mark'])
+                    if since_last < measure_guard_ms: time.sleep_ms(int(measure_guard_ms - since_last))
+                    # Disable free-run during the acquisition
+                    set_free_run(0, state)
 
-                    # ── Do the acquisition ──
-                    display.write(0, action)
-                    snr.acquire(action, sample_rate, samples)
-                    snr.timing_info['acquire_id'] = cmd.get('acquire_id')
-                    if prev_period > 0: set_free_run(prev_period, state)
+                # ── Do the acquisition ──
+                display.write(0, action)
+                snr.acquire(action, sample_rate, samples)
+                if prev_period > 0: set_free_run(prev_period, state)
 
-                elif action == 'read':
-                    buf0 = snr.buf0
-                    buf1 = snr.buf1
-                    buf2 = snr.buf2
-                    timing_info = snr.timing_info
-                    packed = bytes(buf0) + bytes(buf1) + bytes(buf2)
-                    response = {}
-                    response['data'] = packed
-                    response['timing_info'] = timing_info
-                    response['mode'] = action
-                    #print(f'[Read] {timing_info}')
-                    bridge.send_data(response)
+                buf0 = snr.buf0
+                buf1 = snr.buf1
+                buf2 = snr.buf2
+                timing_info = snr.timing_info
+                packed = bytes(buf0) + bytes(buf1) + bytes(buf2)
+                send_reply('ok', data=packed, timing_info=timing_info, mode=action)
 
-                elif action == 'acknowledge':
-                    if verbose: print('[Main] Acknowledgment received')
+            elif action == 'acknowledge':
+                if verbose: print('[Main] Acknowledgment received')
 
-                print(f'[main] Processed command {cmd}')
-            print(f'[main] Processed all commands, queue now empty')
+            if verbose: print(f'[Main] Processed command {cmd}')
 
 
         # ── Free-running pulsing (drift-free absolute schedule) ──
