@@ -107,6 +107,13 @@ class DataWriter:
         """Get the full filepath for a given filename."""
         return os.path.join(self.base_folder, filename)
 
+
+    def files_folder(self, make=False):
+        folder = os.path.join(self.base_folder, "files")
+        if make: os.makedirs(folder, exist_ok=True)
+        return folder
+
+
     def add_file(self, filepath: str) -> str:
         """
         Copy an external file into the data storage folder under a files/ subfolder.
@@ -124,7 +131,7 @@ class DataWriter:
         if not os.path.isfile(filepath):
             raise FileNotFoundError(f"File not found: {filepath}")
 
-        files_folder = os.path.join(self.base_folder, "files")
+        files_folder = self.files_folder()
         os.makedirs(files_folder, exist_ok=True)
 
         filename = os.path.basename(filepath)

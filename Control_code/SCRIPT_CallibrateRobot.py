@@ -12,16 +12,17 @@ real_distance1 = 0.3 # meters
 real_distance2 = 0.5 # meters
 angles = [-40, -30, -20, -10, 0, 10, 20, 30, 40]
 delete_calibration = False
-collect_baseline = True
-collect_distance_calibration =False
-collect_sweep_data = False
+collect_baseline = False
+collect_distance_calibration = False
+collect_sweep_data = True
 # ─────────────────────────────────────
 
 client = Client.Client(robot_nr)
 client.change_free_ping_period(0) #To ensure no free pings are done during calibration
+
 #override the sample rate and samples to ensure consistency in calibration
-client.configuration.sample_rate = 10000
-client.configuration.samples = 100
+#client.configuration.sample_rate = 10000
+#client.configuration.samples = 200
 
 robot_name = client.configuration.robot_name
 
@@ -47,8 +48,8 @@ if collect_baseline:
 # We need to reload the calibration file because it might have been updated
 client.load_calibration() # Reload calibration
 sonar_package = client.read_and_process()
-sonar_package = Process.locate_echo(sonar_package)
-Process.plot_sonar_package(sonar_package)
+sonar_package = AcousticProcessing.locate_echo(sonar_package)
+AcousticProcessing.plot_sonar_package(sonar_package)
 
 # Raise error if the client configuration does not match the calibration file
 # In theory, this is not strictly necessary, but in practice it allows all data in the calibration

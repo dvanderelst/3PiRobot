@@ -19,12 +19,12 @@ class ClientConfig:
     aruco_id: int = 0
     # Acquisition settings
     sample_rate: int = 10000
-    samples: int = 100
+    samples: int = 200
     emitter_channel: int = 0
     left_channel: int = 2
     right_channel: int = 1
     # Processing parameters
-    baseline_extent_m: int = 0.5       # in raw distance, meters
+    baseline_extent_m: int = 0.75       # in raw distance, meters
     baseline_shift_right_m: int = 0.05   # in raw distance, meters
     baseline_shift_up_a: int = 5000   # in amplitude units
     integration_window_m: int = 0.17       # in raw distance, meters

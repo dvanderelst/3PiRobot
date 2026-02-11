@@ -1,4 +1,5 @@
 import time
+import random
 from Library import Dialog
 from Library import Client
 from Library import ControlParameters
@@ -9,21 +10,25 @@ from LorexLib.Environment import capture_environment_layout
 
 
 robot_number = 1
-session = 'session07'
+session = 'sessionB01'
 wait_for_confirmation = False
 do_rotation = True
 do_translation = True
 do_plot = True
 selection_mode = 'first'
 max_steps = 500
+turn_probability = 0.03
+turn_distance = 0.20
 
 control = PauseControl.PauseControl()
 client = Client.Client(robot_number=robot_number)
 tracker = LorexTracker.LorexTracker()
 writer = DataStorage.DataWriter(session, autoclear=True, verbose=False)
 writer.add_file('Library/Settings.py')
+writer.add_file('Library/ControlParameters.py')
 snapshot = capture_environment_layout(save_root=f'Data/{session}')
 parameters = ControlParameters.Parameters()
+parameters.plot(save_path=writer.files_folder())
 parameters.plot()
 
 
@@ -50,7 +55,7 @@ for step in range(max_steps):
     rob_y = position['y']
     rob_yaw_deg = position['yaw_deg']
 
-    #print(f"Step {step}: IID {corrected_iid}, Distance {corrected_distance:.2f} m, Side {side_code}, Position X:{rob_x}, Y:{rob_y}, Yaw:{rob_yaw_deg}")
+    print(f"Step {step}: IID {corrected_iid}, Distance {corrected_distance:.2f} m, Side {side_code}, Position X:{rob_x}, Y:{rob_y}, Yaw:{rob_yaw_deg}")
 
     step_distance = parameters.translation_magnitude(corrected_distance)
     rotation_magnitude = parameters.rotation_magnitude(corrected_distance)
@@ -58,14 +63,20 @@ for step in range(max_steps):
     step_distance = float(step_distance)
     rotation_magnitude = float(rotation_magnitude)
 
+    random_number = random.random()
+    do_half_turn = (random_number < turn_probability) or (corrected_distance < turn_distance)
+    if do_half_turn: rotation_magnitude = 180
+
     if do_rotation:
         if side_code == 'L': rotation = rotation_magnitude * 1
         if side_code == 'R': rotation = rotation_magnitude * - 1
         client.step(angle=rotation)
+        time.sleep(0.15)
     if do_translation:
         if corrected_distance < 0.75: step_distance = 0.10
         if corrected_distance < 0.3: step_distance = 0.05
         client.step(distance=step_distance)
+        time.sleep(0.15)
 
     if wait_for_confirmation:
         response = Dialog.ask_yes_no("Continue", min_size=(400, 200))

@@ -122,8 +122,8 @@ def get_distance_data(client, calibration, real_distance, nr_repeats=10):
         message = f"Distance data: {i + 1}/{nr_repeats}..."
         Logging.print_message('Baseline', message, category='INFO')
         sonar_package = client.read_and_process()
-        raw_result = Process.locate_echo(sonar_package, selection_mode='first')
-        Process.plot_sonar_package(raw_result, file_name=file_name, close_after=close_after)
+        raw_result = AcousticProcessing.locate_echo(sonar_package, selection_mode='first')
+        AcousticProcessing.plot_sonar_package(raw_result, file_name=file_name, close_after=close_after)
         raw_results.append(raw_result)
         time.sleep(0.25)
     raw_distances = np.array([result['raw_distance'] for result in raw_results])
@@ -173,8 +173,9 @@ def get_sweep_data(client, calibration, sweep_angles):
         client.step(angle=int(step))
         time.sleep(1.5)
         sonar_package = client.read_and_process()
-        raw_result = Process.locate_echo(sonar_package, selection_mode='first')
+        raw_result = AcousticProcessing.locate_echo(sonar_package, selection_mode='first')
         all_sweep_data.append(raw_result)
+        time.sleep(0.25)
 
     sweep_all_data = np.array([result['sonar_data'] for result in all_sweep_data])
     sweep_onsets = np.array([result['onset'] for result in all_sweep_data])
