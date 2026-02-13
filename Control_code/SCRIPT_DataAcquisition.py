@@ -6,18 +6,19 @@ from Library import ControlParameters
 from Library import LorexTracker
 from Library import DataStorage
 from Library import PauseControl
+from Library import PushOver
 from LorexLib.Environment import capture_environment_layout
 
 
 robot_number = 1
-session = 'sessionB01'
+session = 'sessionB05'
 wait_for_confirmation = False
 do_rotation = True
 do_translation = True
 do_plot = True
 selection_mode = 'first'
 max_steps = 500
-turn_probability = 0.03
+turn_probability = 1/25
 turn_distance = 0.20
 
 control = PauseControl.PauseControl()
@@ -37,6 +38,7 @@ for x in range(5):
     time.sleep(0.5)
 
 rotation = 0 # to avoid pycharm complaining
+PushOver.send('Data acquisition started: {session}')
 for step in range(max_steps):
     control.wait_if_paused()
     #client.acquire('ping')
@@ -82,10 +84,12 @@ for step in range(max_steps):
         response = Dialog.ask_yes_no("Continue", min_size=(400, 200))
         if response[0] == 'No': break
     else:
-        time.sleep(1) #-->Needed when driving robot? Electrical problem?
+        time.sleep(0.25)
 
 
     motion = {'distance':step_distance, 'rotation':rotation}
     writer.save_data(sonar_package=sonar_package, position=position, motion=motion)
+    if step % 100 == 0: PushOver.send(f"Data acquisition progress: {step}/{max_steps} steps completed.")
 
+PushOver.send(f"Data acquisition completed: {max_steps} steps completed for session {session}.")
 

@@ -130,6 +130,8 @@ def mask2coordinates(mask, meta):
     rows, cols = np.nonzero(mask)
     x_coords = min_x + cols * mm_per_px + 0.5 * mm_per_px
     y_coords = max_y - rows * mm_per_px + 0.5 * mm_per_px
+    x_coords = np.array(x_coords)
+    y_coords = np.array(y_coords)
     return x_coords, y_coords
 
 
@@ -151,6 +153,8 @@ def get_env_dir(data_reader):
 
 def read_wall_mask(image_path, ref_rgb=(46, 194, 126), tol=35):
     img_bgr = cv2.imread(str(image_path))
+    if img_bgr is None:
+        raise FileNotFoundError(f"Could not read image from {image_path}")
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.int16)
     ref = np.array(ref_rgb, dtype=np.int16)
     dist = np.linalg.norm(img_rgb - ref, axis=2)
@@ -823,6 +827,7 @@ class DataProcessor:
         self.wall_x, self.wall_y = None, None
         self.path_x, self.path_y = None, None
         self.arena_loaded = False
+        self.arena_metadata_loaded = False
         
         # Cache configuration
         if cache_dir is None:
@@ -1015,8 +1020,11 @@ class DataProcessor:
             self.wall_x, self.wall_y = mask2coordinates(self.wall_mask, self.meta)
             self.path_x, self.path_y = mask2coordinates(self.path_mask, self.meta)
             self.arena_metadata_loaded = True
+            print("✅ Arena metadata loaded successfully")
         except FileNotFoundError:
-            print('Could not find the arena annotation files')
+            print('❌ Could not find the arena annotation files')
+            print('   wall_x and wall_y will remain None')
+            self.arena_metadata_loaded = False
             
     def load_arena_image(self):
         """
@@ -1204,6 +1212,10 @@ class DataProcessor:
                     print(f"   Profile shape: {self.profiles.shape}")
                     print(f"   Centers shape: {self.profile_centers.shape}")
                     print(f"   Parameters matched: opening_angle={opening_angle}, steps={steps}")
+                    
+                    # Ensure arena metadata is loaded even when using cached profiles
+                    if not hasattr(self, 'arena_metadata_loaded') or not self.arena_metadata_loaded:
+                        self.load_arena_metadata()
                     return
                 else:
                     print(f"⚠️  Cache parameters don't match - recomputing...")
@@ -1213,6 +1225,15 @@ class DataProcessor:
         # Automatically load arena metadata if needed (for wall coordinates)
         if not hasattr(self, 'arena_metadata_loaded') or not self.arena_metadata_loaded:
             self.load_arena_metadata()
+            
+        # Check if arena metadata loaded successfully
+        if not self.arena_metadata_loaded:
+            # Try to load arena metadata one more time in case it was missed
+            self.load_arena_metadata()
+            
+            if not self.arena_metadata_loaded:
+                raise RuntimeError("Cannot compute distance profiles - arena metadata failed to load. "
+                                 "Make sure arena_annotated.png and meta.json exist in the environment directory.")
         
         print(f"📊 Computing distance profiles (opening_angle: {opening_angle}°, {steps} steps)...")
         

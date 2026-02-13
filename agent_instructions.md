@@ -21,10 +21,22 @@ The folder Control_code contains code that runs on the computer controlling the 
 
 Rules for working with the code in the Control_code folder:
 
-+ Since this code controls a robot, you should not run any test directly, as this might move the robot. You can propose tests for me to run.
++ Since this code controls a robot, you should not run any test that use the robot, as this might move the robot. You can propose tests for me to run.
++ If you want to run tests that do not use the robot you can do this using the .venv environment in this folder.
++ **Virtual Environment Usage**: Always activate the virtual environment before running any Python code:
+  ```bash
+  cd /home/dieter/Dropbox/PythonRepos/3PiRobot/Control_code
+  source .venv/bin/activate
+  python your_script.py
+  ```
++ The virtual environment contains all required dependencies including PyTorch, NumPy, scikit-learn, matplotlib, and other scientific computing libraries.
 
 # General Rules
 
 + Do not automatically commit edits to git. I will handle all commits manually.
-
++ I will be running vibe from the root folder to give you access to both Control_code and Robot_code folders.
++ When I run code, I will be working either in the Control_code or Robot_code directories.
++ This setup allows keeping client code in Control_code and robot code in Robot_code in sync for API changes.
++ All training results, outputs, and generated files should be kept within their respective folders (Control_code/ or Robot_code/).
++ The root directory should only contain agent instructions and common files, not generated training outputs.
 
