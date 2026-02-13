@@ -21,8 +21,8 @@ hold_out_session = 'sessionB05'  # Set to session name (e.g., 'sessionB05') to h
 random_state = 42
 
 # Profile Parameters
-profile_opening_angle = 30  # degrees
-profile_steps = 5           # number of azimuth bins
+profile_opening_angle = 45  # degrees
+profile_steps = 7           # number of azimuth bins
 
 # Training Configuration
 test_size = 0.2              # 20% test set

@@ -24,7 +24,7 @@ session_to_predict = 'sessionB05'  # Session to predict profiles for
 output_dir = 'Training'            # Directory containing trained model
 
 # Visualization Configuration
-plot_indices = [240, 250]  # Set to None to disable individual profile plotting
+plot_indices = [300, 305]  # Set to None to disable individual profile plotting
 
 # 2D Heatmap Configuration
 create_heatmap = True       # Set to False to disable heatmap visualization
