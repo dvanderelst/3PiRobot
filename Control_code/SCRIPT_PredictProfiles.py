@@ -1,584 +1,493 @@
 #
-# SCRIPT_PredictProfiles: Predict profiles with optional 2D heatmap visualization
+# SCRIPT_PredictProfiles: Load trained two-head model and predict profiles for one session.
 #
-# This script predicts profiles and optionally creates a 2D heatmap showing the spatial
-# distribution of predicted profile points for the selected indices, displayed over the
-# full spatial range of all robot positions. Only robot positions for the selected
-# indices are shown. This provides complete spatial context while maintaining focus on
-# the selected data. The heatmap provides a clean visualization without contour lines.
-#
-# Usage: Set the session_to_predict variable to the session you want to analyze
-#
-# Input: Sonar data (N, 2, 200) from specified session
-# Output: Predicted profile data (N, profile_steps) + 2D heatmap visualization
-#
-# Dependencies: Requires a trained model in the specified output directory
+# This script loads a training output folder and predicts:
+# 1) presence probabilities/binary predictions per azimuth bin
+# 2) distance predictions per azimuth bin (in mm)
 #
 
-# ============================================
-# CONFIGURATION SETTINGS
-# ============================================
+import json
+import os
 
-# Prediction Configuration
-session_to_predict = 'sessionB05'  # Session to predict profiles for
-output_dir = 'Training'            # Directory containing trained model
-
-# Visualization Configuration
-plot_indices = [300, 305]  # Set to None to disable individual profile plotting
-
-# 2D Heatmap Configuration
-create_heatmap = True       # Set to False to disable heatmap visualization
-heatmap_resolution = 100    # Heatmap grid resolution (pixels per dimension)
-heatmap_colormap = 'hot'  # Color scheme ('viridis', 'plasma', 'inferno', 'magma', 'coolwarm', 'jet')
-heatmap_alpha = 0.7         # Transparency (0.0-1.0)
-# IMPORTS
-# ============================================
-
-heatmap_smoothing = 2   # Gaussian smoothing sigma (0 = no smoothing)
-heatmap_border_expansion = 0.3  # Border expansion factor (0.0 = no expansion, 0.2 = 20% padding)
-
-# IMPORTS
-# ============================================
-# Distance Filter Configuration
-filter_max_distance = 1500   # Max distance from robot to include (mm), None = no filtering
-
-# ============================================
-# IMPORTS
-# ========================================================================================
-# IMPORTS
-# ========================================================================================
-# IMPORTS
-# ============================================
-
+import joblib
+from matplotlib import pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.preprocessing import StandardScaler
-import os
-import joblib
-from matplotlib import pyplot as plt
-from matplotlib.colors import Normalize
-from scipy.stats import gaussian_kde
 
 from Library import DataProcessor
-from Library import Utils
-from Library.DataProcessor import robot2world
 
-# Set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"🔥 Using device: {device}")
 
-class SonarToProfileCNN(nn.Module):
-    """CNN model matching the training architecture."""
-    def __init__(self, input_shape, output_shape, training_params=None):
-        super(SonarToProfileCNN, self).__init__()
-        
-        # Input: (batch_size, channels=2, time_samples=200)
-        # Use parameters from training if provided, otherwise use defaults
-        if training_params is None:
-            training_params = {
-                'conv_filters': [32, 64, 128],
-                'kernel_size': 5,
-                'pool_size': 2,
-                'dropout_rate': 0.3
-            }
-        
-        conv_filters = training_params['conv_filters']  # number of filters in each conv layer
-        kernel_size = training_params['kernel_size']    # convolution kernel size
-        pool_size = training_params['pool_size']        # max pooling size
-        dropout_rate = training_params['dropout_rate']   # dropout rate for regularization
-        
-        self.conv1 = nn.Sequential(
+# ============================================
+# PREDICTION CONFIGURATION
+# ============================================
+session_to_predict = 'sessionB05'  # Session to predict profiles for
+training_output_dir = 'Training'   # Directory containing trained model artifacts
+prediction_output_dir = 'Prediction'  # Directory for prediction outputs
+prediction_batch_size = 256
+# If None, use threshold saved in training_params.json.
+presence_threshold_override = None
+
+# Optional index-based visualization
+# Indices are in filtered sample space after invalid rows are removed.
+plot_indices = [0]              # Example: [0, 10, 25]
+plot_index_range = [210,220,1]         # Example: (100, 120, 2)
+save_plots = True
+save_overlay_plot = True
+
+
+# ============================================
+# MODEL/SCALER DEFINITIONS (must match training)
+# ============================================
+class DistanceScaler:
+    """Per-bin standardization fit on present-wall bins only."""
+    def __init__(self):
+        self.mean_ = None
+        self.scale_ = None
+
+    def fit(self, y_distance, y_presence):
+        n_bins = y_distance.shape[1]
+        self.mean_ = np.zeros(n_bins, dtype=np.float32)
+        self.scale_ = np.ones(n_bins, dtype=np.float32)
+
+        for bin_idx in range(n_bins):
+            present_vals = y_distance[y_presence[:, bin_idx] > 0.5, bin_idx]
+            if present_vals.size >= 2:
+                std = np.std(present_vals)
+                self.mean_[bin_idx] = np.mean(present_vals)
+                self.scale_[bin_idx] = std if std > 1e-6 else 1.0
+            elif present_vals.size == 1:
+                self.mean_[bin_idx] = present_vals[0]
+                self.scale_[bin_idx] = 1.0
+            else:
+                self.mean_[bin_idx] = 0.0
+                self.scale_[bin_idx] = 1.0
+        return self
+
+    def transform(self, y):
+        return (y - self.mean_) / self.scale_
+
+    def inverse_transform(self, y):
+        return y * self.scale_ + self.mean_
+
+
+class TwoHeadedSonarCNN(nn.Module):
+    def __init__(self, input_shape, profile_steps, conv_filters, kernel_size, pool_size, dropout_rate):
+        super(TwoHeadedSonarCNN, self).__init__()
+
+        self.shared = nn.Sequential(
             nn.Conv1d(in_channels=2, out_channels=conv_filters[0], kernel_size=kernel_size),
             nn.BatchNorm1d(conv_filters[0]),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=pool_size),
-            nn.Dropout(dropout_rate)
-        )
-        
-        self.conv2 = nn.Sequential(
+            nn.Dropout(dropout_rate),
+
             nn.Conv1d(conv_filters[0], conv_filters[1], kernel_size=kernel_size),
             nn.BatchNorm1d(conv_filters[1]),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=pool_size),
-            nn.Dropout(dropout_rate)
-        )
-        
-        self.conv3 = nn.Sequential(
+            nn.Dropout(dropout_rate),
+
             nn.Conv1d(conv_filters[1], conv_filters[2], kernel_size=kernel_size),
             nn.BatchNorm1d(conv_filters[2]),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=pool_size),
-            nn.Dropout(dropout_rate)
-        )
-        
-        # Calculate the size after conv layers
-        self._calculate_flattened_size(input_shape)
-        
-        self.fc = nn.Sequential(
-            nn.Linear(self.flattened_size, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(256, 128),
+        )
+
+        self._calculate_flattened_size(input_shape)
+
+        # Presence logits
+        self.presence_head = nn.Sequential(
+            nn.Linear(self.flattened_size, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(128, output_shape)
+            nn.Linear(128, profile_steps),
         )
-    
+
+        # Distance regression
+        self.distance_head = nn.Sequential(
+            nn.Linear(self.flattened_size, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, profile_steps),
+        )
+
     def _calculate_flattened_size(self, input_shape):
-        """Calculate the flattened size after convolutional layers."""
         with torch.no_grad():
-            # Create a dummy input tensor
             dummy_input = torch.zeros(1, *input_shape)
-            
-            # Pass through conv layers
-            x = self.conv1(dummy_input)
-            x = self.conv2(x)
-            x = self.conv3(x)
-            
-            # Flatten and get size
-            self.flattened_size = x.reshape(x.size(0), -1).shape[1]
-    
+            x = self.shared(dummy_input)
+            self.flattened_size = x.view(x.size(0), -1).shape[1]
+
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = x.reshape(x.size(0), -1)  # Flatten
-        x = self.fc(x)
-        return x
+        features = self.shared(x)
+        features = features.view(features.size(0), -1)
+        presence_logits = self.presence_head(features)
+        distance_scaled = self.distance_head(features)
+        return presence_logits, distance_scaled
 
-def load_training_parameters():
-    """Load training parameters from saved metadata."""
-    params_path = f'{output_dir}/training_params.json'
-    
-    if os.path.exists(params_path):
-        import json
-        with open(params_path, 'r') as f:
-            params = json.load(f)
-        print(f"✅ Loaded training parameters from: {params_path}")
-        return params
-    else:
-        print("⚠️  Training parameters file not found. Using default values.")
-        print(f"   Expected file: {params_path}")
-        print("   Make sure to run training script to generate this file.")
-        # Return default values that should match typical training
-        return {
-            'profile_opening_angle': 30,
-            'profile_steps': 11,
-            'conv_filters': [32, 64, 128],
-            'kernel_size': 5,
-            'pool_size': 2,
-            'dropout_rate': 0.3
-        }
 
-def load_scalers_from_training():
-    """Load scalers from training metadata."""
-    x_scaler_path = f'{output_dir}/x_scaler.joblib'
-    y_scaler_path = f'{output_dir}/y_scaler.joblib'
-    
-    if os.path.exists(x_scaler_path) and os.path.exists(y_scaler_path):
-        x_scaler = joblib.load(x_scaler_path)
-        y_scaler = joblib.load(y_scaler_path)
-        print(f"✅ Loaded scalers from: {output_dir}")
-        return x_scaler, y_scaler
-    else:
-        print("❌ Scaler files not found. Please run training first.")
-        print(f"   Expected files: {x_scaler_path}, {y_scaler_path}")
-        print(f"   Current working directory: {os.getcwd()}")
-        print(f"   Make sure {output_dir}/ directory exists and contains scaler files.")
-        print(f"   Run training script first: python SCRIPT_Sonar2Profiles.py")
-        raise FileNotFoundError("Scaler files not found. Please train the model first.")
+def load_training_artifacts(base_dir, device):
+    params_path = os.path.join(base_dir, 'training_params.json')
+    model_path = os.path.join(base_dir, 'best_model_pytorch.pth')
+    scaler_path = os.path.join(base_dir, 'y_scaler.joblib')
 
-def load_and_preprocess_data(profile_opening_angle, profile_steps):
-    """Load and preprocess sonar data for prediction."""
-    print(f"📡 Loading data for session: {session_to_predict}")
-    
-    # Load data for the specified session
-    dc = DataProcessor.DataCollection([session_to_predict])
-    sonar = dc.load_sonar(flatten=False)
-    profiles, _ = dc.load_profiles(opening_angle=profile_opening_angle, steps=profile_steps)
-    
-    print(f"📊 Sonar data shape: {sonar.shape}")
-    print(f"📊 Profile data shape: {profiles.shape}")
-    
-    # Remove NaN values
-    nan_mask = ~np.isnan(profiles).any(axis=1)
-    sonar = sonar[nan_mask]
-    profiles = profiles[nan_mask]
-    
-    print(f"📊 Clean data shapes - Sonar: {sonar.shape}, Profiles: {profiles.shape}")
-    
-    return sonar, profiles
+    missing = [p for p in [params_path, model_path, scaler_path] if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError(f"Missing training artifacts in '{base_dir}': {missing}")
 
-def preprocess_data(sonar, profiles, x_scaler, y_scaler):
-    """Preprocess data using scalers from training."""
-    print("🧹 Preprocessing data...")
-    
-    # Normalize profile data (target)
-    y_scaled = y_scaler.transform(profiles)
-    
-    # Normalize sonar data (input)
-    # Reshape to (N*200, 2) for scaling, then reshape back
-    original_shape = sonar.shape
-    X_reshaped = sonar.reshape(-1, 2)
-    
-    X_scaled = x_scaler.transform(X_reshaped).reshape(original_shape)
-    
-    # Convert to PyTorch tensors and move to device
-    # PyTorch expects (N, C, L) format for Conv1D
-    X_tensor = torch.FloatTensor(X_scaled).permute(0, 2, 1).to(device)
-    y_tensor = torch.FloatTensor(y_scaled).to(device)
-    
-    # Create dataset and data loader
-    dataset = TensorDataset(X_tensor, y_tensor)
-    data_loader = DataLoader(dataset, batch_size=32, shuffle=False)
-    
-    return data_loader, x_scaler, y_scaler
+    with open(params_path, 'r') as f:
+        params = json.load(f)
 
-def predict_profiles(model, data_loader, y_scaler):
-    """Make predictions using the trained model."""
-    print("📊 Making predictions...")
-    
+    input_shape = tuple(params.get('input_shape', [2, 200]))
+    profile_steps = int(params['profile_steps'])
+    conv_filters = params['conv_filters']
+    kernel_size = int(params['kernel_size'])
+    pool_size = int(params['pool_size'])
+    dropout_rate = float(params['dropout_rate'])
+
+    model = TwoHeadedSonarCNN(
+        input_shape=input_shape,
+        profile_steps=profile_steps,
+        conv_filters=conv_filters,
+        kernel_size=kernel_size,
+        pool_size=pool_size,
+        dropout_rate=dropout_rate,
+    ).to(device)
+
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
-    
-    all_predictions = []
-    all_targets = []
-    
-    with torch.no_grad():
-        for inputs, targets in data_loader:
-            outputs = model(inputs)
-            
-            all_predictions.append(outputs.cpu().numpy())
-            all_targets.append(targets.cpu().numpy())
-    
-    # Concatenate all batches
-    y_pred_scaled = np.concatenate(all_predictions, axis=0)
-    y_test_scaled = np.concatenate(all_targets, axis=0)
-    
-    # Inverse transform to get actual values
-    y_pred = y_scaler.inverse_transform(y_pred_scaled)
-    y_test_actual = y_scaler.inverse_transform(y_test_scaled)
-    
-    return y_pred, y_test_actual
 
-def transform_profiles_to_world(profile_distances, profile_azimuths, rob_x, rob_y, rob_yaw_deg):
-    """Transform profile distances from robot-relative to world coordinates."""
-    # Profile is a 1D array where each element is the distance at a specific azimuth
-    # Transform each (azimuth, distance) pair to world coordinates
-    x_world, y_world = robot2world(profile_azimuths, profile_distances, rob_x, rob_y, rob_yaw_deg)
-    
-    return x_world, y_world
+    y_scaler = joblib.load(scaler_path)
+    return model, y_scaler, params
 
-def create_2d_heatmap_with_indices(predictions, targets, profile_azimuths, rob_x, rob_y, rob_yaw_deg, profile_opening_angle, profile_steps, indices):
-    """Create a clean 2D heatmap from predicted profiles using only specified indices, but covering the full spatial range (no contour lines)."""
-    print("📊 Creating 2D heatmap visualization...")
-    
-    # First, determine the full spatial range by checking all robot positions
-    # This gives us the complete coverage area even though we only plot selected indices
-    all_rob_x = rob_x
-    all_rob_y = rob_y
-    
-    # Calculate full spatial range based on all robot positions
-    # We'll use this to set the heatmap bounds
-    full_x_min, full_x_max = np.min(all_rob_x), np.max(all_rob_x)
-    full_y_min, full_y_max = np.min(all_rob_y), np.max(all_rob_y)
-    
-    # Transform only the selected predicted profiles to world coordinates
-    all_pred_x = []
-    all_pred_y = []
-    
-    for i in indices:
-        try:
-            pred_x, pred_y = transform_profiles_to_world(
-                predictions[i], profile_azimuths, rob_x[i], rob_y[i], rob_yaw_deg[i]
-            )
-            if pred_x is not None and pred_y is not None:
-                # Apply distance filter if enabled
-                if filter_max_distance is not None:
-                    # Calculate distance from robot position
-                    robot_pos = np.array([rob_x[i], rob_y[i]])
-                    profile_points = np.column_stack([pred_x, pred_y])
-                    distances = np.linalg.norm(profile_points - robot_pos, axis=1)
-                    
-                    # Only keep points within max distance
-                    close_mask = distances <= filter_max_distance
-                    pred_x = np.array(pred_x)[close_mask].tolist()
-                    pred_y = np.array(pred_y)[close_mask].tolist()
-                    
-                    if len(pred_x) == 0:
-                        print(f"⚠️  All points filtered out for profile {i} (max distance: {filter_max_distance}mm)")
-                        continue
-                
-                all_pred_x.extend(pred_x)
-                all_pred_y.extend(pred_y)
-        except Exception as e:
-            print(f"⚠️  Error transforming profile {i}: {e}")
-    
-    if len(all_pred_x) == 0 or len(all_pred_y) == 0:
-        print("⚠️  No valid prediction points for heatmap")
+
+def load_session_data(session_name, profile_opening_angle, profile_steps):
+    dc = DataProcessor.DataCollection([session_name])
+    sonar_data = dc.load_sonar(flatten=False)  # shape: (N, 200, 2)
+    profiles_data, profile_centers = dc.load_profiles(
+        opening_angle=profile_opening_angle, steps=profile_steps
+    )
+
+    # Keep only rows with finite sonar/profile values.
+    finite_mask = np.isfinite(sonar_data).all(axis=(1, 2))
+    finite_mask &= np.isfinite(profiles_data).all(axis=1)
+    kept_indices = np.where(finite_mask)[0]
+    sonar_data = sonar_data[finite_mask]
+    profiles_data = profiles_data[finite_mask]
+    profile_centers = profile_centers[finite_mask]
+
+    metadata = {
+        'rob_x': dc.rob_x[finite_mask],
+        'rob_y': dc.rob_y[finite_mask],
+        'rob_yaw_deg': dc.rob_yaw_deg[finite_mask],
+        'quadrants': dc.quadrants[finite_mask],
+        'kept_indices': kept_indices,
+        'total_samples_original': len(finite_mask),
+        'total_samples_used': int(finite_mask.sum()),
+    }
+    return sonar_data, profiles_data, profile_centers, metadata
+
+
+def resolve_plot_indices(n_samples, indices, index_range):
+    selected = []
+    if indices is not None:
+        selected.extend(indices)
+    if index_range is not None:
+        if len(index_range) != 3:
+            raise ValueError("plot_index_range must be (start, stop, step).")
+        start, stop, step = index_range
+        selected.extend(list(range(start, stop, step)))
+
+    if len(selected) == 0:
+        return []
+
+    unique_sorted = sorted(set(int(i) for i in selected))
+    valid = [i for i in unique_sorted if 0 <= i < n_samples]
+    dropped = [i for i in unique_sorted if i < 0 or i >= n_samples]
+    if dropped:
+        print(f"Warning: dropped out-of-range indices: {dropped}")
+    return valid
+
+
+def plot_selected_predictions(
+    session_name,
+    out_dir,
+    selected_indices,
+    metadata,
+    profile_centers_deg,
+    real_distance_mm,
+    pred_distance_mm,
+    pred_presence_bin,
+):
+    if len(selected_indices) == 0:
+        print("No selected indices to plot.")
         return
-    
-    # Convert to numpy arrays and clean data
-    all_pred_x = np.array(all_pred_x)
-    all_pred_y = np.array(all_pred_y)
-    
-    # Remove NaN and Inf values
-    valid_mask = np.isfinite(all_pred_x) & np.isfinite(all_pred_y)
-    clean_x = all_pred_x[valid_mask]
-    clean_y = all_pred_y[valid_mask]
-    
-    if clean_x.size == 0 or clean_y.size == 0:
-        print("⚠️  No valid finite points after cleaning")
-        return
-    
-    # Create 2D histogram for heatmap
-    # Inform about filtering
-    if filter_max_distance is not None:
-        print(f"📊 Distance filter active: max {filter_max_distance}mm from robot center")
-    
-    print(f"📊 Creating heatmap with {len(clean_x)} points from {len(indices)} selected profiles...")
-    print(f"📊 Full spatial coverage: X [{full_x_min:.1f}, {full_x_max:.1f}] mm, Y [{full_y_min:.1f}, {full_y_max:.1f}] mm")
-    print(f"📊 Data points range: X [{np.min(clean_x):.1f}, {np.max(clean_x):.1f}] mm, Y [{np.min(clean_y):.1f}, {np.max(clean_y):.1f}] mm")
-    print(f"📊 Robot positions shown: {len(indices)} selected positions (matching profile indices)")
-    if heatmap_border_expansion > 0:
-        print(f"📊 Heatmap border expansion: {heatmap_border_expansion * 100:.0f}% padding around spatial range")
-    
-    # Use the full spatial range for heatmap bounds, but only plot the selected data points
-    x_min, x_max = full_x_min, full_x_max
-    y_min, y_max = full_y_min, full_y_max
-    
-    # Add configurable padding based on border expansion parameter
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-    x_pad = x_range * heatmap_border_expansion
-    y_pad = y_range * heatmap_border_expansion
-    
-    # Create grid for heatmap
-    x_edges = np.linspace(x_min - x_pad, x_max + x_pad, heatmap_resolution)
-    y_edges = np.linspace(y_min - y_pad, y_max + y_pad, heatmap_resolution)
-    
-    # Create 2D histogram
-    heatmap, x_edges, y_edges = np.histogram2d(clean_x, clean_y, bins=[x_edges, y_edges])
-    heatmap = heatmap.T  # Transpose to match image orientation
-    
-    # Apply Gaussian smoothing if requested
-    if heatmap_smoothing > 0:
-        from scipy.ndimage import gaussian_filter
-        heatmap = gaussian_filter(heatmap, sigma=heatmap_smoothing)
-    
-    # Create figure
-    plt.figure(figsize=(12, 10))
-    
-    # Plot heatmap
-    extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
-    img = plt.imshow(heatmap, extent=extent, origin='lower', 
-                    cmap=heatmap_colormap, alpha=heatmap_alpha)
-    
-    # Add colorbar
-    plt.colorbar(img, label='Point Count')
-    
-    # Plot robot positions for the selected indices only
-    selected_rob_x = [rob_x[i] for i in indices]
-    selected_rob_y = [rob_y[i] for i in indices]
-    plt.scatter(selected_rob_x, selected_rob_y, color='red', s=30, alpha=0.8, label='Robot Positions (Selected Indices)')
-    
 
-    plt.title(f'2D Heatmap: {len(indices)} Selected Profiles over Full Spatial Range ({heatmap_resolution}x{heatmap_resolution} grid, {heatmap_border_expansion*100:.0f}% border)', 
-             fontsize=16)
-    plt.xlabel('X (mm)', fontsize=14)
-    plt.ylabel('Y (mm)', fontsize=14)
+    plot_dir = os.path.join(out_dir, f'prediction_plots_{session_name}')
+    os.makedirs(plot_dir, exist_ok=True)
+
+    rob_x_all = metadata['rob_x']
+    rob_y_all = metadata['rob_y']
+    rob_yaw_all = metadata['rob_yaw_deg']
+
+    for idx in selected_indices:
+        rob_x_i = rob_x_all[idx]
+        rob_y_i = rob_y_all[idx]
+        rob_yaw_i = rob_yaw_all[idx]
+
+        az_deg = profile_centers_deg[idx]
+        true_dist = real_distance_mm[idx]
+        pred_dist = pred_distance_mm[idx].copy()
+        pred_dist[pred_presence_bin[idx] == 0] = np.nan
+
+        true_x_w, true_y_w = DataProcessor.robot2world(az_deg, true_dist, rob_x_i, rob_y_i, rob_yaw_i)
+        pred_x_w, pred_y_w = DataProcessor.robot2world(az_deg, pred_dist, rob_x_i, rob_y_i, rob_yaw_i)
+
+        plt.figure(figsize=(8, 8))
+        plt.plot(rob_x_all, rob_y_all, color='lightgray', linewidth=1.0, label='Robot trajectory')
+        plt.scatter([rob_x_i], [rob_y_i], color='red', s=60, label='Robot position')
+
+        yaw_rad = np.deg2rad(rob_yaw_i)
+        arrow_len = 250.0
+        plt.arrow(
+            rob_x_i,
+            rob_y_i,
+            arrow_len * np.cos(yaw_rad),
+            arrow_len * np.sin(yaw_rad),
+            head_width=60,
+            head_length=80,
+            fc='red',
+            ec='red',
+            alpha=0.8,
+        )
+
+        plt.plot(true_x_w, true_y_w, 'o-', color='tab:blue', markersize=4, linewidth=1.5, label='True profile')
+        plt.plot(pred_x_w, pred_y_w, 'x--', color='tab:orange', markersize=5, linewidth=1.2, label='Pred profile (presence-masked)')
+
+        plt.title(f'{session_name} | index={idx} | yaw={rob_yaw_i:.1f}°')
+        plt.xlabel('X (mm)')
+        plt.ylabel('Y (mm)')
+        plt.axis('equal')
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='best')
+        plt.tight_layout()
+
+        plot_path = os.path.join(plot_dir, f'profile_world_idx_{idx:04d}.png')
+        plt.savefig(plot_path, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"Saved plot: {plot_path}")
+
+
+def plot_overlay_predictions(
+    session_name,
+    out_dir,
+    selected_indices,
+    metadata,
+    profile_centers_deg,
+    real_distance_mm,
+    pred_distance_mm,
+    pred_presence_bin,
+):
+    """Plot all selected indices overlaid in world coordinates with matching colors."""
+    if len(selected_indices) == 0:
+        return
+
+    plot_dir = os.path.join(out_dir, f'prediction_plots_{session_name}')
+    os.makedirs(plot_dir, exist_ok=True)
+
+    rob_x_all = metadata['rob_x']
+    rob_y_all = metadata['rob_y']
+    rob_yaw_all = metadata['rob_yaw_deg']
+
+    # Qualitative colormap with discrete colors.
+    cmap = plt.get_cmap('tab20')
+    n_colors = max(1, len(selected_indices))
+
+    plt.figure(figsize=(10, 10))
+    plt.plot(rob_x_all, rob_y_all, color='lightgray', linewidth=1.0, label='Robot trajectory')
+
+    for k, idx in enumerate(selected_indices):
+        color = cmap(k % 20) if n_colors > 20 else cmap(k / max(1, n_colors - 1))
+
+        rob_x_i = rob_x_all[idx]
+        rob_y_i = rob_y_all[idx]
+        rob_yaw_i = rob_yaw_all[idx]
+
+        az_deg = profile_centers_deg[idx]
+        true_dist = real_distance_mm[idx]
+        pred_dist = pred_distance_mm[idx].copy()
+        pred_dist[pred_presence_bin[idx] == 0] = np.nan
+
+        true_x_w, true_y_w = DataProcessor.robot2world(az_deg, true_dist, rob_x_i, rob_y_i, rob_yaw_i)
+        pred_x_w, pred_y_w = DataProcessor.robot2world(az_deg, pred_dist, rob_x_i, rob_y_i, rob_yaw_i)
+
+        plt.scatter([rob_x_i], [rob_y_i], color=color, s=55)
+        plt.plot(true_x_w, true_y_w, '-', color=color, linewidth=1.8, alpha=0.95)
+        plt.plot(pred_x_w, pred_y_w, '--', color=color, linewidth=1.5, alpha=0.95)
+        plt.text(rob_x_i, rob_y_i, f'{idx}', color=color, fontsize=8)
+
+    # Legend semantics once, colors are index-specific and annotated at robot locations.
+    plt.plot([], [], '-', color='black', linewidth=1.8, label='True profile')
+    plt.plot([], [], '--', color='black', linewidth=1.5, label='Pred profile (presence-masked)')
+
+    plt.title(f'{session_name} | Overlay of Selected Indices ({len(selected_indices)} samples)')
+    plt.xlabel('X (mm)')
+    plt.ylabel('Y (mm)')
     plt.axis('equal')
     plt.grid(True, alpha=0.3)
-    plt.legend()
+    plt.legend(loc='best')
     plt.tight_layout()
-    plt.show()
+
+    overlay_path = os.path.join(plot_dir, 'profile_world_overlay_selected.png')
+    plt.savefig(overlay_path, dpi=220, bbox_inches='tight')
+    plt.close()
+    print(f"Saved overlay plot: {overlay_path}")
+
+
+def predict_profiles(model, y_scaler, sonar_data, batch_size, threshold, device):
+    x_tensor = torch.FloatTensor(sonar_data).permute(0, 2, 1)  # (N, 2, 200)
+    loader = DataLoader(TensorDataset(x_tensor), batch_size=batch_size, shuffle=False, pin_memory=(device.type == 'cuda'))
+
+    all_presence_probs = []
+    all_distance_scaled = []
+
+    with torch.no_grad():
+        for (inputs,) in loader:
+            inputs = inputs.to(device, non_blocking=True)
+            presence_logits, distance_scaled = model(inputs)
+            presence_probs = torch.sigmoid(presence_logits)
+
+            all_presence_probs.append(presence_probs.cpu().numpy())
+            all_distance_scaled.append(distance_scaled.cpu().numpy())
+
+    presence_probs = np.concatenate(all_presence_probs, axis=0)
+    presence_pred = (presence_probs >= threshold).astype(np.uint8)
+    distance_scaled = np.concatenate(all_distance_scaled, axis=0)
+    distance_mm = y_scaler.inverse_transform(distance_scaled)
+
+    # Convenience output: distance masked by predicted presence
+    distance_mm_masked = distance_mm.copy()
+    distance_mm_masked[presence_pred == 0] = np.nan
+
+    return presence_probs, presence_pred, distance_mm, distance_mm_masked
+
 
 def main():
-    """Main prediction pipeline."""
-    print("🚀 Starting profile prediction with 2D heatmap visualization")
-    print(f"   Session: {session_to_predict}")
-    print(f"   Model: {output_dir}/best_model_pytorch.pth")
-    
-    # Load training parameters to ensure consistency
-    training_params = load_training_parameters()
-    
-    # Extract parameters from training (these are NOT configurable in prediction script)
-    profile_opening_angle = training_params['profile_opening_angle']
-    profile_steps = training_params['profile_steps']
-    
-    print(f"📊 Using training parameters:")
-    print(f"   Profile opening angle: {profile_opening_angle}°")
-    print(f"   Profile steps: {profile_steps}")
-    
-    # Load and preprocess data
-    sonar, profiles = load_and_preprocess_data(profile_opening_angle, profile_steps)
-    
-    # Load scalers (must exist from training)
-    x_scaler, y_scaler = load_scalers_from_training()
-    
-    # Preprocess data using training scalers
-    data_loader, _, _ = preprocess_data(sonar, profiles, x_scaler, y_scaler)
-    
-    # Build model with same architecture as training
-    input_shape = (2, 200)  # (channels, time_samples)
-    output_shape = profile_steps  # azimuth bins
-    
-    model = SonarToProfileCNN(input_shape, output_shape, training_params).to(device)
-    print(f"🏗️ Model architecture:")
-    print(f"   Input shape: {input_shape}")
-    print(f"   Output shape: {output_shape}")
-    print(f"   Total parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    
-    # Load trained model
-    model_path = f'{output_dir}/best_model_pytorch.pth'
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path))
-        print(f"✅ Loaded trained model from: {model_path}")
-    else:
-        raise FileNotFoundError(f"Trained model not found at: {model_path}")
-    
-    # Make predictions
-    predictions, targets = predict_profiles(model, data_loader, y_scaler)
-    
-    print("✅ Prediction complete!")
-    print(f"📊 Predictions shape: {predictions.shape}")
-    print(f"📊 Targets shape: {targets.shape}")
-    
-    # Calculate performance metrics
-    mse = np.mean((predictions - targets) ** 2)
-    mae = np.mean(np.abs(predictions - targets))
-    rmse = np.sqrt(mse)
-    
-    print(f"📊 Performance Metrics:")
-    print(f"   MSE: {mse:.4f}")
-    print(f"   RMSE: {rmse:.4f}")
-    print(f"   MAE: {mae:.4f}")
-    
-    # Plot selected indices if requested
-    if plot_indices is not None:
-        print(f"📊 Plotting profiles for indices: {plot_indices}")
-        
-        # Load robot positions for plotting
-        dc = DataProcessor.DataProcessor(session_to_predict)
-        rob_x = dc.rob_x
-        rob_y = dc.rob_y
-        rob_yaw_deg = dc.rob_yaw_deg
-        
-        # Generate azimuth angles for the profile
-        az_min = -0.5 * profile_opening_angle
-        az_max = 0.5 * profile_opening_angle
-        profile_azimuths = np.linspace(az_min, az_max, profile_steps)
-        
-        # Plot all requested indices on a single comprehensive plot
-        if isinstance(plot_indices, list) and len(plot_indices) == 2:
-            start_idx, end_idx = plot_indices
-            plot_indices_range = range(start_idx, min(end_idx, len(predictions)))
-            
-            # Create a single plot with all selected indices
-            plt.figure(figsize=(16, 12))
-            
-            # Plot each profile in the selected range
-            for idx in plot_indices_range:
-                # Transform profiles to world coordinates
-                pred_x, pred_y = transform_profiles_to_world(
-                    predictions[idx], profile_azimuths, rob_x[idx], rob_y[idx], rob_yaw_deg[idx]
-                )
-                real_x, real_y = transform_profiles_to_world(
-                    targets[idx], profile_azimuths, rob_x[idx], rob_y[idx], rob_yaw_deg[idx]
-                )
-                
-                # Apply distance filter to individual profiles if enabled
-                if filter_max_distance is not None:
-                    # Filter predicted points
-                    robot_pos = np.array([rob_x[idx], rob_y[idx]])
-                    pred_points = np.column_stack([pred_x, pred_y])
-                    pred_distances = np.linalg.norm(pred_points - robot_pos, axis=1)
-                    pred_mask = pred_distances <= filter_max_distance
-                    pred_x = np.array(pred_x)[pred_mask].tolist()
-                    pred_y = np.array(pred_y)[pred_mask].tolist()
-                    
-                    # Filter real points
-                    real_points = np.column_stack([real_x, real_y])
-                    real_distances = np.linalg.norm(real_points - robot_pos, axis=1)
-                    real_mask = real_distances <= filter_max_distance
-                    real_x = np.array(real_x)[real_mask].tolist()
-                    real_y = np.array(real_y)[real_mask].tolist()
-                    
-                    if len(pred_x) == 0 or len(real_x) == 0:
-                        print(f"⚠️  Profile {idx} completely filtered out by distance limit")
-                        continue
-                
-                # Plot robot position for this index
-                plt.scatter(rob_x[idx], rob_y[idx], color='black', s=100, label=f'Robot {idx}' if idx == start_idx else '')
-                
-                # Plot orientation arrow
-                dx = 100 * np.cos(np.deg2rad(rob_yaw_deg[idx]))
-                dy = 100 * np.sin(np.deg2rad(rob_yaw_deg[idx]))
-                plt.arrow(rob_x[idx], rob_y[idx], dx, dy, color='red', width=5, 
-                         length_includes_head=True, head_width=20)
-                
-                # Plot predicted and real profiles
-                plt.plot(pred_x, pred_y, 'g-', linewidth=2, alpha=0.7, label='Predicted' if idx == start_idx else '')
-                plt.plot(real_x, real_y, 'b--', linewidth=2, alpha=0.7, label='Real' if idx == start_idx else '')
-                
-                # Add markers for profile points
-                plt.scatter(pred_x, pred_y, color='green', s=40, alpha=0.5)
-                plt.scatter(real_x, real_y, color='blue', s=40, alpha=0.5)
-                
-                # Add index label near robot position
-                plt.text(rob_x[idx], rob_y[idx], f'{idx}', 
-                         fontsize=12, ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.7))
-            
-            plt.title(f'Predicted vs Real Profiles for Indices {start_idx} to {end_idx-1}', fontsize=16)
-            plt.xlabel('X (mm)', fontsize=14)
-            plt.ylabel('Y (mm)', fontsize=14)
-            plt.axis('equal')
-            plt.grid(True, alpha=0.3)
-            
-            # Add legend (only show one entry for each type)
-            handles, labels = plt.gca().get_legend_handles_labels()
-            unique_labels = dict(zip(labels, handles))
-            plt.legend(unique_labels.values(), unique_labels.keys(), fontsize=12)
-            
-            plt.tight_layout()
-            plt.show()
-        else:
-            print(f"⚠️  Invalid plot_indices format. Expected [start, end], got {plot_indices}")
-            print("   Example: plot_indices = [0, 5]  # Plot indices 0 through 4")
-    
-    # Create 2D heatmap visualization
-    if create_heatmap:
-        # Determine which indices to use for heatmap (same as plotted profiles)
-        if plot_indices is not None and isinstance(plot_indices, list) and len(plot_indices) == 2:
-            start_idx, end_idx = plot_indices
-            heatmap_indices = range(start_idx, min(end_idx, len(predictions)))
-            print(f"📊 Creating heatmap using predicted profiles for indices: {start_idx} to {min(end_idx, len(predictions))-1}")
-        else:
-            # If plot_indices is not properly configured, use all data
-            heatmap_indices = range(len(predictions))
-            print(f"📊 Creating heatmap using all predicted profiles (0 to {len(predictions)-1})")
-        
-        # Load robot positions for heatmap
-        dc = DataProcessor.DataProcessor(session_to_predict)
-        rob_x = dc.rob_x
-        rob_y = dc.rob_y
-        rob_yaw_deg = dc.rob_yaw_deg
-        
-        # Generate azimuth angles for the profile
-        az_min = -0.5 * profile_opening_angle
-        az_max = 0.5 * profile_opening_angle
-        profile_azimuths = np.linspace(az_min, az_max, profile_steps)
-        
-        # Create heatmap using only the selected indices
-        create_2d_heatmap_with_indices(predictions, targets, profile_azimuths, rob_x, rob_y, rob_yaw_deg, 
-                                      profile_opening_angle, profile_steps, heatmap_indices)
-    else:
-        print("📊 Skipping heatmap visualization (disabled in configuration)")
-    
-    return predictions, targets
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    os.makedirs(prediction_output_dir, exist_ok=True)
+    print(f"Loading training artifacts from: {training_output_dir}")
 
-if __name__ == "__main__":
-    predictions, targets = main()
+    model, y_scaler, params = load_training_artifacts(training_output_dir, device)
+    print("Loaded model + scaler artifacts.")
+
+    print(f"Loading session data: {session_to_predict}")
+    sonar_data, real_profiles_mm, profile_centers_deg, metadata = load_session_data(
+        session_to_predict,
+        profile_opening_angle=float(params['profile_opening_angle']),
+        profile_steps=int(params['profile_steps']),
+    )
+    print(f"Sonar shape used for prediction: {sonar_data.shape}")
+    
+    # Match training target visibility: hide real points beyond training distance threshold.
+    distance_threshold = float(params.get('distance_threshold', np.inf))
+    real_profiles_mm_clipped = real_profiles_mm.copy()
+    out_of_range_mask = (real_profiles_mm_clipped < 0) | (real_profiles_mm_clipped > distance_threshold)
+    real_profiles_mm_clipped[out_of_range_mask] = np.nan
+
+    if sonar_data.shape[0] == 0:
+        raise ValueError("No valid sonar samples found for prediction.")
+
+    # Use training-selected threshold unless user overrides it.
+    presence_threshold = (
+        float(params.get('presence_threshold', 0.5))
+        if presence_threshold_override is None
+        else float(presence_threshold_override)
+    )
+    print(f"Using presence threshold: {presence_threshold:.2f}")
+
+    print("Running predictions...")
+    presence_probs, presence_pred, distance_mm, distance_mm_masked = predict_profiles(
+        model=model,
+        y_scaler=y_scaler,
+        sonar_data=sonar_data,
+        batch_size=prediction_batch_size,
+        threshold=presence_threshold,
+        device=device,
+    )
+
+    out_npz = os.path.join(prediction_output_dir, f'predictions_{session_to_predict}.npz')
+    np.savez_compressed(
+        out_npz,
+        session=session_to_predict,
+        presence_threshold=presence_threshold,
+        profile_steps=params['profile_steps'],
+        profile_opening_angle=params['profile_opening_angle'],
+        presence_probs=presence_probs,
+        presence_pred=presence_pred,
+        distance_mm=distance_mm,
+        distance_mm_masked=distance_mm_masked,
+        rob_x=metadata['rob_x'],
+        rob_y=metadata['rob_y'],
+        rob_yaw_deg=metadata['rob_yaw_deg'],
+        quadrants=metadata['quadrants'],
+        kept_indices=metadata['kept_indices'],
+    )
+
+    # Lightweight metadata summary
+    summary = {
+        'session': session_to_predict,
+        'training_output_dir': training_output_dir,
+        'prediction_output_dir': prediction_output_dir,
+        'prediction_file': out_npz,
+        'samples_original': metadata['total_samples_original'],
+        'samples_used': metadata['total_samples_used'],
+        'profile_steps': int(params['profile_steps']),
+        'profile_opening_angle': float(params['profile_opening_angle']),
+        'presence_threshold': float(presence_threshold),
+        'distance_range_mm': [float(np.nanmin(distance_mm)), float(np.nanmax(distance_mm))],
+        'mean_presence_probability': float(np.mean(presence_probs)),
+        'predicted_presence_fraction': float(np.mean(presence_pred)),
+    }
+    summary_path = os.path.join(prediction_output_dir, f'predictions_{session_to_predict}_summary.json')
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+
+    if save_plots:
+        selected_indices = resolve_plot_indices(
+            n_samples=sonar_data.shape[0],
+            indices=plot_indices,
+            index_range=plot_index_range,
+        )
+        plot_selected_predictions(
+            session_name=session_to_predict,
+            out_dir=prediction_output_dir,
+            selected_indices=selected_indices,
+            metadata=metadata,
+            profile_centers_deg=profile_centers_deg,
+            real_distance_mm=real_profiles_mm_clipped,
+            pred_distance_mm=distance_mm,
+            pred_presence_bin=presence_pred,
+        )
+        if save_overlay_plot:
+            plot_overlay_predictions(
+                session_name=session_to_predict,
+                out_dir=prediction_output_dir,
+                selected_indices=selected_indices,
+                metadata=metadata,
+                profile_centers_deg=profile_centers_deg,
+                real_distance_mm=real_profiles_mm_clipped,
+                pred_distance_mm=distance_mm,
+                pred_presence_bin=presence_pred,
+            )
+
+    print(f"Saved predictions to: {out_npz}")
+    print(f"Saved summary to: {summary_path}")
+
+
+if __name__ == '__main__':
+    main()

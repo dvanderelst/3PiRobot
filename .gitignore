@@ -8,7 +8,8 @@ Control_code/Library/RobotCalibration/
 Control_code/TestScripts
 Control_code/Plots/
 Control_code/Data/
-
+Control_code/Prediction/
+Control_code/Training/
 ############## Robot code sub repo
 robot_code/.Trash-1000/
 robot_code/System Volume Information/

@@ -749,6 +749,28 @@ class DataCollection:
             Array of robot yaw orientations in degrees
         """
         return np.concatenate([p.rob_yaw_deg for p in self.processors], axis=0)
+    
+    @property
+    def quadrants(self):
+        """
+        Get concatenated spatial quadrants from all sessions.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Array of quadrant indices (0-3) for each data point
+            
+        Raises
+        ------
+        ValueError
+            If quadrants not available in all processors
+        """
+        # Check if all processors have quadrants
+        for processor in self.processors:
+            if not hasattr(processor, 'quadrants') or processor.quadrants is None:
+                raise ValueError("Quadrants not available in all processors")
+        
+        return np.concatenate([p.quadrants for p in self.processors], axis=0)
 
     def save_cache(self):
         """
@@ -859,6 +881,9 @@ class DataProcessor:
         self.rob_y = self.positions.rob_y
         self.rob_yaw_deg = self.positions.rob_yaw_deg
         self.missing = self.positions.missing
+        
+        # Calculate spatial quadrants based on mean x and y positions
+        self._calculate_spatial_quadrants()
         
         # Clear cache if force_recompute is True and caching is enabled
         if self.force_recompute and self.cache_dir:
@@ -2222,6 +2247,51 @@ class DataProcessor:
         selected_y = self.rob_y[index]
         selected_yaw_deg = self.rob_yaw_deg[index]
         return selected_x, selected_y, selected_yaw_deg
+    
+    def _calculate_spatial_quadrants(self):
+        """
+        Calculate spatial quadrants for all robot positions.
+        
+        Divides the arena into 4 quadrants based on mean x and y positions:
+        - Quadrant 0: x ≤ mean_x AND y ≤ mean_y (bottom-left)
+        - Quadrant 1: x > mean_x AND y ≤ mean_y (bottom-right)
+        - Quadrant 2: x > mean_x AND y > mean_y (top-right)
+        - Quadrant 3: x ≤ mean_x AND y > mean_y (top-left)
+        
+        Results are stored in self.quadrants as a numpy array of integers.
+        """
+        # Calculate mean positions to determine quadrant boundaries
+        mean_x = np.mean(self.rob_x)
+        mean_y = np.mean(self.rob_y)
+        
+        # Initialize quadrants array
+        quadrants = np.zeros(self.n, dtype=int)
+        
+        # Assign quadrants based on position relative to means
+        # Quadrant 0: x ≤ mean_x AND y ≤ mean_y (bottom-left)
+        mask_q0 = (self.rob_x <= mean_x) & (self.rob_y <= mean_y)
+        quadrants[mask_q0] = 0
+        
+        # Quadrant 1: x > mean_x AND y ≤ mean_y (bottom-right)
+        mask_q1 = (self.rob_x > mean_x) & (self.rob_y <= mean_y)
+        quadrants[mask_q1] = 1
+        
+        # Quadrant 2: x > mean_x AND y > mean_y (top-right)
+        mask_q2 = (self.rob_x > mean_x) & (self.rob_y > mean_y)
+        quadrants[mask_q2] = 2
+        
+        # Quadrant 3: x ≤ mean_x AND y > mean_y (top-left)
+        mask_q3 = (self.rob_x <= mean_x) & (self.rob_y > mean_y)
+        quadrants[mask_q3] = 3
+        
+        self.quadrants = quadrants
+        self.mean_x = mean_x
+        self.mean_y = mean_y
+        
+        print(f"🗺️  Spatial quadrants calculated:")
+        print(f"   Mean X: {mean_x:.1f} mm, Mean Y: {mean_y:.1f} mm")
+        print(f"   Quadrant distribution: Q0={np.sum(quadrants==0)}, Q1={np.sum(quadrants==1)}, "
+              f"Q2={np.sum(quadrants==2)}, Q3={np.sum(quadrants==3)}")
 
 
 
