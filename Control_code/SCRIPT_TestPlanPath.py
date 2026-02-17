@@ -150,6 +150,25 @@ def safe_corrcoef(x, y):
     return float(np.corrcoef(x, y)[0, 1])
 
 
+def safe_spearman(x, y):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y)
+    if np.sum(valid) < 2:
+        return np.nan
+    x = x[valid]
+    y = y[valid]
+
+    # Rank transform (simple stable ranks; adequate here).
+    rx = np.empty_like(x, dtype=float)
+    ry = np.empty_like(y, dtype=float)
+    rx[np.argsort(x, kind='mergesort')] = np.arange(len(x), dtype=float)
+    ry[np.argsort(y, kind='mergesort')] = np.arange(len(y), dtype=float)
+    if np.std(rx) < 1e-12 or np.std(ry) < 1e-12:
+        return np.nan
+    return float(np.corrcoef(rx, ry)[0, 1])
+
+
 def make_iid_distance_comparison_plots(rows, out_dir):
     if len(rows) == 0:
         return []
@@ -176,11 +195,23 @@ def make_iid_distance_comparison_plots(rows, out_dir):
     saved.append(p1)
 
     # Magnitude relation: |kappa| vs last sonar distance.
+    pearson_abs = safe_corrcoef(np.abs(kappa), dist_last)
+    spearman_abs = safe_spearman(np.abs(kappa), dist_last)
     plt.figure(figsize=(6, 6))
     plt.scatter(dist_last, np.abs(kappa), s=22, alpha=0.85)
     plt.xlabel('Last Sonar Distance in Window')
     plt.ylabel('|Signed Curvature| (1/mm)')
     plt.title('|Curvature| vs Last Sonar Distance')
+    plt.text(
+        0.03,
+        0.97,
+        f'Pearson r = {pearson_abs:.3f}\\nSpearman ρ = {spearman_abs:.3f}',
+        transform=plt.gca().transAxes,
+        va='top',
+        ha='left',
+        fontsize=10,
+        bbox=dict(facecolor='white', alpha=0.75, edgecolor='none')
+    )
     plt.grid(True, alpha=0.25)
     plt.tight_layout()
     p2 = os.path.join(out_dir, 'comparison_abs_curvature_vs_last_distance.png')
@@ -384,6 +415,7 @@ def main():
             'sign_agreement_fraction': sign_agreement,
             'corr_curvature_vs_iid_avg': safe_corrcoef(kappa, iid_avg),
             'corr_abs_curvature_vs_last_distance': safe_corrcoef(np.abs(kappa), dist_last),
+            'spearman_abs_curvature_vs_last_distance': safe_spearman(np.abs(kappa), dist_last),
             'corr_curvature_vs_last_distance': safe_corrcoef(kappa, dist_last),
         }
         comparison_plots = make_iid_distance_comparison_plots(rows, output_dir)
