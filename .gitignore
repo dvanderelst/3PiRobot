@@ -20,3 +20,5 @@ Updater/staging/
 Control_code/cache/
 
 Control_code/Training/
+
+*.zip

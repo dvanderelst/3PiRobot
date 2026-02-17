@@ -24,7 +24,7 @@ from Library import DataProcessor
 # ============================================
 # PREDICTION CONFIGURATION
 # ============================================
-session_to_predict = 'sessionB03'  # Session to predict profiles for
+session_to_predict = 'sessionB05'  # Session to predict profiles for
 training_output_dir = 'Training'   # Directory containing trained model artifacts
 prediction_output_dir = 'Prediction'  # Directory for prediction outputs
 prediction_batch_size = 256
