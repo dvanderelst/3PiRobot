@@ -26,18 +26,18 @@
 sessions = ['sessionB01', 'sessionB02', 'sessionB03', 'sessionB04', 'sessionB05']
 
 # Spatial Splitting Configuration
-train_quadrants = [0, 1, 2]    # Quadrants to train on
-test_quadrant = 3             # Quadrant to test on
+train_quadrants = [0, 1, 2, 3]    # Quadrants to train on
+test_quadrant = 0             # Quadrant to test on
 
 # Profile Parameters
-profile_opening_angle = 45   # degrees
+profile_opening_angle = 60   # degrees
 profile_steps = 11            # number of azimuth bins
 
 # Distance Threshold
 distance_threshold = 1500.0  # mm, maximum distance for prediction
 
 # Training Configuration
-validation_split = 0.2       # 16% validation from training (64-16-20 split)
+validation_split = 0.3
 batch_size = 32
 epochs = 100                  # Reduced for testing
 patience = 10                 # early stopping patience
