@@ -58,6 +58,10 @@ save_robot_frame_chunk_heatmap_series = True
 robot_chunk_series_subdir = 'heatmap_series_robot'
 robot_frame_extent_mm = 2500.0
 robot_frame_grid_mm = 20.0
+# Fixed color scale for left panel in robot-frame series plots.
+# Set either value to None to fall back to matplotlib auto-scaling.
+robot_frame_heatmap_vmin = 0.0
+robot_frame_heatmap_vmax = 1.0
 
 
 def reset_prediction_output_dir(path):
@@ -647,6 +651,8 @@ def create_robot_frame_chunk_heatmap_series(
     grid_mm=20.0,
     sigma_perp_mm=40.0,
     sigma_para_mm=120.0,
+    heatmap_vmin=0.0,
+    heatmap_vmax=1.0,
 ):
     """Generate sliding-window integrated heatmaps in robot coordinates."""
     if chunk_size < 1:
@@ -769,7 +775,9 @@ def create_robot_frame_chunk_heatmap_series(
             origin='lower',
             extent=[x_min, x_max, y_min, y_max],
             cmap='magma',
-            aspect='equal'
+            aspect='equal',
+            vmin=heatmap_vmin,
+            vmax=heatmap_vmax,
         )
         fig.colorbar(im, ax=axes[0], label='Integrated Evidence (a.u.)')
         axes[0].scatter([0], [0], c='cyan', s=50, label='Anchor robot')
@@ -1056,6 +1064,8 @@ def main():
                 grid_mm=robot_frame_grid_mm,
                 sigma_perp_mm=integration_sigma_perp_mm,
                 sigma_para_mm=integration_sigma_para_mm,
+                heatmap_vmin=robot_frame_heatmap_vmin,
+                heatmap_vmax=robot_frame_heatmap_vmax,
             )
 
     print(f"Saved predictions to: {out_npz}")

@@ -23,7 +23,7 @@
 # ============================================
 
 # Data Configuration
-sessions = ['sessionB01', 'sessionB02', 'sessionB03', 'sessionB04', 'sessionB05']
+sessions = ['sessionB01', 'sessionB02', 'sessionB03', 'sessionB04']
 
 # Spatial Splitting Configuration
 train_quadrants = [0, 1, 2, 3]    # Quadrants to train on
