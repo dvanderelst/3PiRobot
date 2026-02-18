@@ -16,11 +16,13 @@ from Library.SteeringConfigClass import SteeringConfig
 # CONFIGURATION
 # ============================================
 robot_number = 1
-session = 'sessionB05'
+session = 'testing'
 
 selection_mode = 'first'
 do_plot = True
 training_output_dir = 'Training'
+num_steps = 10
+inter_step_sleep_s = 0.5
 
 # Curvature pipeline settings.
 window_size = Settings.occupancy_config.window_size
@@ -65,7 +67,7 @@ print(
 
 
 # ============================================
-# CLIENT WARMUP + FIRST SONAR COLLECTION (stub end)
+# CLIENT WARMUP + SONAR COLLECTION LOOP (robot stays in place)
 # ============================================
 for _ in range(5):
     client.acquire('ping')
@@ -74,37 +76,45 @@ for _ in range(5):
 PushOver.send(f'UseCurvature started: {session}')
 control.wait_if_paused()
 
-sonar_package = client.read_and_process(do_ping=True, plot=do_plot, selection_mode=selection_mode)
-position = tracker.get_position(robot_number)
+for step in range(num_steps):
+    sonar_package = client.read_and_process(do_ping=True, plot=do_plot, selection_mode=selection_mode)
+    position = tracker.get_position(robot_number)
 
-if sonar_package is None:
-    print('No sonar data received.')
-    writer.save_data(sonar_package=None, position=position, motion={'distance': 0.0, 'rotation': 0.0})
-else:
-    estimate = estimator.update_from_package(sonar_package=sonar_package, pose=position)
-    signed_curvature = estimate['signed_curvature_inv_mm']
-    if estimate['ready']:
-        planner = estimate['planner']
-        print(
-            f"curvature={signed_curvature:+.6f} 1/mm | "
-            f"side={planner['chosen_side']} | "
-            f"R_left={planner['left_radius_mm']} mm, R_right={planner['right_radius_mm']} mm"
-        )
+    if sonar_package is None:
+        print(f'[{step + 1}/{num_steps}] No sonar data received.')
+        writer.save_data(sonar_package=None, position=position, motion={'distance': 0.0, 'rotation': 0.0})
     else:
-        print(f"curvature unavailable ({estimate['window_samples_used']}/{estimate['window_size_config']} samples).")
+        estimate = estimator.update_from_package(sonar_package=sonar_package, pose=position, plot=do_plot)
+        signed_curvature = estimate['signed_curvature_inv_mm']
+        if estimate['ready']:
+            planner = estimate['planner']
+            print(
+                f"[{step + 1}/{num_steps}] "
+                f"curvature={signed_curvature:+.6f} 1/mm | "
+                f"side={planner['chosen_side']} | "
+                f"R_left={planner['left_radius_mm']} mm, R_right={planner['right_radius_mm']} mm"
+            )
+        else:
+            print(
+                f"[{step + 1}/{num_steps}] "
+                f"curvature unavailable ({estimate['window_samples_used']}/{estimate['window_size_config']} samples)."
+            )
 
-    # Persist one sample so this stub run is traceable in Data/session.
-    writer.save_data(
-        sonar_package=sonar_package,
-        position=position,
-        motion={'distance': 0.0, 'rotation': 0.0},
-        steering={
-            'signed_curvature_inv_mm': signed_curvature,
-            'window_samples_used': int(estimate['window_samples_used']),
-            'window_size_config': int(estimate['window_size_config']),
-            'partial_window_startup': bool(allow_partial_window_startup),
-        },
-    )
+        writer.save_data(
+            sonar_package=sonar_package,
+            position=position,
+            motion={'distance': 0.0, 'rotation': 0.0},
+            steering={
+                'signed_curvature_inv_mm': signed_curvature,
+                'window_samples_used': int(estimate['window_samples_used']),
+                'window_size_config': int(estimate['window_size_config']),
+                'partial_window_startup': bool(allow_partial_window_startup),
+                'step_index': int(step),
+            },
+        )
 
-print('Stub complete. Next step: convert rolling window -> predicted profiles -> occupancy -> curvature.')
-PushOver.send(f'UseCurvature stub complete: {session}')
+    if inter_step_sleep_s > 0:
+        time.sleep(inter_step_sleep_s)
+
+print('Loop complete. Next step: convert rolling window -> predicted profiles -> occupancy -> curvature.')
+PushOver.send(f'UseCurvature loop complete: {session}')

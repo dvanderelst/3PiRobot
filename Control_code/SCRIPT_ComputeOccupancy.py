@@ -44,6 +44,7 @@ sigma_para_mm = Settings.occupancy_config.sigma_para_mm    # Segment evidence so
 # Model inference settings.
 prediction_batch_size = 256
 presence_threshold_override = None  # If None, use training params threshold.
+real_distance_cutoff_override_mm = None  # If None, use training distance_threshold when available.
 
 # Parallel compute settings.
 parallel_workers = 8
@@ -226,7 +227,7 @@ This folder contains precomputed robot-frame occupancy evidence for sliding wind
     print(f'Saved readme: {readme_path}')
 
 
-def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_series):
+def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_series, wall_x_world, wall_y_world):
     if len(selected_series) == 0:
         print('No series indices selected for plotting.')
         return
@@ -259,6 +260,15 @@ def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_seri
         anchor_y = float(rob_y_all[anchor_idx])
         anchor_yaw = float(rob_yaw_all[anchor_idx])
 
+        # Transform environment walls to robot frame of current anchor pose.
+        wall_x_rel, wall_y_rel = DataProcessor.world2robot(
+            wall_x_world, wall_y_world, anchor_x, anchor_y, anchor_yaw
+        )
+        in_grid = (
+            (wall_x_rel >= x_min) & (wall_x_rel <= x_max) &
+            (wall_y_rel >= y_min) & (wall_y_rel <= y_max)
+        )
+
         fig, axes = plt.subplots(1, 3, figsize=(19, 6))
         im = axes[0].imshow(
             hm_pred,
@@ -270,6 +280,10 @@ def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_seri
             vmax=plot_heatmap_vmax,
         )
         fig.colorbar(im, ax=axes[0], label='Pred Occupancy')
+        axes[0].scatter(
+            wall_x_rel[in_grid], wall_y_rel[in_grid],
+            c='lime', s=1, alpha=0.25, linewidths=0, label='Env walls (in-grid)'
+        )
         axes[0].scatter([0], [0], c='cyan', s=50, label='Anchor robot')
         axes[0].arrow(0, 0, 250, 0, head_width=70, head_length=90, fc='cyan', ec='cyan', alpha=0.9)
         axes[0].set_title(f'Pred Occupancy\nseries_idx={sidx}, anchor={anchor_idx}')
@@ -288,6 +302,10 @@ def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_seri
             vmax=plot_heatmap_vmax,
         )
         fig.colorbar(im2, ax=axes[1], label='Real Occupancy')
+        axes[1].scatter(
+            wall_x_rel[in_grid], wall_y_rel[in_grid],
+            c='lime', s=1, alpha=0.25, linewidths=0, label='Env walls (in-grid)'
+        )
         axes[1].scatter([0], [0], c='cyan', s=50, label='Anchor robot')
         axes[1].arrow(0, 0, 250, 0, head_width=70, head_length=90, fc='cyan', ec='cyan', alpha=0.9)
         axes[1].set_title('Real-Profile Occupancy')
@@ -296,6 +314,10 @@ def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_seri
         axes[1].grid(True, alpha=0.25)
         axes[1].legend(loc='upper right')
 
+        axes[2].scatter(
+            wall_x_world, wall_y_world,
+            c='lime', s=1, alpha=0.25, linewidths=0, label='Environment walls'
+        )
         axes[2].plot(rob_x_all, rob_y_all, color='lightgray', linewidth=1.0, label='Full trajectory')
         axes[2].scatter(rob_x_all[indices], rob_y_all[indices], c='tab:blue', s=28, label='Chunk poses')
         yaw_r = np.deg2rad(rob_yaw_all[indices])
@@ -345,11 +367,20 @@ def main():
     threshold = float(params.get('presence_threshold', 0.5))
     if presence_threshold_override is not None:
         threshold = float(presence_threshold_override)
+    real_distance_cutoff_mm = params.get('distance_threshold', None)
+    if real_distance_cutoff_override_mm is not None:
+        real_distance_cutoff_mm = float(real_distance_cutoff_override_mm)
+    elif real_distance_cutoff_mm is not None:
+        real_distance_cutoff_mm = float(real_distance_cutoff_mm)
 
     sonar_data, real_distance_mm, profile_centers_deg, metadata = load_session_data(
         session_to_compute, profile_opening_angle, profile_steps
     )
     print(f'Loaded session {session_to_compute}: {len(sonar_data)} filtered samples')
+    processor = DataProcessor.DataProcessor(session_to_compute)
+    _ = processor.load_profiles(opening_angle=profile_opening_angle, steps=profile_steps)
+    wall_x_world = np.asarray(processor.wall_x, dtype=np.float32)
+    wall_y_world = np.asarray(processor.wall_y, dtype=np.float32)
 
     pred_presence_probs, pred_presence_bin, pred_distance_mm, _ = predict_profiles(
         model=model,
@@ -387,12 +418,23 @@ def main():
     )
     print('Phase 1/2 done: predicted-profile occupancy.', flush=True)
 
-    real_presence_bin = np.isfinite(real_distance_mm).astype(np.uint8)
+    real_distance_mm_filtered = real_distance_mm.copy()
+    if real_distance_cutoff_mm is not None:
+        real_distance_mm_filtered[real_distance_mm_filtered > float(real_distance_cutoff_mm)] = np.nan
+        print(
+            f'Applying real-profile distance cutoff: {float(real_distance_cutoff_mm):.1f} mm '
+            f'(from training params unless overridden).',
+            flush=True,
+        )
+    else:
+        print('No real-profile distance cutoff found; using finite-mask only.', flush=True)
+
+    real_presence_bin = np.isfinite(real_distance_mm_filtered).astype(np.uint8)
     real_presence_probs = real_presence_bin.astype(np.float32)
     print('Phase 2/2: real-profile occupancy...', flush=True)
     results_real = compute_occupancy_for_windows(
         profile_centers_deg=profile_centers_deg,
-        distance_mm=real_distance_mm,
+        distance_mm=real_distance_mm_filtered,
         presence_bin=real_presence_bin,
         presence_probs=real_presence_probs,
         metadata=metadata,
@@ -424,6 +466,7 @@ def main():
         'sigma_perp_mm': float(sigma_perp_mm),
         'sigma_para_mm': float(sigma_para_mm),
         'presence_threshold_used': float(threshold),
+        'real_profile_distance_cutoff_mm': None if real_distance_cutoff_mm is None else float(real_distance_cutoff_mm),
         'parallel_workers': int(parallel_workers),
         'output_npz': out_npz,
     }
@@ -440,6 +483,8 @@ def main():
             plot_dir=plot_dir,
             metadata=metadata,
             selected_series=selected,
+            wall_x_world=wall_x_world,
+            wall_y_world=wall_y_world,
         )
 
 

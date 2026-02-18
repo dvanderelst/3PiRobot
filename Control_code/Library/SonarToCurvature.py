@@ -71,7 +71,7 @@ class SonarToCurvature:
         self.sonar_window.clear()
         self.pose_window.clear()
 
-    def update(self, sonar_lr, pose):
+    def update(self, sonar_lr, pose, plot=False):
         self.sonar_window.append(np.asarray(sonar_lr, dtype=np.float32))
         self.pose_window.append(self._pose_to_xyz(pose))
 
@@ -127,6 +127,8 @@ class SonarToCurvature:
             config=self.steering_config,
         )
         signed_curvature = float(planner_to_curvature(planner))
+        if plot:
+            self._plot_estimate(hm_norm, planner, pose=pose)
         return {
             'ready': True,
             'signed_curvature_inv_mm': signed_curvature,
@@ -136,6 +138,59 @@ class SonarToCurvature:
             'occupancy': hm_norm,
         }
 
-    def update_from_package(self, sonar_package, pose):
+    def update_from_package(self, sonar_package, pose, plot=False):
         sonar_lr = self.extract_sonar_lr(sonar_package)
-        return self.update(sonar_lr=sonar_lr, pose=pose)
+        return self.update(sonar_lr=sonar_lr, pose=pose, plot=plot)
+
+    def _plot_estimate(self, hm_norm, planner, pose=None):
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        extent = [
+            float(self.x_grid.min()),
+            float(self.x_grid.max()),
+            float(self.y_grid.min()),
+            float(self.y_grid.max()),
+        ]
+        plt.figure(figsize=(6, 6))
+        plt.imshow(hm_norm, origin='lower', extent=extent, vmin=0.0, vmax=1.0, cmap='magma', aspect='equal')
+
+        # Robot-centric marker: always at origin with heading arrow.
+        x0, y0 = 0.0, 0.0
+        plt.plot([x0], [y0], marker='o', color='white', markersize=6, zorder=5)
+        plt.arrow(
+            x0,
+            y0,
+            250.0,
+            0.0,
+            width=6.0,
+            head_width=25.0,
+            head_length=25.0,
+            color='white',
+            zorder=5,
+        )
+
+        # Circle planner overlays.
+        left_x = planner.get('left_x', None)
+        left_y = planner.get('left_y', None)
+        right_x = planner.get('right_x', None)
+        right_y = planner.get('right_y', None)
+        chosen = str(planner.get('chosen_side', 'straight'))
+
+        def _plot_arc(x, y, chosen_side, side_name, color):
+            if x is None or y is None or len(x) == 0:
+                return
+            is_chosen = chosen_side.startswith(side_name)
+            ls = '-' if is_chosen else '--'
+            lw = 2.5 if is_chosen else 1.5
+            plt.plot(x, y, ls=ls, lw=lw, color=color, alpha=0.9)
+
+        _plot_arc(left_x, left_y, chosen, 'left', color='cyan')
+        _plot_arc(right_x, right_y, chosen, 'right', color='lime')
+
+        plt.title('Occupancy + Planner')
+        plt.xlabel('X (mm)')
+        plt.ylabel('Y (mm)')
+        plt.colorbar(label='Occupancy')
+        plt.tight_layout()
+        plt.show()
