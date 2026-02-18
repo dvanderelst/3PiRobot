@@ -1457,7 +1457,7 @@ class DataProcessor:
 
         cfg = steering_config
         if cfg is None:
-            from Library.SonarWallSteering import SteeringConfig
+            from Library.SteeringConfigClass import SteeringConfig
             cfg = SteeringConfig()
 
         # Try cache.

@@ -103,6 +103,59 @@ def save_plot(filename):
         plt.savefig(svg_filename, bbox_inches='tight', facecolor='white')
         print(f"💾 Saved both formats for: {output_dir}/{filename}")
 
+
+def write_training_readme():
+    """Write a short artifact guide to the training output folder."""
+    readme_path = f"{output_dir}/README.md"
+    txt = f"""# Training Output
+
+This folder contains artifacts from `SCRIPT_TrainProfiles.py` (two-headed sonar->profile model).
+
+## Core Artifacts
+
+- `best_model_pytorch.pth`
+  Best model checkpoint selected by validation loss (PyTorch `state_dict`).
+- `training_params.json`
+  Training and model parameters needed for inference.
+- `y_scaler.joblib`
+  Per-bin distance scaler used to normalize/inverse-transform distance predictions.
+
+## Evaluation Tables
+
+- `presence_confusion_test_set.csv`
+  TP/FP/TN/FN and derived metrics per azimuth bin on test set.
+- `presence_confusion_training_set.csv`
+  TP/FP/TN/FN and derived metrics per azimuth bin on training set.
+
+## Plots
+
+Saved in the configured plot format (`{plot_format}`):
+
+- `training_curves.*`
+  Train/validation loss trajectories.
+- `bin_scatter_plots_test_set.*`
+  Distance prediction scatter plots by azimuth bin (test set).
+- `bin_scatter_plots_training_set.*`
+  Distance prediction scatter plots by azimuth bin (training set).
+- `presence_confusion_test_set.*`
+  Presence confusion visualization (test set).
+- `presence_confusion_training_set.*`
+  Presence confusion visualization (training set).
+- `test_samples.*`
+  Example per-sample prediction plots.
+- `spatial_errors.*`
+  Spatial map of test error.
+
+## Notes
+
+- Distances are clipped to `distance_threshold` during target construction.
+- Presence threshold used for inference/evaluation is stored in `training_params.json`.
+- Output indices and splits are based on the filtered dataset used during training.
+"""
+    with open(readme_path, 'w') as f:
+        f.write(txt)
+    print(f"💾 Saved training readme: {readme_path}")
+
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"🔥 Using device: {device}")
@@ -785,6 +838,7 @@ def main():
     # Save scaler
     joblib.dump(y_scaler, f'{output_dir}/y_scaler.joblib')
     print(f"💾 Saved distance scaler to: {output_dir}/y_scaler.joblib")
+    write_training_readme()
         
     # Optional debug output
     if debug:

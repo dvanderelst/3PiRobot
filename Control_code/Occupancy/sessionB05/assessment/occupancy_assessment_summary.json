@@ -1,0 +1,33 @@
+{
+  "session": "sessionB05",
+  "occupancy_npz": "Occupancy/sessionB05/sessionB05_occupancy_series_data.npz",
+  "assessment_dir": "Occupancy/sessionB05/assessment",
+  "plots": {
+    "pred_vs_real_curvature_scatter": "Occupancy/sessionB05/assessment/curvature_pred_vs_real_scatter.png",
+    "curvature_vs_iid": "Occupancy/sessionB05/assessment/curvature_vs_iid.png",
+    "abs_curvature_vs_distance": "Occupancy/sessionB05/assessment/abs_curvature_vs_distance.png"
+  },
+  "window_csv": "Occupancy/sessionB05/assessment/occupancy_curvature_windows.csv",
+  "stats": {
+    "n_windows": 496,
+    "pred_vs_real_curvature": {
+      "pearson": 0.800100393303208,
+      "spearman": 0.870065259592747,
+      "mae": 0.0003019391151610762,
+      "rmse": 0.0006576647283509374,
+      "sign_agreement": 0.8709677419354839
+    },
+    "curvature_vs_iid": {
+      "pred_pearson": 0.5173677995440457,
+      "pred_spearman": 0.5828789943964864,
+      "real_pearson": 0.6115113854457669,
+      "real_spearman": 0.5830946578788468
+    },
+    "abs_curvature_vs_distance": {
+      "pred_pearson": -0.45861333350546385,
+      "pred_spearman": -0.4952013154193981,
+      "real_pearson": -0.38115865083929923,
+      "real_spearman": -0.35847253609634344
+    }
+  }
+}
