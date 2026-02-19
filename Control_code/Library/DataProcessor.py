@@ -449,7 +449,7 @@ class DataCollection:
                 print(f"⚠️  Cache load failed for {data_type}: {e}")
         return None
 
-    def load_profiles(self, opening_angle, steps=20, force_recompute=False, fill_nans=True):
+    def load_profiles(self, opening_angle, steps=20, force_recompute=False, fill_nans=True, profile_method='min_bin'):
         """
         Load distance profiles for all sessions with caching.
         
@@ -463,6 +463,10 @@ class DataCollection:
             If True, recompute even if cache exists
         fill_nans : bool
             If True, fill NaNs in profiles. If False, keep NaNs (useful for masks).
+        profile_method : str
+            Profile extraction method:
+            - 'min_bin': minimum distance among wall points within each azimuth bin (legacy behavior).
+            - 'ray_center': approximate ray-cast at each bin center using a line-distance tolerance.
             
         Returns
         -------
@@ -473,12 +477,23 @@ class DataCollection:
         global_force_recompute = self._cache_metadata.get('force_recompute', False)
         effective_force_recompute = force_recompute or global_force_recompute
         
+        requested_params = {
+            'opening_angle': opening_angle,
+            'steps': steps,
+            'fill_nans': fill_nans,
+            'profile_method': profile_method,
+        }
         if self._loaded_profiles and not effective_force_recompute:
-            print("📊 Using already loaded profiles")
-            return self.get_profiles(), self.get_centers()
+            if getattr(self, '_profiles_params', None) == requested_params:
+                print("📊 Using already loaded profiles")
+                return self.get_profiles(), self.get_centers()
+            print("📊 Loaded profiles params differ from request; recomputing collection profiles.")
         
         # Compute profiles using processor-level caching
-        print(f"📊 Loading distance profiles (opening_angle: {opening_angle}°, {steps} steps)...")
+        print(
+            f"📊 Loading distance profiles (opening_angle: {opening_angle}°, "
+            f"{steps} steps, method={profile_method})..."
+        )
         
         all_profiles = []
         all_centers = []
@@ -490,6 +505,7 @@ class DataCollection:
                 steps=steps,
                 force_recompute=effective_force_recompute,
                 fill_nans=fill_nans,
+                profile_method=profile_method,
             )
             
             all_profiles.append(processor.profiles)
@@ -500,6 +516,7 @@ class DataCollection:
         centers = np.concatenate(all_centers, axis=0)
         
         self._loaded_profiles = True
+        self._profiles_params = requested_params
         print(f"✅ Loaded profiles for {len(profiles)} total samples")
         print(f"   Profile shape: {profiles.shape}")
         print(f"   Profile centers shape: {centers.shape}")
@@ -1236,7 +1253,7 @@ class DataProcessor:
         
         return x_world, y_world
 
-    def load_profiles(self, opening_angle, steps=20, force_recompute=False, fill_nans=True):
+    def load_profiles(self, opening_angle, steps=20, force_recompute=False, fill_nans=True, profile_method='min_bin'):
         """
         Load distance profiles for all robot positions.
         
@@ -1250,6 +1267,10 @@ class DataProcessor:
             If True, recompute even if cache exists
         fill_nans : bool
             If True, fill NaNs in profiles. If False, keep NaNs (useful for masks).
+        profile_method : str
+            Profile extraction method:
+            - 'min_bin': minimum distance among wall points within each azimuth bin (legacy behavior).
+            - 'ray_center': approximate ray-cast at each bin center using line-distance tolerance.
             
         Notes
         -----
@@ -1263,11 +1284,16 @@ class DataProcessor:
         effective_force_recompute = force_recompute or self.force_recompute
         
         if self.profiles_loaded and not effective_force_recompute:
-            print("📊 Using already loaded profiles")
-            self.profile_opening_angle = opening_angle
-            self.profile_steps = steps
-            self.profile_fill_nans = fill_nans
-            return
+            already_match = (
+                getattr(self, 'profile_opening_angle', None) == opening_angle
+                and getattr(self, 'profile_steps', None) == steps
+                and getattr(self, 'profile_fill_nans', None) == fill_nans
+                and getattr(self, 'profile_method', 'min_bin') == profile_method
+            )
+            if already_match:
+                print("📊 Using already loaded profiles")
+                return
+            print("📊 Loaded profiles params differ from request; recomputing session profiles.")
             
         # Try to load from cache first (only if not forcing recompute)
         if not effective_force_recompute:
@@ -1283,12 +1309,14 @@ class DataProcessor:
                     'opening_angle': profiles_metadata.get('opening_angle'),
                     'steps': profiles_metadata.get('steps'),
                     'fill_nans': profiles_metadata.get('fill_nans', True),
+                    'profile_method': profiles_metadata.get('profile_method', 'min_bin'),
                 }
                 
                 current_params = {
                     'opening_angle': opening_angle,
                     'steps': steps,
                     'fill_nans': fill_nans,
+                    'profile_method': profile_method,
                 }
                 
                 # Check if parameters match - handle numpy array comparisons safely
@@ -1322,10 +1350,14 @@ class DataProcessor:
                     self.profile_opening_angle = opening_angle
                     self.profile_steps = steps
                     self.profile_fill_nans = fill_nans
+                    self.profile_method = profile_method
                     print(f"✅ Loaded {len(self.profiles)} distance profiles from cache")
                     print(f"   Profile shape: {self.profiles.shape}")
                     print(f"   Centers shape: {self.profile_centers.shape}")
-                    print(f"   Parameters matched: opening_angle={opening_angle}, steps={steps}")
+                    print(
+                        f"   Parameters matched: opening_angle={opening_angle}, "
+                        f"steps={steps}, method={profile_method}"
+                    )
                     
                     # Ensure arena metadata is loaded even when using cached profiles
                     if not hasattr(self, 'arena_metadata_loaded') or not self.arena_metadata_loaded:
@@ -1349,7 +1381,10 @@ class DataProcessor:
                 raise RuntimeError("Cannot compute distance profiles - arena metadata failed to load. "
                                  "Make sure arena_annotated.png and meta.json exist in the environment directory.")
         
-        print(f"📊 Computing distance profiles (opening_angle: {opening_angle}°, {steps} steps)...")
+        print(
+            f"📊 Computing distance profiles (opening_angle: {opening_angle}°, "
+            f"{steps} steps, method={profile_method})..."
+        )
         
         # Compute profiles for all positions using parallel processing
         import multiprocessing
@@ -1357,7 +1392,14 @@ class DataProcessor:
         
         def compute_profile_wrapper(index):
             """Wrapper function for parallel profile computation"""
-            centers_i, profile_i = self.get_profile_at(index, az_min, az_max, steps, fill_nans=fill_nans)
+            centers_i, profile_i = self.get_profile_at(
+                index,
+                az_min,
+                az_max,
+                steps,
+                fill_nans=fill_nans,
+                profile_method=profile_method,
+            )
             return index, centers_i, profile_i
         
         # Use ThreadPoolExecutor for parallel processing
@@ -1386,6 +1428,7 @@ class DataProcessor:
         self.profile_opening_angle = opening_angle
         self.profile_steps = steps
         self.profile_fill_nans = fill_nans
+        self.profile_method = profile_method
         
         # Save to cache with metadata
         if self.cache_dir:
@@ -1394,12 +1437,14 @@ class DataProcessor:
                 'opening_angle': opening_angle,
                 'steps': steps,
                 'fill_nans': fill_nans,
+                'profile_method': profile_method,
                 'timestamp': datetime.now().isoformat()
             }
             centers_metadata = {
                 'opening_angle': opening_angle,
                 'steps': steps,
                 'fill_nans': fill_nans,
+                'profile_method': profile_method,
                 'timestamp': datetime.now().isoformat()
             }
             self._save_to_cache(self.profiles, 'profiles', metadata=profiles_metadata)
@@ -2385,7 +2430,7 @@ class DataProcessor:
 
 
 
-    def get_profile(self, rob_x, rob_y, rob_yaw_deg, min_az_deg, max_az_deg, n):
+    def get_profile(self, rob_x, rob_y, rob_yaw_deg, min_az_deg, max_az_deg, n, profile_method='min_bin'):
         """
         Get a distance profile from walls in the arena.
         
@@ -2398,6 +2443,11 @@ class DataProcessor:
         n : int
             Number of azimuth steps in the profile
             
+        profile_method : str
+            Profile extraction method:
+            - 'min_bin': minimum distance among wall points within each azimuth bin.
+            - 'ray_center': approximate ray-cast at each bin center.
+
         Returns
         -------
         centers, min_distances : numpy.ndarray
@@ -2416,13 +2466,43 @@ class DataProcessor:
         centers = 0.5 * (edges[:-1] + edges[1:])
         min_distances = np.full(n, np.nan, dtype=float)
 
-        for i in range(n):
-            in_slice = (angles_deg >= edges[i]) & (angles_deg < edges[i + 1])
-            if np.any(in_slice): min_distances[i] = np.min(distances[in_slice])
+        if profile_method == 'min_bin':
+            for i in range(n):
+                in_slice = (angles_deg >= edges[i]) & (angles_deg < edges[i + 1])
+                if np.any(in_slice):
+                    min_distances[i] = np.min(distances[in_slice])
+        elif profile_method == 'ray_center':
+            # Approximate ray-cast on point-wall map:
+            # choose nearest forward point close to each center-ray.
+            mm_per_px = float(self.meta.get("map_mm_per_px", 10.0))
+            ray_tolerance_mm = max(1.5 * mm_per_px, 15.0)
+            half_bin = 0.5 * (edges[1] - edges[0]) if n > 1 else 180.0
+
+            for i, center_deg in enumerate(centers):
+                th = np.deg2rad(center_deg)
+                c = np.cos(th)
+                s = np.sin(th)
+
+                # Projection along ray (+forward only) and perpendicular distance.
+                t = rel_x * c + rel_y * s
+                d_perp = np.abs(-rel_x * s + rel_y * c)
+
+                # Restrict to points with near-center azimuth to reduce accidental side hits.
+                angle_diff = (angles_deg - center_deg + 180.0) % 360.0 - 180.0
+                near_az = np.abs(angle_diff) <= half_bin
+
+                candidates = (t > 0.0) & (d_perp <= ray_tolerance_mm) & near_az
+                if np.any(candidates):
+                    min_distances[i] = float(np.min(t[candidates]))
+        else:
+            raise ValueError(
+                f"Unknown profile_method='{profile_method}'. "
+                "Use 'min_bin' or 'ray_center'."
+            )
 
         return centers, min_distances
 
-    def get_profile_at(self, index, min_az_deg, max_az_deg, n, fill_nans=True):
+    def get_profile_at(self, index, min_az_deg, max_az_deg, n, fill_nans=True, profile_method='min_bin'):
         """
         Get a distance profile for a specific robot position.
         
@@ -2434,6 +2514,10 @@ class DataProcessor:
             Azimuth range for the profile in degrees
         n : int
             Number of azimuth steps in the profile
+        fill_nans : bool
+            If True, linearly fill NaNs in the returned profile.
+        profile_method : str
+            Profile extraction method. See `get_profile(...)`.
             
         Returns
         -------
@@ -2443,7 +2527,15 @@ class DataProcessor:
         selected_x = self.rob_x[index]
         selected_y = self.rob_y[index]
         selected_yaw_deg = self.rob_yaw_deg[index]
-        centers, profile = self.get_profile(selected_x, selected_y, selected_yaw_deg, min_az_deg, max_az_deg, n)
+        centers, profile = self.get_profile(
+            selected_x,
+            selected_y,
+            selected_yaw_deg,
+            min_az_deg,
+            max_az_deg,
+            n,
+            profile_method=profile_method,
+        )
         if fill_nans:
             profile = Utils.fill_nans_linear(profile)
         profile = np.asarray(profile, dtype=np.float32)

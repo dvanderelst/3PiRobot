@@ -26,15 +26,17 @@
 sessions = ['sessionB01', 'sessionB02', 'sessionB03', 'sessionB04']
 
 # Spatial Splitting Configuration
-train_quadrants = [0, 1, 2, 3]    # Quadrants to train on
+train_quadrants = [1, 2, 3]    # Quadrants to train on
 test_quadrant = 0             # Quadrant to test on
 
 # Profile Parameters
-profile_opening_angle = 60   # degrees
-profile_steps = 11            # number of azimuth bins
+profile_opening_angle = 45   # degrees
+profile_steps = 7          # number of azimuth bins
 
 # Distance Threshold
-distance_threshold = 2500.0  # mm, maximum distance for prediction
+distance_threshold = 2000.0  # mm, maximum distance for prediction
+distance_target_mode = 'log_standard'  # 'standard' or 'log_standard'
+distance_log_epsilon_mm = 1.0  # Added before log() to avoid log(0)
 
 # Training Configuration
 validation_split = 0.3
@@ -52,12 +54,18 @@ plot_dpi = 300              # DPI for PNG plots
 output_dir = 'Training'  # Directory for two-headed training outputs
 
 # Model Architecture
-conv_filters = [32, 64, 128] # number of filters in each conv layer
+conv_filters = [16, 32, 64, 128] # number of filters in each conv layer
 kernel_size = 5             # convolution kernel size
 pool_size = 2               # max pooling size
 dropout_rate = 0.3           # dropout rate for regularization
 l2_reg = 0.001               # L2 regularization strength
 learning_rate = 0.001        # Adam optimizer learning rate
+
+# Optional auxiliary occupancy-like loss (azimuth x range grid)
+use_occupancy_aux_loss = True
+occupancy_aux_weight = 0.1
+occupancy_aux_range_bins = 64
+occupancy_aux_sigma_mm = 75.0
 
 # ============================================
 # IMPORTS
@@ -149,6 +157,7 @@ Saved in the configured plot format (`{plot_format}`):
 ## Notes
 
 - Distances are clipped to `distance_threshold` during target construction.
+- Distance target scaling mode is stored inside `y_scaler.joblib` and in `training_params.json`.
 - Presence threshold used for inference/evaluation is stored in `training_params.json`.
 - Output indices and splits are based on the filtered dataset used during training.
 """
@@ -238,17 +247,38 @@ class TwoHeadedSonarCNN(nn.Module):
 
 class DistanceScaler:
     """Per-bin standardization fit on present-wall bins only."""
-    def __init__(self):
+    def __init__(self, mode='standard', log_epsilon=1.0):
         self.mean_ = None
         self.scale_ = None
+        self.mode = mode
+        self.log_epsilon = float(log_epsilon)
+
+    def _to_model_space(self, y_mm):
+        mode = getattr(self, 'mode', 'standard')
+        if mode == 'standard':
+            return y_mm
+        if mode == 'log_standard':
+            eps = float(getattr(self, 'log_epsilon', 1.0))
+            return np.log(np.maximum(y_mm, 0.0) + eps)
+        raise ValueError(f"Unknown distance scaling mode: {mode}")
+
+    def _from_model_space(self, y_model):
+        mode = getattr(self, 'mode', 'standard')
+        if mode == 'standard':
+            return y_model
+        if mode == 'log_standard':
+            eps = float(getattr(self, 'log_epsilon', 1.0))
+            return np.maximum(np.exp(y_model) - eps, 0.0)
+        raise ValueError(f"Unknown distance scaling mode: {mode}")
     
     def fit(self, y_distance, y_presence):
+        y_model = self._to_model_space(y_distance)
         n_bins = y_distance.shape[1]
         self.mean_ = np.zeros(n_bins, dtype=np.float32)
         self.scale_ = np.ones(n_bins, dtype=np.float32)
         
         for bin_idx in range(n_bins):
-            present_vals = y_distance[y_presence[:, bin_idx] > 0.5, bin_idx]
+            present_vals = y_model[y_presence[:, bin_idx] > 0.5, bin_idx]
             if present_vals.size >= 2:
                 std = np.std(present_vals)
                 self.mean_[bin_idx] = np.mean(present_vals)
@@ -262,10 +292,24 @@ class DistanceScaler:
         return self
     
     def transform(self, y):
-        return (y - self.mean_) / self.scale_
+        y_model = self._to_model_space(y)
+        return (y_model - self.mean_) / self.scale_
     
     def inverse_transform(self, y):
-        return y * self.scale_ + self.mean_
+        y_model = y * self.scale_ + self.mean_
+        return self._from_model_space(y_model)
+
+    def inverse_transform_tensor(self, y):
+        mean = torch.as_tensor(self.mean_, device=y.device, dtype=y.dtype)
+        scale = torch.as_tensor(self.scale_, device=y.device, dtype=y.dtype)
+        y_model = y * scale + mean
+        mode = getattr(self, 'mode', 'standard')
+        if mode == 'standard':
+            return y_model
+        if mode == 'log_standard':
+            eps = float(getattr(self, 'log_epsilon', 1.0))
+            return torch.clamp(torch.exp(y_model) - eps, min=0.0)
+        raise ValueError(f"Unknown distance scaling mode: {mode}")
 
 def load_and_prepare_data():
     """Load and prepare sonar and profile data with spatial quadrant information."""
@@ -371,7 +415,10 @@ def preprocess_data(X_train, X_val, X_test, y_train, y_val, y_test):
     y_test_distance = np.clip(y_test, 0, distance_threshold)
     
     # Normalize distance targets using present bins only.
-    y_scaler = DistanceScaler().fit(y_train_distance, y_train_presence)
+    y_scaler = DistanceScaler(
+        mode=distance_target_mode,
+        log_epsilon=distance_log_epsilon_mm
+    ).fit(y_train_distance, y_train_presence)
     y_train_distance_scaled = y_scaler.transform(y_train_distance)
     y_val_distance_scaled = y_scaler.transform(y_val_distance)
     y_test_distance_scaled = y_scaler.transform(y_test_distance)
@@ -418,7 +465,43 @@ def preprocess_data(X_train, X_val, X_test, y_train, y_val, y_test):
         'X_test': X_test, 'y_test_presence': y_test_presence, 'y_test_distance': y_test_distance
     }
 
-def train_model(model, train_loader, val_loader, epochs, patience):
+def get_profile_centers_deg(opening_angle_deg, steps):
+    edges = np.linspace(-0.5 * opening_angle_deg, 0.5 * opening_angle_deg, steps + 1, dtype=np.float32)
+    return 0.5 * (edges[:-1] + edges[1:])
+
+
+def occupancy_aux_loss(
+    presence_logits,
+    distance_pred_scaled,
+    presence_targets,
+    distance_targets_scaled,
+    y_scaler,
+    profile_centers_deg,
+    range_centers_mm,
+    sigma_mm,
+):
+    """Auxiliary loss on azimuth-range occupancy representation."""
+    pred_presence = torch.sigmoid(presence_logits)  # (B, K)
+    pred_distance_mm = y_scaler.inverse_transform_tensor(distance_pred_scaled)  # (B, K)
+    target_distance_mm = y_scaler.inverse_transform_tensor(distance_targets_scaled)  # (B, K)
+
+    sigma = float(max(sigma_mm, 1e-3))
+    r = range_centers_mm.view(1, 1, -1)  # (1,1,R)
+
+    # Soft radial occupancy per azimuth bin.
+    pred_radial = torch.exp(-0.5 * ((r - pred_distance_mm.unsqueeze(-1)) / sigma) ** 2)
+    tgt_radial = torch.exp(-0.5 * ((r - target_distance_mm.unsqueeze(-1)) / sigma) ** 2)
+    pred_occ = pred_presence.unsqueeze(-1) * pred_radial
+    tgt_occ = presence_targets.unsqueeze(-1) * tgt_radial
+
+    # Weight central azimuth bins slightly more to reflect forward layout utility.
+    az = torch.as_tensor(profile_centers_deg, device=presence_logits.device, dtype=presence_logits.dtype)
+    az_w = torch.cos(torch.deg2rad(az)).clamp(min=0.2).view(1, -1, 1)
+    diff = (pred_occ - tgt_occ) ** 2
+    return (diff * az_w).mean()
+
+
+def train_model(model, train_loader, val_loader, epochs, patience, y_scaler):
     """Train the two-headed model with early stopping."""
     print("🚂 Training two-headed model...")
     
@@ -431,18 +514,26 @@ def train_model(model, train_loader, val_loader, epochs, patience):
     # Early stopping setup
     best_val_loss = float('inf')
     epochs_no_improve = 0
+
+    # Aux loss setup
+    profile_centers_deg = get_profile_centers_deg(profile_opening_angle, profile_steps)
+    range_centers_np = np.linspace(0.0, distance_threshold, occupancy_aux_range_bins, dtype=np.float32)
+    range_centers_mm = torch.as_tensor(range_centers_np, device=device)
     
     # Training loop
     train_losses = []
     val_losses = []
     presence_losses = []
     distance_losses = []
+    aux_losses = []
+    val_aux_losses = []
     for epoch in range(epochs):
         # Training phase
         model.train()
         running_train_loss = 0.0
         running_presence_loss = 0.0
         running_distance_loss = 0.0
+        running_aux_loss = 0.0
         
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} - Training"):
             # Batch is a list: [inputs, presence_targets, distance_targets]
@@ -465,9 +556,23 @@ def train_model(model, train_loader, val_loader, epochs, patience):
             else:
                 # Keep graph connected even if batch has no present-wall bins.
                 distance_loss = distance_pred.sum() * 0.0
+
+            if use_occupancy_aux_loss:
+                aux_loss = occupancy_aux_loss(
+                    presence_logits=presence_logits,
+                    distance_pred_scaled=distance_pred,
+                    presence_targets=presence_targets,
+                    distance_targets_scaled=distance_targets,
+                    y_scaler=y_scaler,
+                    profile_centers_deg=profile_centers_deg,
+                    range_centers_mm=range_centers_mm,
+                    sigma_mm=occupancy_aux_sigma_mm,
+                )
+            else:
+                aux_loss = torch.tensor(0.0, device=inputs.device)
             
-            # Combined loss (equal weighting for now)
-            loss = presence_loss + distance_loss
+            # Combined loss
+            loss = presence_loss + distance_loss + (occupancy_aux_weight * aux_loss)
             
             loss.backward()
             optimizer.step()
@@ -476,6 +581,7 @@ def train_model(model, train_loader, val_loader, epochs, patience):
             running_train_loss += loss.item() * inputs.size(0)
             running_presence_loss += presence_loss.item() * inputs.size(0)
             running_distance_loss += distance_loss.item() * inputs.size(0)
+            running_aux_loss += aux_loss.item() * inputs.size(0)
         
         # Calculate epoch losses
         train_loss = running_train_loss / len(train_loader.dataset)
@@ -484,15 +590,18 @@ def train_model(model, train_loader, val_loader, epochs, patience):
         train_losses.append(train_loss)
         presence_losses.append(train_presence_loss)
         distance_losses.append(train_distance_loss)
+        train_aux_loss = running_aux_loss / len(train_loader.dataset)
+        aux_losses.append(train_aux_loss)
         
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f} "
-              f"(Presence: {train_presence_loss:.6f}, Distance: {train_distance_loss:.6f})")
+              f"(Presence: {train_presence_loss:.6f}, Distance: {train_distance_loss:.6f}, Aux: {train_aux_loss:.6f})")
         
         # Validation phase
         model.eval()
         running_val_loss = 0.0
         running_val_presence_loss = 0.0
         running_val_distance_loss = 0.0
+        running_val_aux_loss = 0.0
         
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} - Validation"):
@@ -513,23 +622,40 @@ def train_model(model, train_loader, val_loader, epochs, patience):
                     distance_loss = (distance_loss_raw * present_mask).sum() / valid_count
                 else:
                     distance_loss = torch.tensor(0.0, device=inputs.device)
+
+                if use_occupancy_aux_loss:
+                    aux_loss = occupancy_aux_loss(
+                        presence_logits=presence_logits,
+                        distance_pred_scaled=distance_pred,
+                        presence_targets=presence_targets,
+                        distance_targets_scaled=distance_targets,
+                        y_scaler=y_scaler,
+                        profile_centers_deg=profile_centers_deg,
+                        range_centers_mm=range_centers_mm,
+                        sigma_mm=occupancy_aux_sigma_mm,
+                    )
+                else:
+                    aux_loss = torch.tensor(0.0, device=inputs.device)
                 
-                # Combined loss (equal weighting)
-                loss = presence_loss + distance_loss
+                # Combined loss
+                loss = presence_loss + distance_loss + (occupancy_aux_weight * aux_loss)
                 
                 # Accumulate losses
                 running_val_loss += loss.item() * inputs.size(0)
                 running_val_presence_loss += presence_loss.item() * inputs.size(0)
                 running_val_distance_loss += distance_loss.item() * inputs.size(0)
+                running_val_aux_loss += aux_loss.item() * inputs.size(0)
         
         # Calculate validation losses
         val_loss = running_val_loss / len(val_loader.dataset)
         val_presence_loss = running_val_presence_loss / len(val_loader.dataset)
         val_distance_loss = running_val_distance_loss / len(val_loader.dataset)
+        val_aux_loss = running_val_aux_loss / len(val_loader.dataset)
         val_losses.append(val_loss)
+        val_aux_losses.append(val_aux_loss)
         
         print(f"Epoch {epoch+1}/{epochs} - Val Loss: {val_loss:.6f} "
-              f"(Presence: {val_presence_loss:.6f}, Distance: {val_distance_loss:.6f})")
+              f"(Presence: {val_presence_loss:.6f}, Distance: {val_distance_loss:.6f}, Aux: {val_aux_loss:.6f})")
         
         # Early stopping check
         if val_loss < best_val_loss:
@@ -546,7 +672,7 @@ def train_model(model, train_loader, val_loader, epochs, patience):
                 print(f"🛑 Early stopping triggered after {epoch+1} epochs")
                 break
     
-    return train_losses, val_losses, presence_losses, distance_losses
+    return train_losses, val_losses, presence_losses, distance_losses, aux_losses, val_aux_losses
 
 def create_scatter_plots(model, data_loader, y_scaler, dataset_name):
     """Create comprehensive scatter plots for distance predictions by azimuth bin."""
@@ -780,8 +906,8 @@ def main():
         
     # Train model
     start_time = time.time()
-    train_losses, val_losses, presence_losses, distance_losses = train_model(
-        model, train_loader, val_loader, epochs, patience
+    train_losses, val_losses, presence_losses, distance_losses, aux_losses, val_aux_losses = train_model(
+        model, train_loader, val_loader, epochs, patience, y_scaler
     )
     training_time = time.time() - start_time
     
@@ -793,6 +919,7 @@ def main():
     print(f"   Val Loss: {val_losses[-1]:.4f}")
     print(f"   Presence Loss: {presence_losses[-1]:.4f}")
     print(f"   Distance Loss: {distance_losses[-1]:.4f}")
+    print(f"   Aux Loss: {aux_losses[-1]:.4f}")
         
     # Plot training curves
     plt.figure(figsize=(12, 6))
@@ -800,6 +927,8 @@ def main():
     plt.plot(val_losses, label='Val Total Loss')
     plt.plot(presence_losses, label='Train Presence Loss')
     plt.plot(distance_losses, label='Train Distance Loss')
+    plt.plot(aux_losses, label='Train Aux Loss')
+    plt.plot(val_aux_losses, label='Val Aux Loss')
     plt.title('Training Progress')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -822,7 +951,13 @@ def main():
         'profile_opening_angle': profile_opening_angle,
         'profile_steps': profile_steps,
         'distance_threshold': distance_threshold,
+        'distance_target_mode': distance_target_mode,
+        'distance_log_epsilon_mm': distance_log_epsilon_mm,
         'presence_threshold': presence_threshold,
+        'use_occupancy_aux_loss': use_occupancy_aux_loss,
+        'occupancy_aux_weight': occupancy_aux_weight,
+        'occupancy_aux_range_bins': occupancy_aux_range_bins,
+        'occupancy_aux_sigma_mm': occupancy_aux_sigma_mm,
         'conv_filters': conv_filters,
         'kernel_size': kernel_size,
         'pool_size': pool_size,

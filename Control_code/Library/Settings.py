@@ -53,9 +53,9 @@ def get_client_config(index): return client_list[index]
 @dataclass
 class OccupancyConfig:
     # Sliding window size for integration over recent samples.
-    window_size: int = 5
+    window_size: int = 1
     # Robot-frame map extent: x,y in [-extent_mm, +extent_mm].
-    extent_mm: float = 2500.0
+    extent_mm: float = 2000.0
     # Occupancy grid resolution.
     grid_mm: float = 20.0
     # Anisotropic segment evidence spread (perpendicular / parallel).
