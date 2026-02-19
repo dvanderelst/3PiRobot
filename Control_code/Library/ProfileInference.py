@@ -13,17 +13,38 @@ from Library import DataProcessor
 
 class DistanceScaler:
     """Per-bin standardization fit on present-wall bins only."""
-    def __init__(self):
+    def __init__(self, mode='standard', log_epsilon=1.0):
         self.mean_ = None
         self.scale_ = None
+        self.mode = mode
+        self.log_epsilon = float(log_epsilon)
+
+    def _to_model_space(self, y_mm):
+        mode = getattr(self, 'mode', 'standard')
+        if mode == 'standard':
+            return y_mm
+        if mode == 'log_standard':
+            eps = float(getattr(self, 'log_epsilon', 1.0))
+            return np.log(np.maximum(y_mm, 0.0) + eps)
+        raise ValueError(f"Unknown distance scaling mode: {mode}")
+
+    def _from_model_space(self, y_model):
+        mode = getattr(self, 'mode', 'standard')
+        if mode == 'standard':
+            return y_model
+        if mode == 'log_standard':
+            eps = float(getattr(self, 'log_epsilon', 1.0))
+            return np.maximum(np.exp(y_model) - eps, 0.0)
+        raise ValueError(f"Unknown distance scaling mode: {mode}")
 
     def fit(self, y_distance, y_presence):
+        y_model = self._to_model_space(y_distance)
         n_bins = y_distance.shape[1]
         self.mean_ = np.zeros(n_bins, dtype=np.float32)
         self.scale_ = np.ones(n_bins, dtype=np.float32)
 
         for bin_idx in range(n_bins):
-            present_vals = y_distance[y_presence[:, bin_idx] > 0.5, bin_idx]
+            present_vals = y_model[y_presence[:, bin_idx] > 0.5, bin_idx]
             if present_vals.size >= 2:
                 std = np.std(present_vals)
                 self.mean_[bin_idx] = np.mean(present_vals)
@@ -37,10 +58,12 @@ class DistanceScaler:
         return self
 
     def transform(self, y):
-        return (y - self.mean_) / self.scale_
+        y_model = self._to_model_space(y)
+        return (y_model - self.mean_) / self.scale_
 
     def inverse_transform(self, y):
-        return y * self.scale_ + self.mean_
+        y_model = y * self.scale_ + self.mean_
+        return self._from_model_space(y_model)
 
 
 class TwoHeadedSonarCNN(nn.Module):
@@ -150,11 +173,11 @@ def load_training_artifacts(base_dir, device):
     return model, y_scaler, params
 
 
-def load_session_data(session_name, profile_opening_angle, profile_steps):
+def load_session_data(session_name, profile_opening_angle, profile_steps, profile_method='min_bin'):
     dc = DataProcessor.DataCollection([session_name])
     sonar_data = dc.load_sonar(flatten=False)  # shape: (N, 200, 2)
     profiles_data, profile_centers = dc.load_profiles(
-        opening_angle=profile_opening_angle, steps=profile_steps
+        opening_angle=profile_opening_angle, steps=profile_steps, profile_method=profile_method
     )
 
     # Keep only rows with finite sonar/profile values.

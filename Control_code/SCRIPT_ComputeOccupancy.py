@@ -45,6 +45,7 @@ sigma_para_mm = Settings.occupancy_config.sigma_para_mm    # Segment evidence so
 prediction_batch_size = 256
 presence_threshold_override = None  # If None, use training params threshold.
 real_distance_cutoff_override_mm = None  # If None, use training distance_threshold when available.
+real_profile_method = 'ray_center'  # 'min_bin' (legacy) or 'ray_center'
 
 # Parallel compute settings.
 parallel_workers = 8
@@ -52,7 +53,7 @@ parallel_workers = 8
 # Optional plotting from saved occupancy results.
 save_plots = True
 # Any iterable of series indices=
-plot_series_selection = range(0, 500, 50)
+plot_series_selection = range(0, 500, 25)
 plot_max_count = 30
 plot_heatmap_vmin = 0.0
 plot_heatmap_vmax = 1.0
@@ -374,11 +375,15 @@ def main():
         real_distance_cutoff_mm = float(real_distance_cutoff_mm)
 
     sonar_data, real_distance_mm, profile_centers_deg, metadata = load_session_data(
-        session_to_compute, profile_opening_angle, profile_steps
+        session_to_compute, profile_opening_angle, profile_steps, profile_method=real_profile_method
     )
     print(f'Loaded session {session_to_compute}: {len(sonar_data)} filtered samples')
     processor = DataProcessor.DataProcessor(session_to_compute)
-    _ = processor.load_profiles(opening_angle=profile_opening_angle, steps=profile_steps)
+    _ = processor.load_profiles(
+        opening_angle=profile_opening_angle,
+        steps=profile_steps,
+        profile_method=real_profile_method,
+    )
     wall_x_world = np.asarray(processor.wall_x, dtype=np.float32)
     wall_y_world = np.asarray(processor.wall_y, dtype=np.float32)
 
@@ -455,6 +460,7 @@ def main():
     summary = {
         'session': session_to_compute,
         'training_output_dir': training_output_dir,
+        'real_profile_method': real_profile_method,
         'n_samples_filtered': int(n_samples),
         'window_start': int(start),
         'window_end': int(end),
