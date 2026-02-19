@@ -9,8 +9,9 @@ Control_code/TestScripts
 Control_code/Plots/
 Control_code/Data/
 Control_code/Training/
+Control_code/TrainingRadial/
 Control_code/Occupancy/
-Control_code/Occupancy/
+Control_code/OccupancyRadial/
 ############## Robot code sub repo
 robot_code/.Trash-1000/
 robot_code/System Volume Information/

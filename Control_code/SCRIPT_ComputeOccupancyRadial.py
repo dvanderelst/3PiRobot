@@ -1,10 +1,9 @@
 """
-SCRIPT_ComputeOccupancy
+SCRIPT_ComputeOccupancyRadial
 
 Compute robot-frame occupancy evidence maps for sliding windows in one session.
-This script is split into two phases:
-1) Compute + save occupancy tensors (parallelized)
-2) Optional plotting from saved outputs (serial, matplotlib-safe)
+For predicted profiles from radial models, this script can integrate the full
+radial distribution directly (instead of point-estimate distance only).
 """
 
 import json
@@ -18,8 +17,12 @@ from tqdm import tqdm
 import torch
 
 from Library import DataProcessor, Settings
-from Library.OccupancyCalculation import build_robot_frame_evidence, make_robot_frame_grid
-from Library.ProfileInference import load_training_artifacts, load_session_data, predict_profiles
+from Library.OccupancyCalculation import (
+    build_robot_frame_evidence,
+    build_robot_frame_evidence_from_radial,
+    make_robot_frame_grid,
+)
+from Library.ProfileInference import load_training_artifacts, load_session_data, predict_profiles_detailed
 
 
 # ============================================
@@ -27,7 +30,7 @@ from Library.ProfileInference import load_training_artifacts, load_session_data,
 # ============================================
 session_to_compute = 'sessionB05'
 training_output_dir = 'TrainingRadial'
-occupancy_output_root = 'Occupancy'
+occupancy_output_root = 'OccupancyRadial'
 
 # Sliding window settings (filtered index space).
 window_start = 0
@@ -46,6 +49,8 @@ prediction_batch_size = 256
 presence_threshold_override = None  # If None, use training params threshold.
 real_distance_cutoff_override_mm = None  # If None, use training distance_threshold when available.
 real_profile_method = 'ray_center'  # 'min_bin' (legacy) or 'ray_center'
+use_full_radial_for_pred_occupancy = True
+radial_min_point_weight = 1e-4
 
 # Parallel compute settings.
 parallel_workers = 8
@@ -53,7 +58,7 @@ parallel_workers = 8
 # Optional plotting from saved occupancy results.
 save_plots = True
 # Any iterable of series indices=
-plot_series_selection = range(0, 500, 25)
+plot_series_selection = range(0, 500, 10)
 plot_max_count = 30
 plot_heatmap_vmin = 0.0
 plot_heatmap_vmax = 1.0
@@ -129,6 +134,59 @@ def compute_occupancy_for_windows(
             grid_mm=grid_mm,
             sigma_perp_mm=sigma_perp_mm,
             sigma_para_mm=sigma_para_mm,
+            apply_smoothing=False,
+        )
+        anchor_idx = int(win_end)
+        return seq_idx, win_start, win_end, indices, anchor_idx, evidence_norm
+
+    max_workers = max(1, int(parallel_workers))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_task, i, s) for i, s in enumerate(starts)]
+        for fut in tqdm(as_completed(futs), total=len(futs), desc=progress_desc):
+            seq_idx, win_start, win_end, indices, anchor_idx, evidence_norm = fut.result()
+            results[seq_idx] = (win_start, win_end, indices, anchor_idx, evidence_norm)
+
+    return results
+
+
+def compute_occupancy_for_windows_radial(
+    profile_centers_deg,
+    radial_probs,
+    range_centers_mm,
+    presence_probs,
+    metadata,
+    starts,
+    x_grid,
+    y_grid,
+    xx,
+    yy,
+    progress_desc='Computing radial occupancy windows',
+):
+    rob_x_all = metadata['rob_x']
+    rob_y_all = metadata['rob_y']
+    rob_yaw_all = metadata['rob_yaw_deg']
+
+    results = [None] * len(starts)
+
+    def _task(seq_idx, win_start):
+        win_end = win_start + window_size - 1
+        indices = np.arange(win_start, win_end + 1, dtype=np.int32)
+
+        evidence_norm = build_robot_frame_evidence_from_radial(
+            profile_centers_deg_seq=profile_centers_deg[indices],
+            radial_probs_seq=radial_probs[indices],
+            range_centers_mm=range_centers_mm,
+            presence_probs_seq=presence_probs[indices],
+            rob_x_seq=rob_x_all[indices],
+            rob_y_seq=rob_y_all[indices],
+            rob_yaw_deg_seq=rob_yaw_all[indices],
+            x_grid=x_grid,
+            y_grid=y_grid,
+            xx=xx,
+            yy=yy,
+            grid_mm=grid_mm,
+            sigma_point_mm=sigma_perp_mm,
+            min_point_weight=radial_min_point_weight,
             apply_smoothing=False,
         )
         anchor_idx = int(win_end)
@@ -228,7 +286,15 @@ This folder contains precomputed robot-frame occupancy evidence for sliding wind
     print(f'Saved readme: {readme_path}')
 
 
-def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_series, wall_x_world, wall_y_world):
+def plot_examples_from_saved_package(
+    npz_path,
+    plot_dir,
+    metadata,
+    selected_series,
+    wall_x_world,
+    wall_y_world,
+    sonar_data,
+):
     if len(selected_series) == 0:
         print('No series indices selected for plotting.')
         return
@@ -270,8 +336,13 @@ def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_seri
             (wall_y_rel >= y_min) & (wall_y_rel <= y_max)
         )
 
-        fig, axes = plt.subplots(1, 3, figsize=(19, 6))
-        im = axes[0].imshow(
+        fig, axes = plt.subplots(2, 2, figsize=(19, 12))
+        ax_occ_pred = axes[0, 0]
+        ax_occ_real = axes[0, 1]
+        ax_world = axes[1, 0]
+        ax_sonar = axes[1, 1]
+
+        im = ax_occ_pred.imshow(
             hm_pred,
             origin='lower',
             extent=[x_min, x_max, y_min, y_max],
@@ -280,20 +351,20 @@ def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_seri
             vmin=plot_heatmap_vmin,
             vmax=plot_heatmap_vmax,
         )
-        fig.colorbar(im, ax=axes[0], label='Pred Occupancy')
-        axes[0].scatter(
+        fig.colorbar(im, ax=ax_occ_pred, label='Pred Occupancy')
+        ax_occ_pred.scatter(
             wall_x_rel[in_grid], wall_y_rel[in_grid],
             c='lime', s=1, alpha=0.25, linewidths=0, label='Env walls (in-grid)'
         )
-        axes[0].scatter([0], [0], c='cyan', s=50, label='Anchor robot')
-        axes[0].arrow(0, 0, 250, 0, head_width=70, head_length=90, fc='cyan', ec='cyan', alpha=0.9)
-        axes[0].set_title(f'Pred Occupancy\nseries_idx={sidx}, anchor={anchor_idx}')
-        axes[0].set_xlabel('Robot X (mm)')
-        axes[0].set_ylabel('Robot Y (mm)')
-        axes[0].grid(True, alpha=0.25)
-        axes[0].legend(loc='upper right')
+        ax_occ_pred.scatter([0], [0], c='cyan', s=50, label='Anchor robot')
+        ax_occ_pred.arrow(0, 0, 250, 0, head_width=70, head_length=90, fc='cyan', ec='cyan', alpha=0.9)
+        ax_occ_pred.set_title(f'Pred Occupancy\nseries_idx={sidx}, anchor={anchor_idx}')
+        ax_occ_pred.set_xlabel('Robot X (mm)')
+        ax_occ_pred.set_ylabel('Robot Y (mm)')
+        ax_occ_pred.grid(True, alpha=0.25)
+        ax_occ_pred.legend(loc='upper right')
 
-        im2 = axes[1].imshow(
+        im2 = ax_occ_real.imshow(
             hm_real,
             origin='lower',
             extent=[x_min, x_max, y_min, y_max],
@@ -302,45 +373,63 @@ def plot_examples_from_saved_package(npz_path, plot_dir, metadata, selected_seri
             vmin=plot_heatmap_vmin,
             vmax=plot_heatmap_vmax,
         )
-        fig.colorbar(im2, ax=axes[1], label='Real Occupancy')
-        axes[1].scatter(
+        fig.colorbar(im2, ax=ax_occ_real, label='Real Occupancy')
+        ax_occ_real.scatter(
             wall_x_rel[in_grid], wall_y_rel[in_grid],
             c='lime', s=1, alpha=0.25, linewidths=0, label='Env walls (in-grid)'
         )
-        axes[1].scatter([0], [0], c='cyan', s=50, label='Anchor robot')
-        axes[1].arrow(0, 0, 250, 0, head_width=70, head_length=90, fc='cyan', ec='cyan', alpha=0.9)
-        axes[1].set_title('Real-Profile Occupancy')
-        axes[1].set_xlabel('Robot X (mm)')
-        axes[1].set_ylabel('Robot Y (mm)')
-        axes[1].grid(True, alpha=0.25)
-        axes[1].legend(loc='upper right')
+        ax_occ_real.scatter([0], [0], c='cyan', s=50, label='Anchor robot')
+        ax_occ_real.arrow(0, 0, 250, 0, head_width=70, head_length=90, fc='cyan', ec='cyan', alpha=0.9)
+        ax_occ_real.set_title('Real-Profile Occupancy')
+        ax_occ_real.set_xlabel('Robot X (mm)')
+        ax_occ_real.set_ylabel('Robot Y (mm)')
+        ax_occ_real.grid(True, alpha=0.25)
+        ax_occ_real.legend(loc='upper right')
 
-        axes[2].scatter(
+        ax_world.scatter(
             wall_x_world, wall_y_world,
             c='lime', s=1, alpha=0.25, linewidths=0, label='Environment walls'
         )
-        axes[2].plot(rob_x_all, rob_y_all, color='lightgray', linewidth=1.0, label='Full trajectory')
-        axes[2].scatter(rob_x_all[indices], rob_y_all[indices], c='tab:blue', s=28, label='Chunk poses')
+        ax_world.plot(rob_x_all, rob_y_all, color='lightgray', linewidth=1.0, label='Full trajectory')
+        ax_world.scatter(rob_x_all[indices], rob_y_all[indices], c='tab:blue', s=28, label='Chunk poses')
         yaw_r = np.deg2rad(rob_yaw_all[indices])
         u = 140.0 * np.cos(yaw_r)
         v = 140.0 * np.sin(yaw_r)
-        axes[2].quiver(
+        ax_world.quiver(
             rob_x_all[indices], rob_y_all[indices], u, v,
             angles='xy', scale_units='xy', scale=1, width=0.003, color='tab:blue', alpha=0.8
         )
-        axes[2].scatter([anchor_x], [anchor_y], c='red', s=70, label='Anchor pose')
-        axes[2].arrow(
+        ax_world.scatter([anchor_x], [anchor_y], c='red', s=70, label='Anchor pose')
+        ax_world.arrow(
             anchor_x, anchor_y,
             220.0 * np.cos(np.deg2rad(anchor_yaw)),
             220.0 * np.sin(np.deg2rad(anchor_yaw)),
             head_width=60, head_length=80, fc='red', ec='red', alpha=0.9
         )
-        axes[2].set_title(f'World Context\nindices [{win_start}, {win_end}]')
-        axes[2].set_xlabel('World X (mm)')
-        axes[2].set_ylabel('World Y (mm)')
-        axes[2].axis('equal')
-        axes[2].grid(True, alpha=0.3)
-        axes[2].legend(loc='best')
+        ax_world.set_title(f'World Context\nindices [{win_start}, {win_end}]')
+        ax_world.set_xlabel('World X (mm)')
+        ax_world.set_ylabel('World Y (mm)')
+        ax_world.axis('equal')
+        ax_world.grid(True, alpha=0.3)
+        ax_world.legend(loc='best')
+
+        # Sonar overlay for all measurements in selected window.
+        sample_axis = np.arange(sonar_data.shape[1], dtype=np.int32)
+        n_chunk = len(indices)
+        for w_i, idx in enumerate(indices):
+            cval = w_i / max(n_chunk - 1, 1)
+            left_color = plt.cm.Blues(0.35 + 0.6 * cval)
+            right_color = plt.cm.Oranges(0.35 + 0.6 * cval)
+            alpha = 0.25 + 0.5 * (w_i + 1) / max(n_chunk, 1)
+            ax_sonar.plot(sample_axis, sonar_data[idx, :, 0], color=left_color, alpha=alpha, linewidth=1.1)
+            ax_sonar.plot(sample_axis, sonar_data[idx, :, 1], color=right_color, alpha=alpha, linewidth=1.1, linestyle='--')
+        ax_sonar.set_title(f'Sonar Overlay ({n_chunk} measurements)')
+        ax_sonar.set_xlabel('Sample index')
+        ax_sonar.set_ylabel('Envelope amplitude')
+        ax_sonar.grid(True, alpha=0.25)
+        ax_sonar.plot([], [], color=plt.cm.Blues(0.8), label='Left channel')
+        ax_sonar.plot([], [], color=plt.cm.Oranges(0.8), linestyle='--', label='Right channel')
+        ax_sonar.legend(loc='upper right')
 
         plt.tight_layout()
         out_png = os.path.join(
@@ -362,6 +451,8 @@ def main():
     print(f'Using device: {device}')
     print(f'Loading model artifacts from: {training_output_dir}')
     model, y_scaler, params = load_training_artifacts(training_output_dir, device)
+    target_type = params.get('target_type', 'distance_regression')
+    print(f'Model target_type: {target_type}')
 
     profile_opening_angle = float(params['profile_opening_angle'])
     profile_steps = int(params['profile_steps'])
@@ -387,7 +478,7 @@ def main():
     wall_x_world = np.asarray(processor.wall_x, dtype=np.float32)
     wall_y_world = np.asarray(processor.wall_y, dtype=np.float32)
 
-    pred_presence_probs, pred_presence_bin, pred_distance_mm, _ = predict_profiles(
+    pred = predict_profiles_detailed(
         model=model,
         y_scaler=y_scaler,
         sonar_data=sonar_data,
@@ -395,6 +486,11 @@ def main():
         threshold=threshold,
         device=device,
     )
+    pred_presence_probs = pred['presence_probs']
+    pred_presence_bin = pred['presence_pred']
+    pred_distance_mm = pred['distance_mm']
+    pred_radial_probs = pred.get('radial_probs', None)
+    pred_range_centers_mm = pred.get('range_centers_mm', None)
     print('Predicted profiles for all samples.')
 
     n_samples = len(sonar_data)
@@ -408,19 +504,42 @@ def main():
 
     x_grid, y_grid, xx, yy = make_robot_frame_grid(extent_mm=extent_mm, grid_mm=grid_mm)
     print('Phase 1/2: predicted-profile occupancy...', flush=True)
-    results_pred = compute_occupancy_for_windows(
-        profile_centers_deg=profile_centers_deg,
-        distance_mm=pred_distance_mm,
-        presence_bin=pred_presence_bin,
-        presence_probs=pred_presence_probs,
-        metadata=metadata,
-        starts=starts,
-        x_grid=x_grid,
-        y_grid=y_grid,
-        xx=xx,
-        yy=yy,
-        progress_desc='Pred occupancy',
+    use_radial_pred = (
+        use_full_radial_for_pred_occupancy
+        and (target_type == 'radial')
+        and (pred_radial_probs is not None)
+        and (pred_range_centers_mm is not None)
     )
+    if use_radial_pred:
+        print('Using full radial distribution for predicted occupancy integration.', flush=True)
+        results_pred = compute_occupancy_for_windows_radial(
+            profile_centers_deg=profile_centers_deg,
+            radial_probs=pred_radial_probs,
+            range_centers_mm=pred_range_centers_mm,
+            presence_probs=pred_presence_probs,
+            metadata=metadata,
+            starts=starts,
+            x_grid=x_grid,
+            y_grid=y_grid,
+            xx=xx,
+            yy=yy,
+            progress_desc='Pred occupancy (radial)',
+        )
+    else:
+        print('Using point-estimate distance for predicted occupancy integration.', flush=True)
+        results_pred = compute_occupancy_for_windows(
+            profile_centers_deg=profile_centers_deg,
+            distance_mm=pred_distance_mm,
+            presence_bin=pred_presence_bin,
+            presence_probs=pred_presence_probs,
+            metadata=metadata,
+            starts=starts,
+            x_grid=x_grid,
+            y_grid=y_grid,
+            xx=xx,
+            yy=yy,
+            progress_desc='Pred occupancy',
+        )
     print('Phase 1/2 done: predicted-profile occupancy.', flush=True)
 
     real_distance_mm_filtered = real_distance_mm.copy()
@@ -460,6 +579,8 @@ def main():
     summary = {
         'session': session_to_compute,
         'training_output_dir': training_output_dir,
+        'model_target_type': target_type,
+        'use_full_radial_for_pred_occupancy': bool(use_radial_pred),
         'real_profile_method': real_profile_method,
         'n_samples_filtered': int(n_samples),
         'window_start': int(start),
@@ -491,6 +612,7 @@ def main():
             selected_series=selected,
             wall_x_world=wall_x_world,
             wall_y_world=wall_y_world,
+            sonar_data=sonar_data,
         )
 
 
