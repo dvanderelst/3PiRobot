@@ -71,14 +71,15 @@ class CurvatureConfig:
     occ_block_threshold: float = 0.10
     # Robot footprint inflation.
     robot_radius_mm: float = 80.0
-    safety_margin_mm: float = 120.0
+    safety_margin_mm: float = 300.0
     # Circle-candidate search.
-    circle_radius_min_mm: float = 250.0
+    circle_radius_min_mm: float = 10.0
     circle_radius_max_mm: float = 2500.0
     circle_radius_step_mm: float = 50.0
     circle_arc_samples: int = 220
     circle_horizon_x_mm: float = 1800.0
     circle_radius_tie_mm: float = 100.0
+    circle_radius_hysteresis_mm: float = 150.0
 
 
 occupancy_config = OccupancyConfig()

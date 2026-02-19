@@ -34,7 +34,7 @@ profile_opening_angle = 60   # degrees
 profile_steps = 11            # number of azimuth bins
 
 # Distance Threshold
-distance_threshold = 1500.0  # mm, maximum distance for prediction
+distance_threshold = 2500.0  # mm, maximum distance for prediction
 
 # Training Configuration
 validation_split = 0.3

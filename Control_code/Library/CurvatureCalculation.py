@@ -90,7 +90,7 @@ def plan_circles_from_heatmap(hm_norm, x_grid, y_grid, config):
                 best_xy = (px, py)
             else:
                 touched_obstacle = True
-                break
+                continue
         result[side_name] = {
             'radius': best_r,
             'x': best_xy[0],

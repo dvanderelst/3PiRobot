@@ -25,6 +25,7 @@ class SteeringConfig:
     circle_arc_samples: int = Settings.curvature_config.circle_arc_samples
     circle_horizon_x_mm: float = Settings.curvature_config.circle_horizon_x_mm
     circle_radius_tie_mm: float = Settings.curvature_config.circle_radius_tie_mm
+    circle_radius_hysteresis_mm: float = Settings.curvature_config.circle_radius_hysteresis_mm
 
     # Optional per-call debug plotting.
     debug_plot_dir: str | None = None

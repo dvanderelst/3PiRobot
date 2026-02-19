@@ -230,6 +230,43 @@ class Client:
         msg = f"Step (d={distance}, a={angle}) took {time.time() - start:.4f}s"
         self.print_message(msg, category='INFO')
 
+    def step_curvature(
+        self,
+        curvature_inv_mm,
+        step_distance_m,
+        linear_speed=0.1,
+        rotation_speed=90,
+        max_angle_deg=20.0,
+        wait_for_completion=True,
+        timeout=30.0,
+        post_delay_s=0.05,
+    ):
+        """
+        Approximate arc motion as rotate-then-drive steps.
+        curvature_inv_mm: signed curvature in 1/mm (positive = left, negative = right).
+        step_distance_m: forward distance in meters for this step.
+        """
+        if step_distance_m <= 0:
+            return 0.0
+        if curvature_inv_mm is None:
+            angle_deg = 0.0
+        else:
+            curvature_inv_m = float(curvature_inv_mm) * 1000.0
+            angle_rad = curvature_inv_m * float(step_distance_m)
+            angle_deg = -float(np.degrees(angle_rad))
+        if max_angle_deg is not None:
+            angle_deg = max(-float(max_angle_deg), min(float(max_angle_deg), float(angle_deg)))
+        self.step(
+            distance=step_distance_m,
+            angle=angle_deg,
+            linear_speed=linear_speed,
+            rotation_speed=rotation_speed,
+            wait_for_completion=wait_for_completion,
+            timeout=timeout,
+            post_delay_s=post_delay_s,
+        )
+        return float(angle_deg)
+
     def acquire(self, action, wait_for_completion=True, timeout=15.0):
         # assure that action is either 'ping' or 'listen'
         error_message = f"Invalid action '{action}'. Action must be either 'ping' or 'listen'."
