@@ -14,12 +14,12 @@ sessions = ['sessionB01', 'sessionB02', 'sessionB03', 'sessionB04']
 profile_method = 'ray_center'  # target profile extraction method
 
 # Spatial Splitting Configuration
-train_quadrants = [1, 2, 3]
-test_quadrant = 0
+train_quadrants = [0, 1, 2]
+test_quadrant = 3
 
 # Profile Parameters
 profile_opening_angle = 60
-profile_steps = 31
+profile_steps = 21
 
 # Distance Threshold
 distance_threshold = 2000.0
@@ -38,10 +38,17 @@ epochs = 100
 patience = 10
 seed = 42
 debug = False
+use_sample_weighting = True
+sample_weight_power = 0.5
+sample_weight_min = 0.25
+sample_weight_max = 4.0
+sample_weight_feature_bins = 8
+sample_weight_shape_segments = 8
 
 # Plot Configuration
 plot_format = 'png'
 plot_dpi = 300
+show_plots = True
 
 # Output Configuration
 output_dir = 'TrainingRadial'
@@ -61,6 +68,10 @@ learning_rate = 0.001
 import json
 import os
 import time
+
+import matplotlib
+if not os.environ.get('DISPLAY') and os.name != 'nt':
+    matplotlib.use('Agg')
 
 import numpy as np
 import pandas as pd
@@ -89,6 +100,13 @@ def save_plot(filename):
         svg_filename = f"{output_dir}/{filename}.svg"
         plt.savefig(svg_filename, bbox_inches='tight', facecolor='white')
         print(f"Saved SVG plot: {svg_filename}")
+
+
+def maybe_show_plot():
+    if show_plots and matplotlib.get_backend().lower() != 'agg':
+        plt.show()
+    else:
+        plt.close()
 
 
 def write_training_readme():
@@ -199,8 +217,20 @@ class TwoHeadedSonarRadialCNN(nn.Module):
         return presence_logits, radial_logits
 
 
+
+
+
+
+
+
+
+
+
 def get_range_centers(distance_threshold_mm, n_bins):
     return np.linspace(0.0, float(distance_threshold_mm), int(n_bins), dtype=np.float32)
+
+
+
 
 
 def build_radial_targets(distance_mm, presence, range_centers_mm, sigma_mm):
@@ -215,6 +245,69 @@ def build_radial_targets(distance_mm, presence, range_centers_mm, sigma_mm):
     gauss = np.exp(-0.5 * ((r - d) / sigma) ** 2)
     targets = gauss * presence[:, :, None]
     return targets.astype(np.float32)
+
+
+def compute_profile_rarity_weights(distance_mm, presence):
+    """
+    Build per-sample weights from centered profile-shape signatures.
+    Distances are centered per sample, so rarity focuses on shape rather than
+    absolute range from the robot.
+    """
+    n = int(distance_mm.shape[0])
+    k = int(distance_mm.shape[1])
+    if n < 1:
+        return np.ones((0,), dtype=np.float32)
+
+    pres = presence.astype(np.float32)
+    dist = distance_mm.astype(np.float32)
+    present_counts = np.sum(pres, axis=1)
+    present_any = present_counts > 0.5
+
+    dist_masked = np.where(pres > 0.5, dist, np.nan)
+    mean_present = np.nanmean(dist_masked, axis=1)
+    mean_present = np.nan_to_num(mean_present, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Center by per-profile mean so absolute range is removed from the rarity signal.
+    centered = np.where(pres > 0.5, dist - mean_present[:, None], 0.0)
+    std_present = np.nanstd(np.where(pres > 0.5, centered, np.nan), axis=1)
+    std_present = np.nan_to_num(std_present, nan=1.0, posinf=1.0, neginf=1.0)
+    std_present = np.maximum(std_present, 1e-3)
+    normalized = np.where(pres > 0.5, centered / std_present[:, None], 0.0)
+
+    n_seg = int(max(2, min(sample_weight_shape_segments, k)))
+    seg_edges = np.linspace(0, k, n_seg + 1, dtype=np.int32)
+    seg_shape = np.zeros((n, n_seg), dtype=np.float32)
+    seg_coverage = np.zeros((n, n_seg), dtype=np.float32)
+    for s in range(n_seg):
+        a = int(seg_edges[s])
+        b = int(seg_edges[s + 1])
+        seg_pres = pres[:, a:b]
+        seg_cov = seg_pres.mean(axis=1)
+        seg_sum = (normalized[:, a:b] * seg_pres).sum(axis=1)
+        seg_cnt = seg_pres.sum(axis=1)
+        seg_mean = np.divide(seg_sum, np.maximum(seg_cnt, 1e-6))
+        seg_shape[:, s] = np.where(seg_cnt > 0.0, seg_mean, 0.0)
+        seg_coverage[:, s] = seg_cov
+
+    present_frac = np.clip(present_counts / max(float(k), 1.0), 0.0, 1.0)
+    shape_clip = np.clip(seg_shape, -3.0, 3.0)
+    cov_clip = np.clip(seg_coverage, 0.0, 1.0)
+
+    nb = int(max(2, sample_weight_feature_bins))
+    q_shape = np.minimum((((shape_clip + 3.0) / 6.0) * (nb - 1)).astype(np.int32), nb - 1)
+    q_cov = np.minimum((cov_clip * (nb - 1)).astype(np.int32), nb - 1)
+    q_present = np.minimum((present_frac * (nb - 1)).astype(np.int32), nb - 1).reshape(-1, 1)
+
+    feature_keys = np.concatenate([q_present, q_cov, q_shape], axis=1).astype(np.int32)
+    feature_keys[~present_any, :] = 0
+    _, inverse, counts = np.unique(feature_keys, axis=0, return_inverse=True, return_counts=True)
+    key_counts = counts[inverse]
+
+    raw = np.power(np.maximum(key_counts, 1), -float(sample_weight_power))
+    raw /= np.mean(raw)
+    clipped = np.clip(raw, float(sample_weight_min), float(sample_weight_max))
+    weights = clipped / np.mean(clipped)
+    return weights.astype(np.float32)
 
 
 def radial_logits_to_distance_mm(radial_logits, range_centers_mm):
@@ -294,34 +387,73 @@ def preprocess_data(X_train, X_val, X_test, y_train, y_val, y_test, range_center
     yd_train_tensor = torch.FloatTensor(y_train_distance)
     yd_val_tensor = torch.FloatTensor(y_val_distance)
     yd_test_tensor = torch.FloatTensor(y_test_distance)
+    if use_sample_weighting:
+        train_sample_weights = compute_profile_rarity_weights(y_train_distance, y_train_presence)
+    else:
+        train_sample_weights = np.ones((len(y_train_distance),), dtype=np.float32)
+    w_train_tensor = torch.FloatTensor(train_sample_weights)
+    w_val_tensor = torch.ones(len(y_val_distance), dtype=torch.float32)
+    w_test_tensor = torch.ones(len(y_test_distance), dtype=torch.float32)
 
     class RadialDataset(torch.utils.data.Dataset):
-        def __init__(self, x, yp, yr, yd):
+        def __init__(self, x, yp, yr, yd, w=None):
             self.x = x
             self.yp = yp
             self.yr = yr
             self.yd = yd
+            self.w = w
 
         def __len__(self):
             return len(self.x)
 
         def __getitem__(self, idx):
-            return self.x[idx], self.yp[idx], self.yr[idx], self.yd[idx]
+            if self.w is None:
+                return self.x[idx], self.yp[idx], self.yr[idx], self.yd[idx]
+            return self.x[idx], self.yp[idx], self.yr[idx], self.yd[idx], self.w[idx]
 
-    train_ds = RadialDataset(X_train_tensor, yp_train_tensor, yr_train_tensor, yd_train_tensor)
-    val_ds = RadialDataset(X_val_tensor, yp_val_tensor, yr_val_tensor, yd_val_tensor)
-    test_ds = RadialDataset(X_test_tensor, yp_test_tensor, yr_test_tensor, yd_test_tensor)
+    train_ds = RadialDataset(
+        X_train_tensor,
+        yp_train_tensor,
+        yr_train_tensor,
+        yd_train_tensor,
+        w=w_train_tensor if use_sample_weighting else None,
+    )
+    val_ds = RadialDataset(
+        X_val_tensor,
+        yp_val_tensor,
+        yr_val_tensor,
+        yd_val_tensor,
+        w=w_val_tensor if use_sample_weighting else None,
+    )
+    test_ds = RadialDataset(
+        X_test_tensor,
+        yp_test_tensor,
+        yr_test_tensor,
+        yd_test_tensor,
+        w=w_test_tensor if use_sample_weighting else None,
+    )
 
     pin_memory = (device.type == 'cuda')
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_memory)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory)
 
+    if use_sample_weighting:
+        print(
+            "Sample weighting enabled "
+            f"(mean={float(train_sample_weights.mean()):.3f}, "
+            f"min={float(train_sample_weights.min()):.3f}, "
+            f"max={float(train_sample_weights.max()):.3f})"
+        )
+
     return train_loader, val_loader, test_loader
 
 
+
+
+
 def train_model(model, train_loader, val_loader, range_centers_mm):
-    presence_criterion = nn.BCEWithLogitsLoss()
+    presence_criterion = nn.BCEWithLogitsLoss(reduction='none')
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
 
@@ -339,23 +471,36 @@ def train_model(model, train_loader, val_loader, range_centers_mm):
         run_presence = 0.0
         run_radial = 0.0
 
-        for x, yp, yr, _yd in tqdm(train_loader, desc=f'Epoch {epoch + 1}/{epochs} - Training'):
+        for batch_data in tqdm(train_loader, desc=f'Epoch {epoch + 1}/{epochs} - Training'):
+            if use_sample_weighting and len(batch_data) == 5:
+                x, yp, yr, _yd, sample_w = batch_data
+            else:
+                x, yp, yr, _yd = batch_data
+                sample_w = torch.ones(x.size(0), dtype=torch.float32)
             x = x.to(device, non_blocking=True)
             yp = yp.to(device, non_blocking=True)
             yr = yr.to(device, non_blocking=True)
+            sample_w = sample_w.to(device, non_blocking=True)
 
             optimizer.zero_grad()
             presence_logits, radial_logits = model(x)
 
-            presence_loss = presence_criterion(presence_logits, yp)
+            presence_per_bin = presence_criterion(presence_logits, yp)
+            presence_per_sample = presence_per_bin.mean(dim=1)
+            presence_loss = (presence_per_sample * sample_w).sum() / sample_w.sum().clamp(min=1e-12)
+
             present_mask = (yp > 0.5).float()  # (B,K)
-            present_count = present_mask.sum()
-            if present_count.item() > 0:
+            present_count_per_sample = present_mask.sum(dim=1)
+            valid_present = present_count_per_sample > 0
+            if torch.any(valid_present):
                 # Normalize gaussian targets to a probability distribution over range bins.
                 target_dist = yr / yr.sum(dim=-1, keepdim=True).clamp(min=1e-12)
                 log_probs = torch.log_softmax(radial_logits, dim=-1)
                 per_bin_kl = -(target_dist * log_probs).sum(dim=-1)  # (B,K)
-                radial_loss = (per_bin_kl * present_mask).sum() / present_count
+                per_sample_kl = (per_bin_kl * present_mask).sum(dim=1) / present_count_per_sample.clamp(min=1e-12)
+                radial_loss = (
+                    per_sample_kl[valid_present] * sample_w[valid_present]
+                ).sum() / sample_w[valid_present].sum().clamp(min=1e-12)
             else:
                 radial_loss = radial_logits.sum() * 0.0
 
@@ -379,13 +524,18 @@ def train_model(model, train_loader, val_loader, range_centers_mm):
         model.eval()
         run_val = 0.0
         with torch.no_grad():
-            for x, yp, yr, _yd in tqdm(val_loader, desc=f'Epoch {epoch + 1}/{epochs} - Validation'):
+            for batch_data in tqdm(val_loader, desc=f'Epoch {epoch + 1}/{epochs} - Validation'):
+                if use_sample_weighting and len(batch_data) == 5:
+                    x, yp, yr, _yd, _sample_w = batch_data
+                else:
+                    x, yp, yr, _yd = batch_data
                 x = x.to(device, non_blocking=True)
                 yp = yp.to(device, non_blocking=True)
                 yr = yr.to(device, non_blocking=True)
 
                 presence_logits, radial_logits = model(x)
-                presence_loss = presence_criterion(presence_logits, yp)
+                presence_per_bin = presence_criterion(presence_logits, yp)
+                presence_loss = presence_per_bin.mean()
                 present_mask = (yp > 0.5).float()
                 present_count = present_mask.sum()
                 if present_count.item() > 0:
@@ -429,7 +579,13 @@ def collect_predictions(model, data_loader, range_centers_mm):
     all_distance_targets = []
 
     with torch.no_grad():
-        for x, yp, _yr, yd in data_loader:
+        for batch_data in data_loader:
+            # Handle both weighted and unweighted batches
+            if use_sample_weighting and len(batch_data) == 5:
+                x, yp, _yr, yd, _weights = batch_data
+            else:
+                x, yp, _yr, yd = batch_data
+
             x = x.to(device, non_blocking=True)
             yp = yp.to(device, non_blocking=True)
             yd = yd.to(device, non_blocking=True)
@@ -512,7 +668,7 @@ def create_scatter_plots(model, data_loader, range_centers_mm, dataset_name):
     plt.suptitle(f'Distance Prediction Scatter Plots by Azimuth Bin - {dataset_name}', fontsize=16)
     plt.tight_layout()
     save_plot(f'bin_scatter_plots_{dataset_name.lower().replace(" ", "_")}')
-    plt.show()
+    maybe_show_plot()
 
 
 def create_presence_confusion_plots(model, data_loader, range_centers_mm, dataset_name, threshold=0.5):
@@ -575,7 +731,7 @@ def create_presence_confusion_plots(model, data_loader, range_centers_mm, datase
 
     plt.tight_layout()
     save_plot(f'presence_confusion_{dataset_name.lower().replace(" ", "_")}')
-    plt.show()
+    maybe_show_plot()
 
 
 def create_radial_distribution_examples(
@@ -595,7 +751,13 @@ def create_radial_distribution_examples(
     all_radial_targets = []
     all_distance_targets = []
     with torch.no_grad():
-        for x, yp, yr, yd in data_loader:
+        for batch_data in data_loader:
+            # Handle both weighted and unweighted batches
+            if use_sample_weighting and len(batch_data) == 5:
+                x, yp, yr, yd, _weights = batch_data
+            else:
+                x, yp, yr, yd = batch_data
+
             x = x.to(device, non_blocking=True)
             presence_logits, radial_logits = model(x)
             all_presence_probs.append(torch.sigmoid(presence_logits).cpu().numpy())
@@ -685,7 +847,7 @@ def create_radial_distribution_examples(
 
         plt.tight_layout()
         save_plot(f'radial_distribution_samples_{dataset_name.lower().replace(" ", "_")}_batch_{pidx:02d}')
-        plt.show()
+        maybe_show_plot()
 
 
 def main():
@@ -702,6 +864,8 @@ def main():
         X_train, X_val, X_test, y_train, y_val, y_test, range_centers_mm
     )
 
+    # Use the original CNN architecture (compatible with downstream scripts)
+    print("Using original CNN architecture")
     model = TwoHeadedSonarRadialCNN(
         input_shape=(2, 200),
         profile_steps=profile_steps,
@@ -710,9 +874,12 @@ def main():
     ).to(device)
 
     start_time = time.time()
+    
+    # Normal training
     train_losses, val_losses, presence_losses, radial_losses = train_model(
         model, train_loader, val_loader, range_centers_mm
     )
+    
     training_time = time.time() - start_time
 
     print(f'Training completed in {training_time:.2f} seconds')
@@ -729,7 +896,7 @@ def main():
     plt.grid(True)
     plt.tight_layout()
     save_plot('training_curves')
-    plt.show()
+    maybe_show_plot()
 
     model.load_state_dict(torch.load(f'{output_dir}/best_model_pytorch.pth', map_location=device))
 
@@ -754,6 +921,13 @@ def main():
         'range_centers_mm': range_centers_mm.tolist(),
         'radial_sigma_mm': radial_sigma_mm,
         'radial_loss_weight': radial_loss_weight,
+        'use_sample_weighting': bool(use_sample_weighting),
+        'sample_weight_power': float(sample_weight_power),
+        'sample_weight_min': float(sample_weight_min),
+        'sample_weight_max': float(sample_weight_max),
+        'sample_weight_feature_bins': int(sample_weight_feature_bins),
+        'sample_weight_shape_segments': int(sample_weight_shape_segments),
+        'model_architecture': 'original',
     }
 
     with open(f'{output_dir}/training_params.json', 'w') as f:
@@ -816,7 +990,7 @@ def main():
         ax1.set_ylim(-0.1, 1.1)
     plt.tight_layout()
     save_plot('test_samples')
-    plt.show()
+    maybe_show_plot()
 
     sample_errors = []
     for i in range(len(presence_preds)):
@@ -846,7 +1020,7 @@ def main():
     plt.axis('equal')
     plt.tight_layout()
     save_plot('spatial_errors')
-    plt.show()
+    maybe_show_plot()
 
     return model
 
