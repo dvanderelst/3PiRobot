@@ -18,8 +18,8 @@ train_quadrants = [1, 2, 3]
 test_quadrant = 0
 
 # Profile Parameters
-profile_opening_angle = 45
-profile_steps = 5
+profile_opening_angle = 60
+profile_steps = 31
 
 # Distance Threshold
 distance_threshold = 2000.0
