@@ -1,9 +1,14 @@
 """
-Train a profile -> EchoProcessor emulator.
+Train an environment emulator that predicts sonar measurements from profiles.
 
-Supervision target:
-- distance_mm predicted by EchoProcessor
-- iid_db computed by EchoProcessor
+This script trains a neural network to emulate the EchoProcessor system.
+It learns to predict both distance and IID from profile data, effectively
+creating a "world model" that can simulate what sonar measurements would
+be received from different positions in an environment.
+
+Supervision targets:
+- distance_mm: closest distance predicted by EchoProcessor
+- iid_db: interaural intensity difference computed by EchoProcessor
 """
 
 # ============================================
@@ -15,7 +20,7 @@ profile_opening_angle = None
 profile_steps = None
 
 echo_artifact_dir = "EchoProcessor"
-output_dir = "ProfileToEchoProcessor"
+output_dir = "Emulator"
 
 train_quadrants = [0, 1, 2]
 test_quadrant = 3
@@ -605,17 +610,27 @@ def main():
     with open(f"{output_dir}/training_params.json", "w") as f:
         json.dump(params, f, indent=2)
 
-    readme = """# ProfileToEchoProcessor Output
+    readme = """# Emulator Output
 
-Artifacts from `SCRIPT_TrainProfileToEchoProcessor.py`.
+Artifacts from `SCRIPT_TrainEmulator.py`.
+
+This emulator serves as a "world model" that predicts what sonar measurements
+(distance and IID) would be received from different positions in an environment,
+based on profile data.
 
 ## Core
-- `best_model_pytorch.pth`: Best profile->(distance,iid) model by validation loss.
+- `best_model_pytorch.pth`: Best profile->(distance,iid) emulator model by validation loss.
 - `training_params.json`: Configuration + normalization + test metrics.
 
 ## Plots
-- `training_curves.png`
-- `test_scatter.png`
+- `training_curves.png`: Training and validation loss curves
+- `test_scatter.png`: Predicted vs true distance and IID on test set
+
+## Usage
+This emulator can be used to:
+1. Simulate robot navigation through environments
+2. Generate synthetic training data for policy learning
+3. Enable "imagination-based" planning and learning
 """
     with open(f"{output_dir}/README.md", "w") as f:
         f.write(readme)

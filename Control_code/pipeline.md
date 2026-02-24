@@ -35,7 +35,7 @@ This document describes the two-stage pipeline for processing sonar data and pro
 - `training_params.json` - Configuration and metrics
 - Visualizations: training curves, distance scatter plots, IID correlation plots
 
-## Stage 2: SCRIPT_TrainProfileToEchoProcessor.py
+## Stage 2: SCRIPT_TrainEmulator.py
 
 **Purpose:** Train an MLP to emulate EchoProcessor using profile data as input.
 
@@ -65,7 +65,7 @@ This document describes the two-stage pipeline for processing sonar data and pro
    - Sign confusion counts (TP, FN, FP, TN)
 
 ### Outputs:
-- `best_model_pytorch.pth` - Trained profile-to-EchoProcessor model
+- `best_model_pytorch.pth` - Environment emulator model
 - `training_params.json` - Configuration and metrics
 - Visualizations: training curves, test scatter plots
 

@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-02-23 15:52:47",
+  "timestamp": "2026-02-24 10:29:54",
   "sessions": [
     "sessionB01",
     "sessionB02",
@@ -43,9 +43,6 @@
   "iid_near_zero_weight": 1.25,
   "iid_tail_abs_db": 5.0,
   "iid_tail_weight": 1.25,
-  "use_iid_sign_head": true,
-  "iid_sign_loss_weight": 0.6,
-  "iid_sign_ignore_center_abs_db": 0.5,
   "teacher_batch_size": 512,
   "num_train": 1518,
   "num_val": 380,
@@ -53,40 +50,38 @@
   "input_feature_dim": 26,
   "metrics": {
     "distance": {
-      "rmse_mm": 99.62837219238281,
-      "mae_mm": 68.23300170898438,
-      "bias_mm": -3.3402063846588135,
-      "pearson": 0.9545977152383667,
-      "spearman": 0.9651374142933681
+      "rmse_mm": 106.87582397460938,
+      "mae_mm": 75.9600830078125,
+      "bias_mm": -1.39133882522583,
+      "pearson": 0.9476224057658797,
+      "spearman": 0.9576827995389908
     },
     "iid": {
-      "rmse_db": 2.1007630825042725,
-      "mae_db": 1.6761703491210938,
-      "bias_db": -0.35527440905570984,
-      "pearson": 0.8862605533572907,
-      "spearman": 0.8928191420826339,
-      "sign_accuracy": 0.8820598006644518,
+      "rmse_db": 2.079261541366577,
+      "mae_db": 1.6277716159820557,
+      "bias_db": -0.2601546347141266,
+      "pearson": 0.8861515215412328,
+      "spearman": 0.8918967827734369,
+      "sign_accuracy": 0.8754152823920266,
       "sign_confusion_counts": {
-        "true_pos_pred_pos": 212,
-        "true_pos_pred_neg": 40,
-        "true_neg_pred_pos": 31,
-        "true_neg_pred_neg": 319
+        "true_pos_pred_pos": 205,
+        "true_pos_pred_neg": 47,
+        "true_neg_pred_pos": 28,
+        "true_neg_pred_neg": 322
       },
-      "sign_accuracy_true_pos": 0.8412698412698413,
-      "sign_accuracy_true_neg": 0.9114285714285715,
-      "sign_n": 602,
-      "sign_head_accuracy": 0.9162112932604736,
-      "sign_head_n": 549
+      "sign_accuracy_true_pos": 0.8134920634920635,
+      "sign_accuracy_true_neg": 0.92,
+      "sign_n": 602
     }
   },
   "calibration": [
     {
-      "slope": 1.0037042668777778,
-      "intercept": 11.244920562740809
+      "slope": 1.0081772761288097,
+      "intercept": -25.120923970414577
     },
     {
-      "slope": 0.9874246959332269,
-      "intercept": 0.06525429692592602
+      "slope": 0.9402137575713451,
+      "intercept": -0.11576243201088099
     }
   ],
   "norm_stats": {

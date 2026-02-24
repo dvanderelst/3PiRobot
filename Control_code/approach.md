@@ -10,12 +10,12 @@ The current sonar system is fixed to the robot's orientation, limiting its abili
 
 ### Biological Inspiration
 
-This approach is bio-inspired by how bats might use internal models of echo acoustics to plan movement. The ProfileToEchoProcessor network serves as the robot's "imagination" of how the world would sound from different positions and orientations.
+This approach is bio-inspired by how bats might use internal models of echo acoustics to plan movement. The emulator network (trained in SCRIPT_TrainEmulator.py) serves as the robot's "imagination" of how the world would sound from different positions and orientations.
 
 ## System Architecture
 
 ```
-Environment Profiles → ProfileToEchoProcessor (Emulator)
+Environment Profiles → Emulator (World Model)
                                       ↓
 [Policy NN] ← (IID history, Distance history, Movement history)
                                       ↓
@@ -163,7 +163,7 @@ class ActiveSensingPolicy(nn.Module):
 ## Training Pipeline
 
 ### Phase 1: Emulator Validation
-- Test ProfileToEchoProcessor accuracy against real sonar data
+- Test emulator accuracy against real sonar data
 - Establish confidence bounds and error characteristics
 - Identify any systematic biases that need correction
 
@@ -187,7 +187,7 @@ class ActiveSensingPolicy(nn.Module):
 
 ## Key Challenges
 
-1. **Emulator Accuracy**: ProfileToEchoProcessor must be sufficiently accurate for meaningful learning
+1. **Emulator Accuracy**: The emulator must be sufficiently accurate for meaningful learning
 2. **Credit Assignment**: Long temporal dependencies in active sensing sequences
 3. **Exploration vs Exploitation**: Balancing novel sensing strategies with known good behaviors
 4. **Sim-to-Real Transfer**: Robustness if emulator isn't perfect
@@ -208,5 +208,44 @@ class ActiveSensingPolicy(nn.Module):
 - Implement comprehensive logging and visualization
 - Design experiments to isolate active sensing benefits
 - Plan for gradual complexity increase (simple → complex environments)
+
+## Emulator Class
+
+A new `Emulator` class has been created in `Control_code/Library/Emulator.py` that provides:
+
+1. **Consistent Profile Parameters**: Automatically reads `profile_opening_angle` and `profile_steps` from EchoProcessor artifacts
+2. **Clean Prediction Interface**: Simple `predict()` method that takes profiles and returns distance/IID predictions
+3. **Batch Processing**: Supports both single and batch predictions
+4. **Full Pipeline Reproduction**: Replicates the exact feature preprocessing and postprocessing from training
+
+### Usage Example
+
+```python
+from Library.Emulator import Emulator
+
+# Load the trained emulator
+emulator = Emulator.load()
+
+# Get profile parameters (ensures consistency with EchoProcessor)
+params = emulator.get_profile_params()
+print(f"Using profiles with {params['profile_steps']} steps, {params['profile_opening_angle']}° opening")
+
+# Predict from a single profile
+import numpy as np
+profile = np.random.uniform(100, 2000, size=params['profile_steps'])  # Random profile
+result = emulator.predict_single(profile)
+print(f"Predicted: {result['distance_mm']:.1f}mm, {result['iid_db']:.1f}dB")
+
+# Predict from batch of profiles
+profiles = np.random.uniform(100, 2000, size=(10, params['profile_steps']))
+batch_results = emulator.predict(profiles)
+```
+
+## Next Steps
+
+1. **Test the Emulator**: Run `SCRIPT_TestEmulator.py` to verify it works
+2. **Build the Simulator**: Create a simulation environment that uses the emulator
+3. **Implement Policy Learning**: Start with genetic algorithms approach
+4. **Develop Visualization**: Tools to analyze learned behaviors
 
 This approach represents a sophisticated integration of learned environment models with active perception strategies, potentially demonstrating how robots can use "imaginary" self-training to negotiate complex environments - much like bats might use internal models of echo acoustics.
