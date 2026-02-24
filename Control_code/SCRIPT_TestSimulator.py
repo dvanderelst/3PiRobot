@@ -32,9 +32,9 @@ MAX_ARROW_LENGTH = 200  # Maximum arrow length for distance visualization
 # Orientation control: Set to None for random orientations, or specify a fixed yaw in degrees
 FIXED_ORIENTATION = 0  # e.g., 0, 90, 180, 270, or None for random
 
-# Output file names
-DIAGNOSTIC_PLOT_FILE = "arena_diagnostic_plot.png"
-UNIFIED_VISUALIZATION_FILE = "unified_arena_visualization.png"
+# Output file names (saved in Plots/ folder)
+DIAGNOSTIC_PLOT_FILE = "Plots/arena_diagnostic_plot.png"
+UNIFIED_VISUALIZATION_FILE = "Plots/unified_arena_visualization.png"
 
 # ============================================
 # END OF CONFIGURATION
@@ -751,6 +751,19 @@ def main():
     """Run all simulator tests."""
     print("Environment Simulator Test Script")
     print("=" * 50)
+    
+    # Create Plots directory if it doesn't exist
+    try:
+        plots_dir = os.path.abspath("Plots")
+        os.makedirs(plots_dir, exist_ok=True)
+        print(f"✓ Plots directory ready: {plots_dir}")
+        # Verify directory was created
+        if not os.path.exists(plots_dir):
+            raise FileNotFoundError(f"Directory {plots_dir} was not created")
+    except Exception as e:
+        print(f"⚠ Could not create Plots directory: {e}")
+        print("  Will save plots in current directory instead")
+    
     orient_config = f"Random" if FIXED_ORIENTATION is None else f"Fixed ({FIXED_ORIENTATION}°)"
     print(f"Configuration: Session={SIMULATION_SESSION}, Positions={NUM_POSITIONS}, Orientation={orient_config}")
     
