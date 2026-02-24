@@ -82,17 +82,6 @@ from Library.DataStorage import DataReader
 import math
 
 
-def _compute_curvature_single(args):
-    i, az, dist, distance_cutoff_mm, cfg = args
-    from Library.ProfileCurvature import profile2curvature
-    dist = np.asarray(dist, dtype=np.float32).copy()
-    invalid = (dist < 0.0) | (dist > float(distance_cutoff_mm))
-    dist[invalid] = np.nan
-    kappa = float(profile2curvature(az_deg=np.asarray(az, dtype=np.float32), dist_mm=dist, config=cfg, return_debug=False))
-    return i, kappa
-
-
-
 #from Library import Guidance
 #from Library import Vectors
 
@@ -387,9 +376,6 @@ class DataCollection:
         self._loaded_profiles = False
         self._loaded_views = False
         self._loaded_sonar = False
-        self._loaded_curvatures = False
-        self._curvature_distance_cutoff_mm = None
-        
         # Clear cache if force_recompute is True and caching is enabled
         if force_recompute and self.cache_dir:
             print(f"🔥 Force recompute enabled - clearing cache directory: {self.cache_dir}")
@@ -618,62 +604,6 @@ class DataCollection:
         
         return sonar_data
 
-    def load_curvatures(
-        self,
-        distance_cutoff_mm,
-        force_recompute=False,
-        steering_config=None,
-        show_progress=True,
-        parallel=True,
-        num_workers=None,
-        backend='thread',
-    ):
-        """
-        Load geometry-derived curvature targets for all sessions.
-
-        Notes
-        -----
-        Requires profiles to be loaded first via load_profiles(...), so the same
-        profile settings are reused.
-        """
-        global_force_recompute = self._cache_metadata.get('force_recompute', False)
-        effective_force_recompute = force_recompute or global_force_recompute
-        distance_cutoff_mm = float(distance_cutoff_mm)
-
-        if (
-            self._loaded_curvatures
-            and not effective_force_recompute
-            and self._curvature_distance_cutoff_mm is not None
-            and float(self._curvature_distance_cutoff_mm) == distance_cutoff_mm
-        ):
-            print(f"🌀 Using already loaded curvatures (cutoff={distance_cutoff_mm:.1f} mm)")
-            return self.curvatures
-
-        if not self._loaded_profiles:
-            raise ValueError("Profiles not loaded. Call load_profiles() before load_curvatures().")
-
-        print(f"🌀 Loading curvature targets (cutoff={distance_cutoff_mm:.1f} mm)...")
-        all_curvatures = []
-        for i, processor in enumerate(self.processors):
-            print(f"   Processing session {i+1}/{len(self.processors)}...")
-            curv = processor.load_curvatures(
-                distance_cutoff_mm=distance_cutoff_mm,
-                force_recompute=effective_force_recompute,
-                steering_config=steering_config,
-                show_progress=show_progress,
-                parallel=parallel,
-                num_workers=num_workers,
-                backend=backend,
-            )
-            all_curvatures.append(curv)
-
-        curvatures = np.concatenate(all_curvatures, axis=0).astype(np.float32)
-        self._loaded_curvatures = True
-        self._curvature_distance_cutoff_mm = distance_cutoff_mm
-        print(f"✅ Loaded curvatures for {len(curvatures)} total samples")
-        print(f"   Curvatures shape: {curvatures.shape}")
-        return curvatures
-
     def get_field(self, *fields):
         """
         Get concatenated field data from all processors.
@@ -798,13 +728,6 @@ class DataCollection:
             raise ValueError("Sonar not loaded. Call load_sonar() first.")
          
         return np.concatenate([p.sonar_data for p in self.processors], axis=0)
-
-    @property
-    def curvatures(self):
-        """Get concatenated curvature targets for all sessions."""
-        if not self._loaded_curvatures:
-            raise ValueError("Curvatures not loaded. Call load_curvatures() first.")
-        return np.concatenate([p.curvatures for p in self.processors], axis=0)
 
     @property
     def rob_x(self):
@@ -969,11 +892,6 @@ class DataProcessor:
         self.sonar_loaded = False
         self.sonar_data = None
 
-        # Curvature targets (set when load_curvatures is called)
-        self.curvatures_loaded = False
-        self.curvatures = None
-        self.curvature_distance_cutoff_mm = None
-        
         self.positions = read_robot_trajectory(data_reader)
         self.filenames = self.data_reader.get_all_filenames()
         self.n = len(self.filenames)
@@ -1453,121 +1371,6 @@ class DataProcessor:
         print(f"✅ Loaded {len(self.profiles)} distance profiles")
         print(f"   Profile shape: {self.profiles.shape}")
         print(f"   Centers shape: {self.profile_centers.shape}")
-
-    def load_curvatures(
-        self,
-        distance_cutoff_mm,
-        force_recompute=False,
-        steering_config=None,
-        show_progress=True,
-        parallel=True,
-        num_workers=None,
-        backend='thread',
-    ):
-        """
-        Load per-sample curvature targets derived from currently loaded profiles.
-
-        Parameters
-        ----------
-        distance_cutoff_mm : float
-            Distances above this threshold are ignored (set to NaN) before
-            curvature computation.
-        force_recompute : bool
-            If True, recompute even if cached.
-        steering_config : SteeringConfig, optional
-            Planner settings for profile2curvature; defaults to SteeringConfig().
-        show_progress : bool
-            If True, show tqdm progress.
-        parallel : bool
-            If True, compute targets using a worker pool.
-        num_workers : int or None
-            Number of workers for parallel mode. Defaults to min(cpu_count, n).
-        backend : str
-            Parallel backend: 'thread' or 'process'.
-        """
-        effective_force_recompute = force_recompute or self.force_recompute
-        distance_cutoff_mm = float(distance_cutoff_mm)
-
-        if (
-            self.curvatures_loaded
-            and not effective_force_recompute
-            and self.curvature_distance_cutoff_mm is not None
-            and float(self.curvature_distance_cutoff_mm) == distance_cutoff_mm
-        ):
-            print(f"🌀 Using already loaded curvature targets (cutoff={distance_cutoff_mm:.1f} mm)")
-            return self.curvatures
-
-        if not self.profiles_loaded or self.profiles is None or self.profile_centers is None:
-            raise ValueError("Profiles not loaded. Call load_profiles(...) before load_curvatures(...).")
-
-        cfg = steering_config
-        if cfg is None:
-            from Library.SteeringConfigClass import SteeringConfig
-            cfg = SteeringConfig()
-
-        # Try cache.
-        if not effective_force_recompute:
-            cached_curv, cached_meta = self._load_from_cache('curvatures')
-            if cached_curv is not None and cached_meta is not None:
-                cached_cutoff = cached_meta.get('distance_cutoff_mm', None)
-                cached_opening = cached_meta.get('profile_opening_angle', None)
-                cached_steps = cached_meta.get('profile_steps', None)
-                if (
-                    cached_cutoff is not None and float(cached_cutoff) == distance_cutoff_mm
-                    and cached_opening == self.profile_opening_angle
-                    and cached_steps == self.profile_steps
-                    and len(cached_curv) == self.n
-                ):
-                    self.curvatures = np.asarray(cached_curv, dtype=np.float32)
-                    self.curvatures_loaded = True
-                    self.curvature_distance_cutoff_mm = distance_cutoff_mm
-                    print(f"✅ Loaded {len(self.curvatures)} curvature targets from cache")
-                    return self.curvatures
-
-        print(f"🌀 Computing curvature targets (cutoff={distance_cutoff_mm:.1f} mm)...")
-        curvatures = np.zeros(self.n, dtype=np.float32)
-        n_workers = int(num_workers) if num_workers is not None else min(os.cpu_count() or 1, self.n)
-        use_parallel = bool(parallel) and n_workers > 1
-
-        if use_parallel:
-            from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-            executor_cls = ProcessPoolExecutor if str(backend).lower() == 'process' else ThreadPoolExecutor
-            tasks = [
-                (i, self.profile_centers[i], self.profiles[i], distance_cutoff_mm, cfg)
-                for i in range(self.n)
-            ]
-            with executor_cls(max_workers=n_workers) as executor:
-                iterator = executor.map(_compute_curvature_single, tasks)
-                if show_progress:
-                    iterator = tqdm(iterator, total=self.n, desc='Computing curvatures')
-                for i, kappa in iterator:
-                    curvatures[int(i)] = float(kappa)
-        else:
-            iterator = range(self.n)
-            if show_progress:
-                iterator = tqdm(iterator, total=self.n, desc='Computing curvatures')
-            for i in iterator:
-                _, kappa = _compute_curvature_single(
-                    (i, self.profile_centers[i], self.profiles[i], distance_cutoff_mm, cfg)
-                )
-                curvatures[i] = float(kappa)
-
-        self.curvatures = curvatures
-        self.curvatures_loaded = True
-        self.curvature_distance_cutoff_mm = distance_cutoff_mm
-
-        if self.cache_dir:
-            from datetime import datetime
-            metadata = {
-                'distance_cutoff_mm': distance_cutoff_mm,
-                'profile_opening_angle': self.profile_opening_angle,
-                'profile_steps': self.profile_steps,
-                'timestamp': datetime.now().isoformat(),
-            }
-            self._save_to_cache(self.curvatures, 'curvatures', metadata=metadata)
-
-        print(f"✅ Loaded {len(self.curvatures)} curvature targets")
-        return self.curvatures
 
     def load_views(self, radius_mm=1500, opening_angle=90, output_size=(128, 128), plot_indices=None, indices=None, save_examples=False, force_recompute=False, show_example=True):
         """

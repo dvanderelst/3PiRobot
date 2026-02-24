@@ -43,9 +43,7 @@ def get_client_config(index): return client_list[index]
 # Update these values here; scripts/modules should read from this single source.
 #
 # Used by:
-# - Library/SteeringConfigClass.py (SteeringConfig defaults)
-# - SCRIPT_ComputeOccupancy.py
-# - SCRIPT_AssessOccupancy.py
+# - Occupancy-related scripts/modules
 #
 # Notes:
 # - Script-level overrides can still be passed explicitly when needed.

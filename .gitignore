@@ -24,3 +24,9 @@ Control_code/cache/
 
 
 *.zip
+
+Control_code/CompareModels/
+
+Control_code/TrainingClosest/
+
+Control_code/EchoProcessor/

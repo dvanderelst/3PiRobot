@@ -8,7 +8,7 @@ from Library import DataProcessor, Utils
 # ============================================
 # CONFIGURATION
 # ============================================
-session = "testing"
+session = "sessionB02"
 
 # Session trajectory/profile visualization.
 show_trajectory_plot = True

@@ -49,6 +49,7 @@ for step in range(max_steps):
         position = tracker.get_position(robot_number)
         writer.save_data(sonar_package=None, position=position, motion={'distance': 0, 'rotation': 0})
         continue
+    sonar_package['robot_number'] = robot_number
     corrected_iid = sonar_package['corrected_iid']
     corrected_distance = sonar_package['corrected_distance']
     side_code = sonar_package['side_code']
@@ -92,4 +93,3 @@ for step in range(max_steps):
     if step % 100 == 0: PushOver.send(f"Data acquisition progress: {step}/{max_steps} steps completed.")
 
 PushOver.send(f"Data acquisition completed: {max_steps} steps completed for session {session}.")
-
