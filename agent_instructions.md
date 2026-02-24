@@ -40,3 +40,4 @@ Rules for working with the code in the Control_code folder:
 + All training results, outputs, and generated files should be kept within their respective folders (Control_code/ or Robot_code/).
 + The root directory should only contain agent instructions and common files, not generated training outputs.
 
+**After reading this instructions, wait for furher instructions. Don't start coding yet.**
