@@ -244,8 +244,153 @@ batch_results = emulator.predict(profiles)
 ## Next Steps
 
 1. **Test the Emulator**: Run `SCRIPT_TestEmulator.py` to verify it works
-2. **Build the Simulator**: Create a simulation environment that uses the emulator
+2. **Test the Simulator**: Run `SCRIPT_TestSimulator.py` to verify environment simulation
 3. **Implement Policy Learning**: Start with genetic algorithms approach
 4. **Develop Visualization**: Tools to analyze learned behaviors
+
+## Environment Simulator
+
+A comprehensive `EnvironmentSimulator` class has been created in `Control_code/Library/EnvironmentSimulator.py` that provides:
+
+### Key Features
+
+1. **Arena Layout Loading**: Loads real arena geometries from session data
+2. **Profile Generation**: Computes distance profiles for arbitrary positions/orientations
+3. **Sonar Emulation**: Uses the trained emulator to predict distance/IID measurements
+4. **Robot Movement Simulation**: Simulates the full rotate-measure-rotate-drive action sequence
+5. **Consistent Parameters**: Automatically uses profile parameters from EchoProcessor
+
+### Core Components
+
+```python
+# ArenaLayout: Handles environment geometry
+arena = ArenaLayout("sessionB01")
+profile = arena.compute_profile(x, y, orientation, min_az, max_az, steps)
+
+# EnvironmentSimulator: Full simulation
+simulator = EnvironmentSimulator("sessionB01")
+measurement = simulator.get_sonar_measurement(x, y, orientation)
+
+# Movement simulation
+actions = [
+    {'rotate1_deg': 30, 'rotate2_deg': -30, 'drive_mm': 200},
+    {'rotate1_deg': -45, 'rotate2_deg': 45, 'drive_mm': 150}
+]
+trajectory = simulator.simulate_robot_movement(start_x, start_y, start_orient, actions)
+```
+
+### Action Sequence Support
+
+The simulator fully supports the active sensing action sequence:
+1. **rotate1**: First rotation for measurement
+2. **measure**: Get sonar prediction (distance + IID)
+3. **rotate2**: Second rotation for final orientation
+4. **drive**: Move forward
+
+### Usage in Policy Learning
+
+```python
+# For policy learning, the main interface is:
+measurement = simulator.get_sonar_measurement(x, y, orientation)
+# Returns: {'distance_mm': float, 'iid_db': float}
+
+# For full trajectory simulation:
+trajectory = simulator.simulate_robot_movement(start_x, start_y, start_orient, actions)
+# Returns list of states with positions, orientations, and measurements
+```
+
+## Policy Learning Implementation
+
+With the simulator in place, we can now implement policy learning. The simulator provides:
+
+- **State**: Current position, orientation, measurement history
+- **Action Space**: rotate1, rotate2, drive_distance
+- **Measurement Interface**: get_sonar_measurement() for observations
+- **Movement Simulation**: simulate_robot_movement() for rollouts
+
+### Genetic Algorithm Approach
+
+```python
+class PolicyNetwork(nn.Module):
+    # Takes measurement history + position context
+    # Outputs: rotate1, rotate2, drive_distance
+    pass
+
+class GeneticPolicyLearner:
+    def __init__(self, simulator):
+        self.simulator = simulator
+        self.population = [PolicyNetwork() for _ in range(population_size)]
+    
+    def evaluate_fitness(self, policy):
+        # Run policy in simulator
+        trajectory = self._rollout_policy(policy)
+        
+        # Calculate fitness based on:
+        # - Distance traveled
+        # - Obstacle avoidance
+        # - Path smoothness
+        return fitness_score
+    
+    def _rollout_policy(self, policy):
+        # Start at random position
+        start_x, start_y, start_orient = self._get_random_start()
+        
+        # Run policy for N steps
+        actions = []
+        for step in range(max_steps):
+            # Get current measurement
+            measurement = self.simulator.get_sonar_measurement(x, y, orient)
+            
+            # Policy decides action
+            action = policy.decide_action(measurement_history, position_history)
+            actions.append(action)
+            
+            # Check for collisions/termination
+            if self._check_collision(x, y, action):
+                break
+        
+        # Simulate the trajectory
+        return self.simulator.simulate_robot_movement(start_x, start_y, start_orient, actions)
+```
+
+### Reinforcement Learning Approach
+
+```python
+class RLPolicyLearner:
+    def __init__(self, simulator):
+        self.simulator = simulator
+        self.env = GymEnvironment(simulator)
+        self.agent = PPOAgent(state_space, action_space)
+    
+    def train(self):
+        for episode in range(episodes):
+            state = self.env.reset()
+            done = False
+            
+            while not done:
+                action = self.agent.choose_action(state)
+                next_state, reward, done, info = self.env.step(action)
+                
+                # Calculate reward based on:
+                # - Progress toward goal
+                # - Obstacle proximity
+                # - Movement efficiency
+                
+                self.agent.remember(state, action, reward, next_state, done)
+                state = next_state
+                
+                if done:
+                    self.agent.learn()
+```
+
+## Complete Pipeline Summary
+
+```
+Real Arena → DataProcessor → EchoProcessor Training → Emulator Training
+                                      ↓
+EnvironmentSimulator (uses Emulator) → Policy Learning → Robot Control
+```
+
+The simulator now provides a complete virtual environment for developing and testing navigation policies before deploying them on the real robot.
 
 This approach represents a sophisticated integration of learned environment models with active perception strategies, potentially demonstrating how robots can use "imaginary" self-training to negotiate complex environments - much like bats might use internal models of echo acoustics.
