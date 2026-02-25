@@ -29,18 +29,43 @@ class ArenaLayout:
             session_name: Name of the session to load (e.g., "sessionB01")
         """
         self.session_name = session_name
-        self.dc = DataProcessor.DataCollection([session_name])
-        
-        # Load arena metadata through the processor
-        self._load_arena_metadata()
-        
-        # Load wall data
-        self.walls = self._load_walls()
-        
-        # Arena boundaries (with fallback defaults)
-        self.arena_width = float(self.meta.get("arena_width_mm", 2400.0))
-        self.arena_height = float(self.meta.get("arena_height_mm", 1800.0))
-        self.mm_per_px = float(self.meta.get("map_mm_per_px", 10.0))
+        self.dc = None
+        self.meta = {}
+        self.walls = np.array([], dtype=np.float32)
+
+        # Explicit default session
+        if session_name == "_default_":
+            self._use_default_arena()
+            return
+
+        try:
+            self.dc = DataProcessor.DataCollection([session_name])
+
+            # Load arena metadata through the processor
+            self._load_arena_metadata()
+
+            # Load wall data
+            self.walls = self._load_walls()
+
+            # Arena boundaries (with fallback defaults)
+            self.arena_width = float(self.meta.get("arena_width_mm", 2400.0))
+            self.arena_height = float(self.meta.get("arena_height_mm", 1800.0))
+            self.mm_per_px = float(self.meta.get("map_mm_per_px", 10.0))
+            arena_bounds = self.meta.get("arena_bounds_mm", None)
+            if isinstance(arena_bounds, dict):
+                self.arena_min_x = float(arena_bounds.get("min_x", 0.0))
+                self.arena_max_x = float(arena_bounds.get("max_x", self.arena_width))
+                self.arena_min_y = float(arena_bounds.get("min_y", 0.0))
+                self.arena_max_y = float(arena_bounds.get("max_y", self.arena_height))
+            else:
+                self.arena_min_x = 0.0
+                self.arena_max_x = self.arena_width
+                self.arena_min_y = 0.0
+                self.arena_max_y = self.arena_height
+        except Exception as e:
+            print(f"⚠ Could not initialize arena '{session_name}': {e}")
+            print("  Falling back to built-in default arena")
+            self._use_default_arena()
         
     def _load_arena_metadata(self):
         """Load arena metadata from the session."""
@@ -81,6 +106,10 @@ class ArenaLayout:
         self.arena_width = 2400.0
         self.arena_height = 1800.0
         self.mm_per_px = 10.0
+        self.arena_min_x = 0.0
+        self.arena_max_x = self.arena_width
+        self.arena_min_y = 0.0
+        self.arena_max_y = self.arena_height
         
         # Create a simple rectangular arena wall
         self.walls = np.array([
@@ -91,6 +120,9 @@ class ArenaLayout:
     
     def _load_walls(self) -> np.ndarray:
         """Load wall coordinates from the session."""
+        if self.dc is None:
+            return np.array([], dtype=np.float32)
+
         try:
             # Try to get walls from processor
             if self.dc.processors:
@@ -106,8 +138,9 @@ class ArenaLayout:
                         walls = walls * 1000  # Convert meters to mm
                         print(f"✓ Converted wall coordinates from meters to mm")
                     elif max_coord < 100:  # Probably pixels if < 100
-                        walls = walls * self.mm_per_px
-                        print(f"✓ Converted wall coordinates from pixels to mm (scale: {self.mm_per_px}mm/px)")
+                        mm_per_px = float(self.meta.get("map_mm_per_px", 10.0))
+                        walls = walls * mm_per_px
+                        print(f"✓ Converted wall coordinates from pixels to mm (scale: {mm_per_px}mm/px)")
                     else:
                         print(f"✓ Wall coordinates appear to be in mm (max: {max_coord:.1f}mm)")
                     
@@ -240,12 +273,21 @@ class EnvironmentSimulator:
     This class provides the core simulation functionality for policy learning.
     """
     
-    def __init__(self, session_name: str = "sessionB01"):
+    def __init__(
+        self,
+        session_name: str = "sessionB01",
+        robot_radius_mm: float = 85.0,
+        boundary_margin_mm: Optional[float] = None,
+        collision_step_mm: float = 20.0,
+    ):
         """
         Initialize simulator with arena layout and emulator.
         
         Args:
             session_name: Session to use for arena layout
+            robot_radius_mm: Collision clearance radius around robot center
+            boundary_margin_mm: Min distance from arena border (defaults to robot radius)
+            collision_step_mm: Step size for drive-segment collision checking
         """
         # Load arena layout
         self.arena = ArenaLayout(session_name)
@@ -257,10 +299,102 @@ class EnvironmentSimulator:
         self.profile_params = self.emulator.get_profile_params()
         self.opening_angle = self.profile_params['profile_opening_angle']
         self.profile_steps = self.profile_params['profile_steps']
+        self.robot_radius_mm = float(robot_radius_mm)
+        self.boundary_margin_mm = float(boundary_margin_mm) if boundary_margin_mm is not None else float(robot_radius_mm)
+        self.collision_step_mm = max(1.0, float(collision_step_mm))
         
         print(f"Simulator initialized with {session_name}")
         print(f"Profile config: {self.opening_angle}° opening, {self.profile_steps} steps")
         print(f"Arena size: {self.arena.arena_width:.0f}mm × {self.arena.arena_height:.0f}mm")
+        print(
+            f"Collision config: radius={self.robot_radius_mm:.1f}mm, "
+            f"boundary_margin={self.boundary_margin_mm:.1f}mm, step={self.collision_step_mm:.1f}mm"
+        )
+
+    def _is_in_bounds(self, x: float, y: float) -> bool:
+        """Check whether a position satisfies arena boundary clearance."""
+        m = self.boundary_margin_mm
+        return (
+            (self.arena.arena_min_x + m) <= x <= (self.arena.arena_max_x - m)
+            and (self.arena.arena_min_y + m) <= y <= (self.arena.arena_max_y - m)
+        )
+
+    def _point_to_segment_distance_sq(
+        self, points: np.ndarray, x1: float, y1: float, x2: float, y2: float
+    ) -> np.ndarray:
+        """Squared distance from each point to line segment AB."""
+        ax = float(x1)
+        ay = float(y1)
+        bx = float(x2)
+        by = float(y2)
+        abx = bx - ax
+        aby = by - ay
+        ab2 = abx * abx + aby * aby
+        px = points[:, 0]
+        py = points[:, 1]
+
+        if ab2 <= 1e-12:
+            dx = px - ax
+            dy = py - ay
+            return dx * dx + dy * dy
+
+        t = ((px - ax) * abx + (py - ay) * aby) / ab2
+        t = np.clip(t, 0.0, 1.0)
+        cx = ax + t * abx
+        cy = ay + t * aby
+        dx = px - cx
+        dy = py - cy
+        return dx * dx + dy * dy
+
+    def _segment_collides_with_walls(
+        self, x1: float, y1: float, x2: float, y2: float, clearance_mm: float
+    ) -> bool:
+        """
+        Collision test against wall point cloud.
+
+        Returns True if any wall point is closer than clearance to the segment.
+        """
+        if len(self.arena.walls) == 0:
+            return False
+        d2 = self._point_to_segment_distance_sq(self.arena.walls, x1, y1, x2, y2)
+        return bool(np.any(d2 <= (clearance_mm * clearance_mm)))
+
+    def _compute_safe_endpoint(
+        self, start_x: float, start_y: float, target_x: float, target_y: float
+    ) -> Tuple[float, float, bool]:
+        """
+        March from start to target and stop before first collision or boundary violation.
+
+        Returns:
+            safe_x, safe_y, blocked
+        """
+        dx = target_x - start_x
+        dy = target_y - start_y
+        travel = float(np.hypot(dx, dy))
+        if travel <= 1e-6:
+            blocked = (not self._is_in_bounds(start_x, start_y))
+            return float(start_x), float(start_y), blocked
+
+        n_steps = max(1, int(np.ceil(travel / self.collision_step_mm)))
+        prev_x, prev_y = float(start_x), float(start_y)
+        blocked = False
+
+        for i in range(1, n_steps + 1):
+            t = i / n_steps
+            cand_x = float(start_x + t * dx)
+            cand_y = float(start_y + t * dy)
+
+            if not self._is_in_bounds(cand_x, cand_y):
+                blocked = True
+                break
+
+            if self._segment_collides_with_walls(prev_x, prev_y, cand_x, cand_y, self.robot_radius_mm):
+                blocked = True
+                break
+
+            prev_x, prev_y = cand_x, cand_y
+
+        return prev_x, prev_y, blocked
     
     def get_profile_at_position(self, x: float, y: float, orientation_deg: float) -> np.ndarray:
         """
@@ -345,16 +479,17 @@ class EnvironmentSimulator:
                 current_x, current_y, current_orientation
             )
             
-            # Apply drive
+            # Apply drive (collision-aware)
             drive_distance = action['drive_mm']
             drive_rad = np.deg2rad(current_orientation)
-            
-            current_x += drive_distance * np.cos(drive_rad)
-            current_y += drive_distance * np.sin(drive_rad)
-            
-            # Ensure robot stays within arena bounds
-            current_x = np.clip(current_x, 50, self.arena.arena_width - 50)
-            current_y = np.clip(current_y, 50, self.arena.arena_height - 50)
+            prev_x, prev_y = current_x, current_y
+            target_x = current_x + drive_distance * np.cos(drive_rad)
+            target_y = current_y + drive_distance * np.sin(drive_rad)
+
+            safe_x, safe_y, blocked = self._compute_safe_endpoint(
+                current_x, current_y, target_x, target_y
+            )
+            current_x, current_y = safe_x, safe_y
             
             # Take measurement after driving
             measurement_after_drive = self.get_sonar_measurement(
@@ -367,6 +502,13 @@ class EnvironmentSimulator:
                 'position': {'x': current_x, 'y': current_y},
                 'orientation': current_orientation,
                 'actions': action,
+                'movement': {
+                    'requested_drive_mm': float(drive_distance),
+                    'executed_drive_mm': float(np.hypot(current_x - prev_x, current_y - prev_y)),
+                },
+                'collision': {
+                    'drive_blocked': bool(blocked)
+                },
                 'measurements': {
                     'after_rotate1': measurement_after_rotate1,
                     'after_rotate2': measurement_after_rotate2,
@@ -382,6 +524,10 @@ class EnvironmentSimulator:
         return {
             'width_mm': self.arena.arena_width,
             'height_mm': self.arena.arena_height,
+            'min_x_mm': self.arena.arena_min_x,
+            'max_x_mm': self.arena.arena_max_x,
+            'min_y_mm': self.arena.arena_min_y,
+            'max_y_mm': self.arena.arena_max_y,
             'mm_per_px': self.arena.mm_per_px,
             'profile_opening_angle': self.opening_angle,
             'profile_steps': self.profile_steps
@@ -415,4 +561,3 @@ def create_test_simulator() -> EnvironmentSimulator:
     # Final fallback: create simulator with minimal functionality
     print("⚠ No valid sessions found - creating simulator with default arena")
     return EnvironmentSimulator("_default_")
-

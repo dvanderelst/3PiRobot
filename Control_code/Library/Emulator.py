@@ -54,8 +54,8 @@ class Emulator:
     simulating what sonar measurements would be received from different positions
     in an environment.
     
-    The emulator reads profile parameters (opening_angle, steps) from the EchoProcessor
-    artifacts to ensure consistency across the pipeline.
+    The emulator reads profile parameters (opening_angle, steps) from its own
+    training artifact (with EchoProcessor fallback for backward compatibility).
     """
     
     def __init__(
@@ -70,6 +70,7 @@ class Emulator:
         calibration: Optional[List[Dict[str, float]]],
         profile_opening_angle: float,
         profile_steps: int,
+        use_feature_augmentation: bool = True,
         device: Optional[str] = None,
     ):
         self.device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -84,9 +85,10 @@ class Emulator:
         self.normalize_y = bool(normalize_y)
         self.calibration = calibration
         
-        # Profile parameters - read from EchoProcessor to ensure consistency
+        # Profile parameters used for profile generation/validation in simulation.
         self.profile_opening_angle = float(profile_opening_angle)
         self.profile_steps = int(profile_steps)
+        self.use_feature_augmentation = bool(use_feature_augmentation)
 
     @staticmethod
     def load(
@@ -105,24 +107,6 @@ class Emulator:
         Returns:
             Loaded Emulator instance
         """
-        # First load EchoProcessor artifacts to get profile parameters
-        echo_artifact_path = os.path.join(echo_processor_dir, "echoprocessor_artifacts.pth")
-        if not os.path.exists(echo_artifact_path):
-            raise FileNotFoundError(
-                f"EchoProcessor artifacts not found at {echo_artifact_path}. "
-                "Please run SCRIPT_TrainEchoProcessor.py first."
-            )
-        
-        echo_payload = torch.load(echo_artifact_path, map_location="cpu")
-        profile_opening_angle = echo_payload["profile_opening_angle"]
-        profile_steps = echo_payload["profile_steps"]
-        
-        if profile_opening_angle is None or profile_steps is None:
-            raise ValueError(
-                "EchoProcessor artifacts are missing profile_opening_angle/profile_steps. "
-                "Please retrain SCRIPT_TrainEchoProcessor.py."
-            )
-        
         # Load emulator artifacts
         emulator_artifact_path = os.path.join(emulator_dir, "training_params.json")
         if not os.path.exists(emulator_artifact_path):
@@ -135,6 +119,27 @@ class Emulator:
         import json
         with open(emulator_artifact_path, 'r') as f:
             params = json.load(f)
+
+        # Prefer profile parameters from emulator training params.
+        profile_opening_angle = params.get("profile_opening_angle", None)
+        profile_steps = params.get("profile_steps", None)
+
+        # Backward compatibility: fall back to EchoProcessor artifact if needed.
+        if profile_opening_angle is None or profile_steps is None:
+            echo_artifact_path = os.path.join(echo_processor_dir, "echoprocessor_artifacts.pth")
+            if not os.path.exists(echo_artifact_path):
+                raise FileNotFoundError(
+                    "Missing profile parameters in emulator training params and "
+                    f"EchoProcessor artifacts not found at {echo_artifact_path}."
+                )
+            echo_payload = torch.load(echo_artifact_path, map_location="cpu")
+            profile_opening_angle = echo_payload["profile_opening_angle"]
+            profile_steps = echo_payload["profile_steps"]
+            if profile_opening_angle is None or profile_steps is None:
+                raise ValueError(
+                    "Could not resolve profile_opening_angle/profile_steps from emulator "
+                    "training params or EchoProcessor artifacts."
+                )
         
         # Load model
         model_path = os.path.join(emulator_dir, "best_model_pytorch.pth")
@@ -167,6 +172,7 @@ class Emulator:
         normalize_x = bool(params["normalize_x"])
         normalize_y = bool(params["normalize_y"])
         calibration = params.get("calibration", None)
+        use_feature_augmentation = bool(params.get("use_feature_augmentation", True))
         
         # Move model to the target device
         model = model.to(target_device)
@@ -182,8 +188,37 @@ class Emulator:
             calibration=calibration,
             profile_opening_angle=profile_opening_angle,
             profile_steps=profile_steps,
+            use_feature_augmentation=use_feature_augmentation,
             device=target_device,
         )
+
+    def _sanitize_profiles(self, profiles: np.ndarray) -> np.ndarray:
+        """
+        Replace non-finite profile values with conservative finite values.
+
+        For partially valid rows, fill missing bins with the row-wise max distance
+        (unknown bins become "far"). For fully invalid rows, use a fallback derived
+        from training-time profile statistics when available.
+        """
+        p = np.asarray(profiles, dtype=np.float32).copy()
+        finite = np.isfinite(p)
+        if finite.all():
+            return p
+
+        default_fill = 3000.0
+        if self.x_mean.size >= self.profile_steps:
+            base = self.x_mean[:self.profile_steps]
+            if np.isfinite(base).any():
+                default_fill = float(np.nanmean(base[np.isfinite(base)]))
+
+        for i in range(p.shape[0]):
+            row_finite = finite[i]
+            if np.any(row_finite):
+                row_fill = float(np.max(p[i, row_finite]))
+            else:
+                row_fill = default_fill
+            p[i, ~row_finite] = row_fill
+        return p
 
     def _normalize_input(self, x: np.ndarray) -> torch.Tensor:
         """Normalize input features."""
@@ -227,13 +262,16 @@ class Emulator:
         Returns:
             Augmented features of shape (n_samples, input_feature_dim)
         """
-        p = np.asarray(profiles, dtype=np.float32)
+        p = self._sanitize_profiles(profiles)
         n, steps = p.shape
         
         # Validate profile dimensions
         if steps != self.profile_steps:
             raise ValueError(f"Expected profiles with {self.profile_steps} steps, got {steps}")
         
+        if not self.use_feature_augmentation:
+            return p.astype(np.float32)
+
         half = steps // 2
         idx = np.arange(steps, dtype=np.float32)
         idx_grid = np.broadcast_to(idx[None, :], p.shape)

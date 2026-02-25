@@ -8,10 +8,10 @@ Control_code/Library/RobotCalibration/
 Control_code/TestScripts
 Control_code/Plots/
 Control_code/Data/
-Control_code/Training/
-Control_code/TrainingRadial/
-Control_code/Occupancy/
-Control_code/OccupancyRadial/
+Control_code/CompareModels/
+Control_code/TrainingClosest/
+Control_code/EchoProcessor/
+Control_code/policy_training_results_history_nn/
 ############## Robot code sub repo
 robot_code/.Trash-1000/
 robot_code/System Volume Information/
@@ -25,8 +25,4 @@ Control_code/cache/
 
 *.zip
 
-Control_code/CompareModels/
 
-Control_code/TrainingClosest/
-
-Control_code/EchoProcessor/
