@@ -53,13 +53,16 @@ class Config:
 
     # Evaluation
     episodes_per_policy: int = 8
-    max_steps: int = 80
+    max_steps: int = 250
     spawn_margin_mm: float = 150.0
     use_empirical_starts: bool = True
 
-    # Reward weights (pre path-extent version)
+    # Reward weights: punish frequent turning/switching more than occasional sharp turns.
     step_reward: float = 1.0
-    w_rotate2_cost: float = 3.0
+    w_rotate2_cost: float = 3
+    turn_active_deadband_deg: float = 8.0
+    w_turn_activity_cost: float = 0.5
+    w_turn_switch_cost: float = 0.75
     # Proximity shaping: penalize being close to geometry (walls/bounds).
     warning_distance_mm: float = 500.0
     collision_distance_mm: float = 250.0
@@ -253,11 +256,14 @@ class Evaluator:
         total_reward = 0.0
         total_drive = 0.0
         proximity_terms: List[float] = []
+        turn_activity_terms: List[float] = []
+        turn_switch_terms: List[float] = []
         aligned_terms: List[float] = []
         sign_match_terms: List[float] = []
         trajectory: List[Dict[str, Any]] = []
         hist: List[np.ndarray] = []
         prev_rot_norm = 0.0
+        prev_turn_sign = 0
         prev_drive_norm = 0.0
         prev_blocked = 0.0
 
@@ -296,6 +302,13 @@ class Evaluator:
             blocked = bool(coll.get("drive_blocked", False))
             blocked_any = blocked_any or blocked
             rot_norm = float(np.clip(rotate2 / self.cfg.max_rotate2_deg, -1.0, 1.0))
+            turn_active = 1.0 if abs(rotate2) >= float(self.cfg.turn_active_deadband_deg) else 0.0
+            curr_turn_sign = int(np.sign(rotate2)) if turn_active > 0.5 else 0
+            turn_switch = 1.0 if (curr_turn_sign != 0 and prev_turn_sign != 0 and curr_turn_sign != prev_turn_sign) else 0.0
+            if curr_turn_sign != 0:
+                prev_turn_sign = curr_turn_sign
+            turn_activity_terms.append(turn_active)
+            turn_switch_terms.append(turn_switch)
             prev_drive_norm = float(np.clip(exec_drive / max(self.cfg.fixed_drive_mm, 1e-6), 0.0, 1.5))
             prev_blocked = 1.0 if blocked else 0.0
             prev_rot_norm = rot_norm
@@ -314,6 +327,8 @@ class Evaluator:
             reward = (
                 (self.cfg.step_reward if not blocked else 0.0)
                 - self.cfg.w_rotate2_cost * abs(rot_norm)
+                - self.cfg.w_turn_activity_cost * turn_active
+                - self.cfg.w_turn_switch_cost * turn_switch
                 - self.cfg.w_proximity_cost * proximity_term
             )
             total_reward += reward
@@ -331,6 +346,8 @@ class Evaluator:
                     "blocked": blocked,
                     "clearance_mm": clearance_mm,
                     "proximity_term": proximity_term,
+                    "turn_active": turn_active,
+                    "turn_switch": turn_switch,
                     "reward": float(reward),
                 }
             )
@@ -356,6 +373,8 @@ class Evaluator:
             "collided": bool(blocked_any),
             "end_reason": end_reason,
             "proximity_mean": float(np.mean(proximity_terms) if proximity_terms else 0.0),
+            "turn_activity_rate": float(np.mean(turn_activity_terms) if turn_activity_terms else 0.0),
+            "turn_switch_rate": float(np.mean(turn_switch_terms) if turn_switch_terms else 0.0),
             "alignment_mean": float(np.mean(aligned_terms) if aligned_terms else 0.0),
             "sign_match_rate": sign_match_rate,
             "trajectory": trajectory,
@@ -369,6 +388,8 @@ class Evaluator:
             "fitness_std": float(np.std(fit)),
             "collision_rate": float(np.mean([1.0 if e["collided"] else 0.0 for e in eps])),
             "proximity_mean": float(np.mean([e.get("proximity_mean", 0.0) for e in eps])),
+            "turn_activity_rate": float(np.mean([e.get("turn_activity_rate", 0.0) for e in eps])),
+            "turn_switch_rate": float(np.mean([e.get("turn_switch_rate", 0.0) for e in eps])),
             "alignment_mean": float(np.mean([e["alignment_mean"] for e in eps])),
             "sign_match_rate": float(np.mean([e["sign_match_rate"] for e in eps])),
             "avg_drive_mm": float(np.mean([e["total_executed_drive_mm"] for e in eps])),
@@ -416,6 +437,8 @@ class SimpleGATrainer:
             "best_sign_match_rate": [],
             "best_collision_rate": [],
             "best_proximity_mean": [],
+            "best_turn_activity_rate": [],
+            "best_turn_switch_rate": [],
             "best_avg_net_displacement_mm": [],
         }
 
@@ -513,6 +536,8 @@ class SimpleGATrainer:
             self.history["best_sign_match_rate"].append(float(best_res["sign_match_rate"]))
             self.history["best_collision_rate"].append(float(best_res["collision_rate"]))
             self.history["best_proximity_mean"].append(float(best_res.get("proximity_mean", 0.0)))
+            self.history["best_turn_activity_rate"].append(float(best_res.get("turn_activity_rate", 0.0)))
+            self.history["best_turn_switch_rate"].append(float(best_res.get("turn_switch_rate", 0.0)))
             self.history["best_avg_net_displacement_mm"].append(float(best_res["avg_net_displacement_mm"]))
             eps = best_res.get("episodes_raw", [])
             if eps:
@@ -533,6 +558,8 @@ class SimpleGATrainer:
                 f"sign_match={best_res['sign_match_rate']:.3f}, "
                 f"coll_rate={best_res['collision_rate']:.3f}, "
                 f"prox={best_res.get('proximity_mean', 0.0):.3f}, "
+                f"turn_act={best_res.get('turn_activity_rate', 0.0):.3f}, "
+                f"turn_sw={best_res.get('turn_switch_rate', 0.0):.3f}, "
                 f"net_disp={best_res['avg_net_displacement_mm']:.1f}mm"
             )
             self._save_generation_best_plot(gen + 1, best_res)
@@ -604,6 +631,10 @@ class SimpleGATrainer:
         ax1.plot(g, self.history["best_collision_rate"], label="Collision rate")
         if "best_proximity_mean" in self.history:
             ax1.plot(g, self.history["best_proximity_mean"], label="Proximity")
+        if "best_turn_activity_rate" in self.history:
+            ax1.plot(g, self.history["best_turn_activity_rate"], label="Turn activity")
+        if "best_turn_switch_rate" in self.history:
+            ax1.plot(g, self.history["best_turn_switch_rate"], label="Turn switches")
         ax1.set_xlabel("Generation")
         ax1.set_ylabel("Metric")
         ax1.set_title("Behavior Metrics (Live)")
@@ -639,6 +670,10 @@ def plot_training(history: Dict[str, List[float]], output_dir: str) -> None:
     ax.plot(g, history["best_collision_rate"], label="Best collision rate")
     if "best_proximity_mean" in history:
         ax.plot(g, history["best_proximity_mean"], label="Best proximity mean")
+    if "best_turn_activity_rate" in history:
+        ax.plot(g, history["best_turn_activity_rate"], label="Best turn activity")
+    if "best_turn_switch_rate" in history:
+        ax.plot(g, history["best_turn_switch_rate"], label="Best turn switch rate")
     if "best_avg_net_displacement_mm" in history:
         ax.plot(
             g,
@@ -748,7 +783,7 @@ def write_overview(cfg: Config, output_dir: str) -> None:
         f"- history length: {cfg.history_len}",
         f"- hidden sizes: {cfg.hidden_sizes}",
         f"- genome size: {HistoryNNPolicy(cfg.max_rotate2_deg, cfg.iid_deadband_db, cfg.history_len, cfg.hidden_sizes).genome_size()}",
-        "- fitness: +step reward per non-blocked step, -turn cost, -proximity penalty",
+        "- fitness: +step reward, -small turn magnitude cost, -turn activity/switch costs, -proximity penalty",
         "- run ends if geometric clearance <= collision_distance_mm",
         "",
         f"- population: {cfg.population_size}",
@@ -809,6 +844,8 @@ def main() -> None:
                     "alignment_mean": final["alignment_mean"],
                     "collision_rate": final["collision_rate"],
                     "proximity_mean": final.get("proximity_mean", 0.0),
+                    "turn_activity_rate": final.get("turn_activity_rate", 0.0),
+                    "turn_switch_rate": final.get("turn_switch_rate", 0.0),
                     "avg_drive_mm": final["avg_drive_mm"],
                     "avg_net_displacement_mm": final["avg_net_displacement_mm"],
                 },
@@ -855,6 +892,8 @@ def main() -> None:
                 "total_executed_drive_mm": safe_float(ep.get("total_executed_drive_mm"), float("nan")),
                 "net_displacement_mm": safe_float(ep.get("net_displacement_mm"), float("nan")),
                 "proximity_mean": safe_float(ep.get("proximity_mean"), float("nan")),
+                "turn_activity_rate": safe_float(ep.get("turn_activity_rate"), float("nan")),
+                "turn_switch_rate": safe_float(ep.get("turn_switch_rate"), float("nan")),
                 "alignment_mean": safe_float(ep.get("alignment_mean"), float("nan")),
                 "sign_match_rate": safe_float(ep.get("sign_match_rate"), float("nan")),
                 "start_x_mm": start_x,
@@ -912,6 +951,8 @@ def main() -> None:
     print(f"  alignment_mean: {final['alignment_mean']:.3f}")
     print(f"  collision_rate: {final['collision_rate']:.3f}")
     print(f"  proximity_mean: {final.get('proximity_mean', 0.0):.3f}")
+    print(f"  turn_activity_rate: {final.get('turn_activity_rate', 0.0):.3f}")
+    print(f"  turn_switch_rate: {final.get('turn_switch_rate', 0.0):.3f}")
     print(f"  avg_drive_mm: {final['avg_drive_mm']:.1f}")
     print(f"  avg_net_displacement_mm: {final['avg_net_displacement_mm']:.1f}")
     print(f"\nOutputs in: {cfg.output_dir}")
