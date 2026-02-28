@@ -827,7 +827,7 @@ class SimpleGATrainer:
             pol,
             self.cfg,
             self.generation_plot_dir,
-            filename="live_policy_probe.png",
+            filename="live_policy_probe_best.png",
         )
 
 
@@ -880,7 +880,7 @@ def plot_policy_curve(
     policy: HistoryNNPolicy,
     cfg: Config,
     output_dir: str,
-    filename: str = "plot_policy_curve.png",
+    filename: str = "plot_policy_curve_best.png",
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     iid = np.linspace(-12, 12, 300)
