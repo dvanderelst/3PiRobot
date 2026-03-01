@@ -15,6 +15,8 @@ import os
 import random
 from contextlib import redirect_stderr, redirect_stdout
 from concurrent.futures import ProcessPoolExecutor
+import collections
+import dataclasses
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -178,7 +180,8 @@ class HistoryNNPolicy:
 
 
 def config_from_dict(d: Dict[str, Any]) -> Config:
-    return Config(**dict(d))
+    known = {f.name for f in dataclasses.fields(Config)}
+    return Config(**{k: v for k, v in d.items() if k in known})
 
 
 class Evaluator:
@@ -290,7 +293,7 @@ class Evaluator:
         aligned_terms: List[float] = []
         sign_match_terms: List[float] = []
         trajectory: List[Dict[str, Any]] = []
-        hist: List[np.ndarray] = []
+        hist: collections.deque = collections.deque(maxlen=self.cfg.history_len)
         prev_rot1_norm = 0.0
         prev_rot2_norm = 0.0
         prev_turn_sign = 0
@@ -308,16 +311,14 @@ class Evaluator:
                 dtype=np.float32,
             )
             hist.append(current_feat)
-            if len(hist) > self.cfg.history_len:
-                hist = hist[-self.cfg.history_len:]
             pad_n = self.cfg.history_len - len(hist)
             if pad_n > 0:
                 hist_vec = np.concatenate(
-                    [np.zeros((pad_n * 6,), dtype=np.float32)] + [h for h in hist],
+                    [np.zeros((pad_n * 6,), dtype=np.float32)] + list(hist),
                     axis=0,
                 ).astype(np.float32)
             else:
-                hist_vec = np.concatenate(hist, axis=0).astype(np.float32)
+                hist_vec = np.concatenate(list(hist), axis=0).astype(np.float32)
             rotate1, rotate2 = policy.action_degrees(hist_vec, iid)
             action = {
                 "rotate1_deg": rotate1,
@@ -634,6 +635,8 @@ class SimpleGATrainer:
 
             if not use_parallel:
                 for i, g in enumerate(tqdm(pop, desc=f"Gen {gen+1}/{self.cfg.generations}")):
+                    if details[i] is not None:   # already evaluated in parallel
+                        continue
                     res = self._evaluate_on_train_envs(g, starts_by_env)
                     fitness[i] = float(res["fitness"])
                     details[i] = res
@@ -930,7 +933,7 @@ def plot_policy_curve(
         ax.legend()
 
     # Look-vs-drive panel with y=x reference line.
-    lim = float(max(cfg.max_rotate1_deg, cfg.max_rotate1_deg + cfg.max_rotate2_deg))
+    lim = float(cfg.max_rotate1_deg + cfg.max_rotate2_deg)
     ax_lv.plot([-lim, lim], [-lim, lim], "--", color="black", alpha=0.6, linewidth=1.2, label="look=drive")
     ax_lv.axhline(0, color="black", linewidth=1, alpha=0.3)
     ax_lv.axvline(0, color="black", linewidth=1, alpha=0.3)
