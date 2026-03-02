@@ -65,10 +65,14 @@ class Config:
     randomize_empirical_yaw: bool = True
     empirical_position_fraction: float = 1.0
     validation_episodes_per_generation: int = 8
+    # Directional bias prevention: episodes are split 50/50 forced-normal / forced-mirrored;
+    # genome fitness = min(mean_normal_fitness, mean_mirrored_fitness) so neither direction can be ignored.
+    use_random_mirroring: bool = True
 
     # Simplified fitness: reward survival and straight paths
     # (removed complex reward weights - now using simple 1 - w_turn * turn_penalty)
     w_turn_penalty: float = 2.0  # Weight for turn penalty (2.0 means full turn = -1.0 reward)
+    sinuosity_window: int = 5    # Steps over which sinuosity is measured (longer = penalises slower oscillations)
     # Proximity shaping: penalize being close to geometry (walls/bounds).
     warning_distance_mm: float = 300.0
     collision_distance_mm: float = 150.0
@@ -272,7 +276,7 @@ class Evaluator:
         wall_clearance = float(np.min(np.hypot(dx, dy)))
         return min(boundary_clearance, wall_clearance)
 
-    def episode(self, policy: HistoryNNPolicy, start: Tuple[float, float, float]) -> Dict[str, Any]:
+    def episode(self, policy: HistoryNNPolicy, start: Tuple[float, float, float], mirrored: bool = False) -> Dict[str, Any]:
         x, y, yaw = start
         start_x, start_y = x, y
         blocked_any = False
@@ -285,17 +289,26 @@ class Evaluator:
         trajectory: List[Dict[str, Any]] = []
         hist: collections.deque = collections.deque(maxlen=self.cfg.history_len)
 
+        is_mirrored = mirrored
+
         prev_rot1_norm = 0.0
         prev_rot2_norm = 0.0
         prev_drive_norm = 0.0
         prev_blocked = 0.0
         # For sinuosity calculation: track recent positions
-        position_history: collections.deque = collections.deque(maxlen=5)  # Last 5 positions
+        position_history: collections.deque = collections.deque(maxlen=self.cfg.sinuosity_window)
 
         for t in range(self.cfg.max_steps):
+            # Get real measurement
             meas = self.sim.get_sonar_measurement(x, y, yaw)
             iid = safe_float(meas.get("iid_db"), 0.0)
             dist_mm = safe_float(meas.get("distance_mm"), 1800.0)
+            
+            # Behavioral symmetry training: flip IID to create virtual mirrored scenario
+            if is_mirrored:
+                iid = -iid  # Present left walls as right walls and vice versa
+                # Policy will learn to respond symmetrically to achieve same wall-following behavior
+            
             iid_norm = float(np.clip(iid / 12.0, -2.0, 2.0))
             dist_norm = float(np.clip(dist_mm / 2000.0, 0.0, 2.0))
             current_feat = np.array(
@@ -312,6 +325,17 @@ class Evaluator:
             else:
                 hist_vec = np.concatenate(list(hist), axis=0).astype(np.float32)
             rotate1, rotate2 = policy.action_degrees(hist_vec, iid)
+
+            # Capture the policy's own output (pre-negation) for history so that the
+            # mirrored frame's history is consistent with what the policy decided.
+            rot1_norm = float(np.clip(rotate1 / self.cfg.max_rotate1_deg, -1.0, 1.0))
+            rot2_norm = float(np.clip(rotate2 / self.cfg.max_rotate2_deg, -1.0, 1.0))
+
+            # Mirror rotation outputs for symmetric behavior
+            if is_mirrored:
+                rotate1 = -rotate1
+                rotate2 = -rotate2
+
             action = {
                 "rotate1_deg": rotate1,
                 "rotate2_deg": rotate2,
@@ -331,8 +355,6 @@ class Evaluator:
             blocked = bool(coll.get("drive_blocked", False))
             blocked_any = blocked_any or blocked
             net_turn_deg = rotate1 + rotate2
-            rot1_norm = float(np.clip(rotate1 / self.cfg.max_rotate1_deg, -1.0, 1.0))
-            rot2_norm = float(np.clip(rotate2 / self.cfg.max_rotate2_deg, -1.0, 1.0))
             prev_drive_norm = float(np.clip(exec_drive / max(self.cfg.fixed_drive_mm, 1e-6), 0.0, 1.5))
             prev_blocked = 1.0 if blocked else 0.0
             prev_rot1_norm = rot1_norm
@@ -422,14 +444,31 @@ class Evaluator:
             "alignment_mean": float(np.mean(aligned_terms) if aligned_terms else 0.0),
             "sign_match_rate": sign_match_rate,
             "trajectory": trajectory,
+            "was_mirrored": is_mirrored,  # Add mirroring status to metadata
         }
 
     def evaluate(self, policy: HistoryNNPolicy, starts: List[Tuple[float, float, float]]) -> Dict[str, Any]:
-        eps = [self.episode(policy, s) for s in starts]
+        if self.cfg.use_random_mirroring and len(starts) >= 2:
+            n_mirrored = len(starts) // 2
+            n_normal = len(starts) - n_mirrored
+            eps_normal = [self.episode(policy, s, mirrored=False) for s in starts[:n_normal]]
+            eps_mirrored = [self.episode(policy, s, mirrored=True) for s in starts[n_normal:]]
+            eps = eps_normal + eps_mirrored
+            fit_normal = float(np.mean([e["fitness"] for e in eps_normal]))
+            fit_mirrored = float(np.mean([e["fitness"] for e in eps_mirrored]))
+            fitness = min(fit_normal, fit_mirrored)
+        else:
+            eps = [self.episode(policy, s, mirrored=False) for s in starts]
+            fit_normal = float(np.mean([e["fitness"] for e in eps]))
+            fit_mirrored = fit_normal
+            fitness = fit_normal
+
         fit = np.array([e["fitness"] for e in eps], dtype=np.float32)
         return {
-            "fitness": float(np.mean(fit)),
+            "fitness": fitness,
             "fitness_std": float(np.std(fit)),
+            "fitness_normal": fit_normal,
+            "fitness_mirrored": fit_mirrored,
             "collision_rate": float(np.mean([1.0 if e["collided"] else 0.0 for e in eps])),
             "proximity_mean": float(np.mean([e.get("proximity_mean", 0.0) for e in eps])),
             "alignment_mean": float(np.mean([e["alignment_mean"] for e in eps])),
@@ -481,6 +520,8 @@ def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float
     return {
         "fitness": mean_key("fitness"),
         "fitness_std": mean_key("fitness_std"),
+        "fitness_normal": mean_key("fitness_normal"),
+        "fitness_mirrored": mean_key("fitness_mirrored"),
         "collision_rate": mean_key("collision_rate"),
         "proximity_mean": mean_key("proximity_mean"),
         "alignment_mean": mean_key("alignment_mean"),
@@ -616,6 +657,8 @@ class SimpleGATrainer:
         out: Dict[str, Any] = {
             "fitness": mean_key("fitness"),
             "fitness_std": mean_key("fitness_std"),
+            "fitness_normal": mean_key("fitness_normal"),
+            "fitness_mirrored": mean_key("fitness_mirrored"),
             "collision_rate": mean_key("collision_rate"),
             "proximity_mean": mean_key("proximity_mean"),
             "alignment_mean": mean_key("alignment_mean"),
@@ -707,6 +750,8 @@ class SimpleGATrainer:
             print(
                 f"Gen {gen+1}: best={self.history['best_fitness'][-1]:.3f}, "
                 f"avg={self.history['avg_fitness'][-1]:.3f}, "
+                f"fit_norm={best_res.get('fitness_normal', float('nan')):.3f}, "
+                f"fit_mirr={best_res.get('fitness_mirrored', float('nan')):.3f}, "
                 f"best_ep={best_ep_fit:.3f}, med_ep={median_ep_fit:.3f}, worst_ep={worst_ep_fit:.3f}, "
                 f"align={best_res['alignment_mean']:.3f}, "
                 f"sign_match={best_res['sign_match_rate']:.3f}, "
@@ -768,13 +813,15 @@ class SimpleGATrainer:
                 ep = episodes_train[idx]
                 ep_fit = safe_float(ep.get("fitness"), float("nan"))
                 end_reason = str(ep.get("end_reason", "unknown"))
-                panel_title = f"Train {label} | ep_fit={ep_fit:.2f} | end={end_reason}"
+                mirrored_str = " (Mirrored)" if ep.get("was_mirrored", False) else ""
+                panel_title = f"Train {label}{mirrored_str} | ep_fit={ep_fit:.2f} | end={end_reason}"
                 draw_episode_on_axis(self.sim, ep, axes[0, j], panel_title, show_legend=(j == 0))
             for j, (label, idx) in enumerate(sel_val):
                 ep = episodes_val[idx]
                 ep_fit = safe_float(ep.get("fitness"), float("nan"))
                 end_reason = str(ep.get("end_reason", "unknown"))
-                panel_title = f"Val {label} | ep_fit={ep_fit:.2f} | end={end_reason}"
+                mirrored_str = " (Mirrored)" if ep.get("was_mirrored", False) else ""
+                panel_title = f"Val {label}{mirrored_str} | ep_fit={ep_fit:.2f} | end={end_reason}"
                 draw_episode_on_axis(self.ev_validation.sim, ep, axes[1, j], panel_title, show_legend=(j == 0))
             fig.suptitle(
                 f"Gen {generation_number} | train_fit={train_fit:.2f} | val_fit={val_fit:.2f}",
@@ -1075,6 +1122,7 @@ def write_overview(cfg: Config, output_dir: str) -> None:
         f"- genome size: {HistoryNNPolicy(cfg.max_rotate1_deg, cfg.max_rotate2_deg, cfg.iid_deadband_db, cfg.history_len, cfg.hidden_sizes).genome_size()}",
         "- fitness: 1 - w_turn * (sinuosity - 1) (rewards survival, penalizes path tortuosity over short history)",
         "- initialization: if 'start_policy.json' exists in output_dir, population is initialized around it",
+        "- directional bias prevention: behavioral symmetry training (random IID sign flipping + rotation output negation)",
         "- run ends if geometric clearance <= collision_distance_mm",
         "",
         f"- population: {cfg.population_size}",
