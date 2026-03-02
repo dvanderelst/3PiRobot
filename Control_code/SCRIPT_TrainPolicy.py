@@ -66,17 +66,12 @@ class Config:
     empirical_position_fraction: float = 1.0
     validation_episodes_per_generation: int = 8
 
-    # Reward weights: punish frequent turning/switching more than occasional sharp turns.
-    step_reward: float = 1.0
-    w_drive_reward_per_mm: float = 0.006
-    w_rotate2_cost: float = 0.6
-    turn_active_deadband_deg: float = 8.0
-    w_turn_activity_cost: float = 0.5
-    w_turn_switch_cost: float = 0.75
+    # Simplified fitness: reward survival and straight paths
+    # (removed complex reward weights - now using simple 1 - w_turn * turn_penalty)
+    w_turn_penalty: float = 2.0  # Weight for turn penalty (2.0 means full turn = -1.0 reward)
     # Proximity shaping: penalize being close to geometry (walls/bounds).
     warning_distance_mm: float = 300.0
     collision_distance_mm: float = 150.0
-    w_proximity_cost: float = 0.01
 
     # IO
     output_dir: str = "Policy"
@@ -285,17 +280,17 @@ class Evaluator:
         total_reward = 0.0
         total_drive = 0.0
         proximity_terms: List[float] = []
-        turn_activity_terms: List[float] = []
-        turn_switch_terms: List[float] = []
         aligned_terms: List[float] = []
         sign_match_terms: List[float] = []
         trajectory: List[Dict[str, Any]] = []
         hist: collections.deque = collections.deque(maxlen=self.cfg.history_len)
+
         prev_rot1_norm = 0.0
         prev_rot2_norm = 0.0
-        prev_turn_sign = 0
         prev_drive_norm = 0.0
         prev_blocked = 0.0
+        # For sinuosity calculation: track recent positions
+        position_history: collections.deque = collections.deque(maxlen=5)  # Last 5 positions
 
         for t in range(self.cfg.max_steps):
             meas = self.sim.get_sonar_measurement(x, y, yaw)
@@ -335,17 +330,9 @@ class Evaluator:
             coll = step.get("collision", {})
             blocked = bool(coll.get("drive_blocked", False))
             blocked_any = blocked_any or blocked
+            net_turn_deg = rotate1 + rotate2
             rot1_norm = float(np.clip(rotate1 / self.cfg.max_rotate1_deg, -1.0, 1.0))
             rot2_norm = float(np.clip(rotate2 / self.cfg.max_rotate2_deg, -1.0, 1.0))
-            turn_mag_norm = 0.5 * (abs(rot1_norm) + abs(rot2_norm))
-            net_turn_deg = rotate1 + rotate2
-            turn_active = 1.0 if abs(net_turn_deg) >= float(self.cfg.turn_active_deadband_deg) else 0.0
-            curr_turn_sign = int(np.sign(net_turn_deg)) if turn_active > 0.5 else 0
-            turn_switch = 1.0 if (curr_turn_sign != 0 and prev_turn_sign != 0 and curr_turn_sign != prev_turn_sign) else 0.0
-            if curr_turn_sign != 0:
-                prev_turn_sign = curr_turn_sign
-            turn_activity_terms.append(turn_active)
-            turn_switch_terms.append(turn_switch)
             prev_drive_norm = float(np.clip(exec_drive / max(self.cfg.fixed_drive_mm, 1e-6), 0.0, 1.5))
             prev_blocked = 1.0 if blocked else 0.0
             prev_rot1_norm = rot1_norm
@@ -362,14 +349,35 @@ class Evaluator:
             if abs(iid_norm) > 0.15 and abs(net_turn_deg) > 2.0:
                 sign_match_terms.append(1.0 if np.sign(net_turn_deg) == -np.sign(iid_norm) else 0.0)
 
-            reward = (
-                (self.cfg.step_reward if not blocked else 0.0)
-                + self.cfg.w_drive_reward_per_mm * exec_drive
-                - self.cfg.w_rotate2_cost * turn_mag_norm
-                - self.cfg.w_turn_activity_cost * turn_active
-                - self.cfg.w_turn_switch_cost * turn_switch
-                - self.cfg.w_proximity_cost * proximity_term
-            )
+            # Add current position to history for sinuosity calculation
+            position_history.append((nx, ny))
+            if len(position_history) >= 2:
+                # Calculate actual path distance (sum of segment lengths)
+                path_distance = 0.0
+                for i in range(1, len(position_history)):
+                    x1, y1 = position_history[i-1]
+                    x2, y2 = position_history[i]
+                    path_distance += np.hypot(x2 - x1, y2 - y1)
+                
+                # Calculate straight-line distance from first to last point
+                if len(position_history) > 1:
+                    first_x, first_y = position_history[0]
+                    last_x, last_y = position_history[-1]
+                    straight_distance = np.hypot(last_x - first_x, last_y - first_y)
+                    
+                    # Sinuosity = path_distance / straight_distance (>=1.0, 1.0 = perfectly straight)
+                    # Cap sinuosity to prevent extreme values when movement is very small
+                    sinuosity = path_distance / straight_distance if straight_distance > 1e-6 else 1.0
+                    sinuosity = min(sinuosity, 2.0)  # Cap at 2.0 (100% extra distance)
+                    
+                    # Fitness: reward survival, penalize sinuosity
+                    # sinuosity_penalty ranges from 0 (straight) to ~0.5 (very tortuous) with current history length
+                    sinuosity_penalty = self.cfg.w_turn_penalty * (sinuosity - 1.0)  # 0 for straight, >0 for curved
+                    reward = 1.0 - sinuosity_penalty
+                else:
+                    reward = 1.0  # Not enough history yet
+            else:
+                reward = 1.0  # Not enough history yet
             total_reward += reward
 
             trajectory.append(
@@ -386,8 +394,6 @@ class Evaluator:
                     "blocked": blocked,
                     "clearance_mm": clearance_mm,
                     "proximity_term": proximity_term,
-                    "turn_active": turn_active,
-                    "turn_switch": turn_switch,
                     "reward": float(reward),
                 }
             )
@@ -413,8 +419,6 @@ class Evaluator:
             "collided": bool(blocked_any),
             "end_reason": end_reason,
             "proximity_mean": float(np.mean(proximity_terms) if proximity_terms else 0.0),
-            "turn_activity_rate": float(np.mean(turn_activity_terms) if turn_activity_terms else 0.0),
-            "turn_switch_rate": float(np.mean(turn_switch_terms) if turn_switch_terms else 0.0),
             "alignment_mean": float(np.mean(aligned_terms) if aligned_terms else 0.0),
             "sign_match_rate": sign_match_rate,
             "trajectory": trajectory,
@@ -428,8 +432,6 @@ class Evaluator:
             "fitness_std": float(np.std(fit)),
             "collision_rate": float(np.mean([1.0 if e["collided"] else 0.0 for e in eps])),
             "proximity_mean": float(np.mean([e.get("proximity_mean", 0.0) for e in eps])),
-            "turn_activity_rate": float(np.mean([e.get("turn_activity_rate", 0.0) for e in eps])),
-            "turn_switch_rate": float(np.mean([e.get("turn_switch_rate", 0.0) for e in eps])),
             "alignment_mean": float(np.mean([e["alignment_mean"] for e in eps])),
             "sign_match_rate": float(np.mean([e["sign_match_rate"] for e in eps])),
             "avg_drive_mm": float(np.mean([e["total_executed_drive_mm"] for e in eps])),
@@ -481,8 +483,6 @@ def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float
         "fitness_std": mean_key("fitness_std"),
         "collision_rate": mean_key("collision_rate"),
         "proximity_mean": mean_key("proximity_mean"),
-        "turn_activity_rate": mean_key("turn_activity_rate"),
-        "turn_switch_rate": mean_key("turn_switch_rate"),
         "alignment_mean": mean_key("alignment_mean"),
         "sign_match_rate": mean_key("sign_match_rate"),
         "avg_drive_mm": mean_key("avg_drive_mm"),
@@ -511,8 +511,6 @@ class SimpleGATrainer:
             "best_sign_match_rate": [],
             "best_collision_rate": [],
             "best_proximity_mean": [],
-            "best_turn_activity_rate": [],
-            "best_turn_switch_rate": [],
             "best_avg_net_displacement_mm": [],
             "val_best_fitness": [],
             "val_collision_rate": [],
@@ -539,6 +537,33 @@ class SimpleGATrainer:
             self.cfg.hidden_sizes,
         )
         gsize = probe.genome_size()
+        
+        # Check for start_policy.json to initialize population
+        start_policy_path = os.path.join(self.cfg.output_dir, "start_policy.json")
+        if os.path.exists(start_policy_path):
+            try:
+                with open(start_policy_path, 'r') as f:
+                    start_data = json.load(f)
+                    start_genome = np.array(start_data.get("genome", []), dtype=np.float32)
+                    if start_genome.size == gsize:
+                        print(f"Initializing population from {start_policy_path}")
+                        # Create population around the start policy with some variation
+                        pop: List[np.ndarray] = []
+                        for i in range(self.cfg.population_size):
+                            if i == 0:
+                                # First individual is the exact start policy
+                                pop.append(start_genome.copy())
+                            else:
+                                # Others are variations around the start policy
+                                variation = np.random.normal(0.0, 0.1, size=gsize).astype(np.float32)
+                                varied_genome = np.clip(start_genome + variation, -3.0, 3.0)
+                                pop.append(varied_genome)
+                        return pop
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                print(f"Warning: Could not load start_policy.json: {e}")
+                print("Initializing random population instead")
+        
+        # Default random initialization
         pop: List[np.ndarray] = []
         for _ in range(self.cfg.population_size):
             pop.append(np.random.normal(0.0, 0.25, size=gsize).astype(np.float32))
@@ -593,8 +618,6 @@ class SimpleGATrainer:
             "fitness_std": mean_key("fitness_std"),
             "collision_rate": mean_key("collision_rate"),
             "proximity_mean": mean_key("proximity_mean"),
-            "turn_activity_rate": mean_key("turn_activity_rate"),
-            "turn_switch_rate": mean_key("turn_switch_rate"),
             "alignment_mean": mean_key("alignment_mean"),
             "sign_match_rate": mean_key("sign_match_rate"),
             "avg_drive_mm": mean_key("avg_drive_mm"),
@@ -653,8 +676,6 @@ class SimpleGATrainer:
             self.history["best_sign_match_rate"].append(float(best_res["sign_match_rate"]))
             self.history["best_collision_rate"].append(float(best_res["collision_rate"]))
             self.history["best_proximity_mean"].append(float(best_res.get("proximity_mean", 0.0)))
-            self.history["best_turn_activity_rate"].append(float(best_res.get("turn_activity_rate", 0.0)))
-            self.history["best_turn_switch_rate"].append(float(best_res.get("turn_switch_rate", 0.0)))
             self.history["best_avg_net_displacement_mm"].append(float(best_res["avg_net_displacement_mm"]))
             eps = best_res.get("episodes_raw", [])
             if eps:
@@ -691,8 +712,6 @@ class SimpleGATrainer:
                 f"sign_match={best_res['sign_match_rate']:.3f}, "
                 f"coll_rate={best_res['collision_rate']:.3f}, "
                 f"prox={best_res.get('proximity_mean', 0.0):.3f}, "
-                f"turn_act={best_res.get('turn_activity_rate', 0.0):.3f}, "
-                f"turn_sw={best_res.get('turn_switch_rate', 0.0):.3f}, "
                 f"net_disp={best_res['avg_net_displacement_mm']:.1f}mm, "
                 f"val_fit={val_fit:.3f}, val_coll={val_coll:.3f}"
             )
@@ -803,10 +822,6 @@ class SimpleGATrainer:
         ax1.plot(g, self.history["best_collision_rate"], label="Collision rate")
         if "best_proximity_mean" in self.history:
             ax1.plot(g, self.history["best_proximity_mean"], label="Proximity")
-        if "best_turn_activity_rate" in self.history:
-            ax1.plot(g, self.history["best_turn_activity_rate"], label="Turn activity")
-        if "best_turn_switch_rate" in self.history:
-            ax1.plot(g, self.history["best_turn_switch_rate"], label="Turn switches")
         if "val_collision_rate" in self.history and np.isfinite(np.asarray(self.history["val_collision_rate"], dtype=np.float64)).any():
             ax1.plot(g, self.history["val_collision_rate"], label="Val collision rate")
         ax1.set_xlabel("Generation")
@@ -888,10 +903,6 @@ def plot_training(history: Dict[str, List[float]], output_dir: str) -> None:
     ax.plot(g, history["best_collision_rate"], label="Best collision rate")
     if "best_proximity_mean" in history:
         ax.plot(g, history["best_proximity_mean"], label="Best proximity mean")
-    if "best_turn_activity_rate" in history:
-        ax.plot(g, history["best_turn_activity_rate"], label="Best turn activity")
-    if "best_turn_switch_rate" in history:
-        ax.plot(g, history["best_turn_switch_rate"], label="Best turn switch rate")
     if "best_avg_net_displacement_mm" in history:
         ax.plot(
             g,
@@ -1006,7 +1017,7 @@ def draw_episode_on_axis(
     indices = range(0, len(traj), ARROW_STRIDE)
     qx = [traj[i]["x"] for i in indices]
     qy = [traj[i]["y"] for i in indices]
-    look_rad = [np.deg2rad(traj[i]["yaw_deg"] - traj[i]["rotate2_deg"]) for i in indices]
+    look_rad = [np.deg2rad(traj[i]["yaw_deg"] + traj[i]["rotate1_deg"]) for i in indices]
     qu = [ARROW_LEN_MM * np.cos(r) for r in look_rad]
     qv = [ARROW_LEN_MM * np.sin(r) for r in look_rad]
     ax.quiver(
@@ -1062,7 +1073,8 @@ def write_overview(cfg: Config, output_dir: str) -> None:
         f"- history length: {cfg.history_len}",
         f"- hidden sizes: {cfg.hidden_sizes}",
         f"- genome size: {HistoryNNPolicy(cfg.max_rotate1_deg, cfg.max_rotate2_deg, cfg.iid_deadband_db, cfg.history_len, cfg.hidden_sizes).genome_size()}",
-        "- fitness: +step reward +drive reward, -turn magnitude/activity/switch costs, -proximity penalty",
+        "- fitness: 1 - w_turn * (sinuosity - 1) (rewards survival, penalizes path tortuosity over short history)",
+        "- initialization: if 'start_policy.json' exists in output_dir, population is initialized around it",
         "- run ends if geometric clearance <= collision_distance_mm",
         "",
         f"- population: {cfg.population_size}",
@@ -1184,8 +1196,6 @@ def main() -> None:
                     "alignment_mean": final["alignment_mean"],
                     "collision_rate": final["collision_rate"],
                     "proximity_mean": final.get("proximity_mean", 0.0),
-                    "turn_activity_rate": final.get("turn_activity_rate", 0.0),
-                    "turn_switch_rate": final.get("turn_switch_rate", 0.0),
                     "avg_drive_mm": final["avg_drive_mm"],
                     "avg_net_displacement_mm": final["avg_net_displacement_mm"],
                 },
@@ -1232,8 +1242,6 @@ def main() -> None:
                 "total_executed_drive_mm": safe_float(ep.get("total_executed_drive_mm"), float("nan")),
                 "net_displacement_mm": safe_float(ep.get("net_displacement_mm"), float("nan")),
                 "proximity_mean": safe_float(ep.get("proximity_mean"), float("nan")),
-                "turn_activity_rate": safe_float(ep.get("turn_activity_rate"), float("nan")),
-                "turn_switch_rate": safe_float(ep.get("turn_switch_rate"), float("nan")),
                 "alignment_mean": safe_float(ep.get("alignment_mean"), float("nan")),
                 "sign_match_rate": safe_float(ep.get("sign_match_rate"), float("nan")),
                 "start_x_mm": start_x,
@@ -1291,8 +1299,6 @@ def main() -> None:
     print(f"  alignment_mean: {final['alignment_mean']:.3f}")
     print(f"  collision_rate: {final['collision_rate']:.3f}")
     print(f"  proximity_mean: {final.get('proximity_mean', 0.0):.3f}")
-    print(f"  turn_activity_rate: {final.get('turn_activity_rate', 0.0):.3f}")
-    print(f"  turn_switch_rate: {final.get('turn_switch_rate', 0.0):.3f}")
     print(f"  avg_drive_mm: {final['avg_drive_mm']:.1f}")
     print(f"  avg_net_displacement_mm: {final['avg_net_displacement_mm']:.1f}")
     print(f"\nOutputs in: {cfg.output_dir}")

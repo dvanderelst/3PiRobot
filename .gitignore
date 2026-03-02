@@ -12,7 +12,8 @@ Control_code/CompareModels/
 Control_code/TrainingClosest/
 Control_code/EchoProcessor/
 Control_code/Emulator/
-Control_code/policy_training_results_history_nn/
+Control_code/Policy/
+Control_code/Replay/
 ############## Robot code sub repo
 robot_code/.Trash-1000/
 robot_code/System Volume Information/

@@ -9,6 +9,28 @@ Usage (from Control_code/):
     python SCRIPT_ReplayPolicy.py
 """
 
+# ============================================================================
+# CONFIGURATION - Modify these settings to control replay behavior
+# ============================================================================
+
+# Generation to use (None for best policy, or specific number like 3 for gen_003)
+SELECTED_GENERATION = 25  # Set to None to use best policy
+
+# Sessions to replay (list of session names)
+SELECTED_SESSIONS = ["sessionB01"]  # Modify this list
+
+# Output directory (relative to Control_code/)
+OUTPUT_DIR = "Replay"
+
+# Visualization settings
+ARROW_STRIDE = 3       # plot every Nth arrow
+ARROW_LEN_MM = 150.0    # length of direction arrows in mm
+IID_DEADBAND_DB = 0.25  # IID deadband in dB
+
+# ============================================================================
+# IMPORTS AND CODE - No need to modify below this line
+# ============================================================================
+
 import collections
 import json
 import os
@@ -29,15 +51,12 @@ from SCRIPT_TrainPolicy import HistoryNNPolicy, safe_float
 @dataclass
 class ReplayConfig:
     policy_path: str = "Policy/best_policy.json"
-    session_names: List[str] = field(
-        default_factory=lambda: [
-            "sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"
-        ]
-    )
-    output_dir: str = "Policy/replay"
-    arrow_stride: int = 10       # plot every Nth arrow
-    arrow_len_mm: float = 150.0
-    iid_deadband_db: float = 0.25  # overridden by policy JSON if present
+    session_names: List[str] = field(default_factory=lambda: SELECTED_SESSIONS)
+    output_dir: str = OUTPUT_DIR
+    arrow_stride: int = ARROW_STRIDE
+    arrow_len_mm: float = ARROW_LEN_MM
+    iid_deadband_db: float = IID_DEADBAND_DB
+    generation: Optional[int] = SELECTED_GENERATION
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +80,22 @@ def load_policy(policy_path: str) -> Tuple[HistoryNNPolicy, Dict[str, Any]]:
 
 def resolve_policy_path(cfg: ReplayConfig) -> str:
     """Return an existing policy JSON path, falling back to latest generation checkpoint."""
+    # If specific generation is requested, use that
+    if cfg.generation is not None:
+        gen_str = f"gen_{cfg.generation:03d}"
+        gen_policy_path = os.path.join("Policy", "generation_best", f"{gen_str}_best_policy.json")
+        if os.path.exists(gen_policy_path):
+            print(f"Using generation {cfg.generation} policy: {gen_policy_path}")
+            return gen_policy_path
+        else:
+            print(f"ERROR: generation {cfg.generation} policy not found at '{gen_policy_path}'")
+            sys.exit(1)
+    
+    # Otherwise use the configured policy path
     if os.path.exists(cfg.policy_path):
         return cfg.policy_path
+    
+    # Fallback to latest generation checkpoint
     gen_dir = os.path.join(os.path.dirname(cfg.policy_path), "generation_best")
     if os.path.isdir(gen_dir):
         candidates = sorted(
@@ -72,6 +105,7 @@ def resolve_policy_path(cfg: ReplayConfig) -> str:
             path = os.path.join(gen_dir, candidates[-1])
             print(f"best_policy.json not found; using: {path}")
             return path
+    
     print(f"ERROR: no policy JSON found at '{cfg.policy_path}' or in '{gen_dir}'")
     sys.exit(1)
 
@@ -243,14 +277,14 @@ def plot_replay(
     qx = [steps[i]["x"] for i in indices]
     qy = [steps[i]["y"] for i in indices]
 
-    look_rad = [np.deg2rad(steps[i]["yaw_deg"]) for i in indices]
+    look_rad = [np.deg2rad(steps[i]["yaw_deg"] + steps[i]["rotate1_deg"]) for i in indices]
     lu = [L * np.cos(r) for r in look_rad]
     lv = [L * np.sin(r) for r in look_rad]
     ax.quiver(
         qx, qy, lu, lv,
         units="xy", angles="xy", scale_units="xy", scale=1,
         color="#ff9800", alpha=0.8, width=8.0, headwidth=4, headlength=5,
-        label="Look dir (yaw)", zorder=5,
+        label="Look dir (yaw + rotate1)", zorder=5,
     )
 
     drive_rad = [
