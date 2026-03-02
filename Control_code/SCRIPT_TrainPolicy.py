@@ -79,7 +79,7 @@ class Config:
     w_proximity_cost: float = 0.01
 
     # IO
-    output_dir: str = "policy_training_results_history_nn"
+    output_dir: str = "Policy"
     quiet_setup: bool = True
     save_generation_best_plots: bool = True
     parallel_eval: bool = True
@@ -113,9 +113,6 @@ def build_simulator(session_name: str, quiet_setup: bool = True) -> EnvironmentS
     except Exception:
         return EnvironmentSimulator("_default_")
 
-
-def resolve_output_dir(base_output_dir: str, session_name: str) -> str:
-    return os.path.join(base_output_dir, session_name)
 
 
 class HistoryNNPolicy:
@@ -700,6 +697,7 @@ class SimpleGATrainer:
                 f"val_fit={val_fit:.3f}, val_coll={val_coll:.3f}"
             )
             self._save_generation_best_plot(gen + 1, best_res, val_res)
+            self._save_generation_best_genome(gen + 1, best_g, best_res, val_fit, val_coll)
             self._save_live_policy_probe(best_g)
 
             if gen < self.cfg.generations - 1:
@@ -822,6 +820,38 @@ class SimpleGATrainer:
         out = os.path.join(self.generation_plot_dir, "live_metrics.png")
         fig.savefig(out, dpi=180)
         plt.close(fig)
+
+    def _save_generation_best_genome(
+        self,
+        generation_number: int,
+        genome: np.ndarray,
+        detail: Dict[str, Any],
+        val_fit: float,
+        val_coll: float,
+    ) -> None:
+        os.makedirs(self.generation_plot_dir, exist_ok=True)
+        path = os.path.join(self.generation_plot_dir, f"gen_{generation_number:03d}_best_policy.json")
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "generation": generation_number,
+                    "policy_type": "HistoryNNPolicy",
+                    "genome": genome.tolist(),
+                    "genome_size": len(genome),
+                    "history_len": self.cfg.history_len,
+                    "hidden_sizes": list(self.cfg.hidden_sizes),
+                    "iid_deadband_db": self.cfg.iid_deadband_db,
+                    "max_rotate1_deg": self.cfg.max_rotate1_deg,
+                    "max_rotate2_deg": self.cfg.max_rotate2_deg,
+                    "train_fitness": float(detail.get("fitness", float("nan"))),
+                    "train_collision_rate": float(detail.get("collision_rate", float("nan"))),
+                    "train_sign_match_rate": float(detail.get("sign_match_rate", float("nan"))),
+                    "val_fitness": val_fit,
+                    "val_collision_rate": val_coll,
+                },
+                f,
+                indent=2,
+            )
 
     def _save_live_policy_probe(self, genome: np.ndarray) -> None:
         os.makedirs(self.generation_plot_dir, exist_ok=True)
@@ -1072,8 +1102,6 @@ def main() -> None:
         raise ValueError("No training sessions remain after removing held-out validation session.")
     cfg.train_session_names = train_sessions
 
-    train_tag = "__".join(train_sessions) if len(train_sessions) > 1 else train_sessions[0]
-    cfg.output_dir = resolve_output_dir(cfg.output_dir, train_tag)
     set_seed(cfg.seed)
     os.makedirs(cfg.output_dir, exist_ok=True)
     write_overview(cfg, cfg.output_dir)
