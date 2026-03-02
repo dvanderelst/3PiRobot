@@ -468,7 +468,7 @@ class PolicyEvaluator:
                 "drive_mm": safe_float(out["drive_mm"].item()),
             }
 
-            sim_step = self.simulator.simulate_robot_movement(x, y, yaw, [action])[0]
+            sim_step = self.simulator.simulate_robot_movement(x, y, yaw, [action], compute_sonar=False)[0]
 
             next_x = safe_float(sim_step["position"]["x"], default=x)
             next_y = safe_float(sim_step["position"]["y"], default=y)

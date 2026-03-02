@@ -273,7 +273,7 @@ def robot2world(az_deg, dist, rob_x, rob_y, rob_yaw_deg):
     x, y = robot2world(0, 2, rob_x, rob_y, rob_yaw)
     
     # Multiple points at different azimuths
-    azimuths = [0, 90, 180, 270]  # forward, right, backward, left
+    azimuths = [0, 90, 180, 270]  # forward, left, backward, right
     distances = [1, 1, 1, 1]      # 1 meter each
     x, y = robot2world(azimuths, distances, rob_x, rob_y, rob_yaw)
     """

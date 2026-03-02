@@ -83,8 +83,8 @@ def main():
 
     y_true_mm = np.min(profiles, axis=1).astype(np.float32)
     half = profiles.shape[1] // 2
-    left_min = np.min(profiles[:, :half], axis=1)
-    right_min = np.min(profiles[:, half:], axis=1)
+    right_min = np.min(profiles[:, :half], axis=1)
+    left_min = np.min(profiles[:, half:], axis=1)
     asym_zero_mm = (left_min - right_min).astype(np.float32)
 
     finite = np.isfinite(sonar).all(axis=(1, 2))
@@ -114,8 +114,6 @@ def main():
     pred_distance_mm = out["distance_mm"]
     pred_iid_db = out["iid_db"]
 
-    baseline_iid_sign_inverted = -corrected_iid_db
-
     print(f"Batch size: {len(sonar)}")
     print("Distance (vs profile min distance):")
     print(
@@ -137,8 +135,8 @@ def main():
         f"Spearman={spearman_corr(pred_iid_db, asym_zero_mm):.3f}"
     )
     print(
-        f"  Baseline corrected IID (-IID): Pearson={pearson_corr(baseline_iid_sign_inverted, asym_zero_mm):.3f}, "
-        f"Spearman={spearman_corr(baseline_iid_sign_inverted, asym_zero_mm):.3f}"
+        f"  Baseline corrected IID: Pearson={pearson_corr(corrected_iid_db, asym_zero_mm):.3f}, "
+        f"Spearman={spearman_corr(corrected_iid_db, asym_zero_mm):.3f}"
     )
 
     print("\nFirst 5 predictions:")

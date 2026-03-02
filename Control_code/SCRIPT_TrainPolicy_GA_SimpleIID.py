@@ -265,7 +265,7 @@ class Evaluator:
                 "drive_mm": self.cfg.fixed_drive_mm,
             }
 
-            step = self.sim.simulate_robot_movement(x, y, yaw, [action])[0]
+            step = self.sim.simulate_robot_movement(x, y, yaw, [action], compute_sonar=False)[0]
             nx = safe_float(step["position"]["x"], x)
             ny = safe_float(step["position"]["y"], y)
             nyaw = safe_float(step["orientation"], yaw)

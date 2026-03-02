@@ -131,19 +131,7 @@ class ArenaLayout:
                     # Stack coordinates into (N, 2) array
                     walls = np.column_stack((processor.wall_x, processor.wall_y))
                     
-                    # According to DataProcessor, these should already be in mm
-                    # But let's verify the scale
-                    max_coord = np.max(walls)
-                    if max_coord > 10000:  # Probably meters if > 10,000
-                        walls = walls * 1000  # Convert meters to mm
-                        print(f"✓ Converted wall coordinates from meters to mm")
-                    elif max_coord < 100:  # Probably pixels if < 100
-                        mm_per_px = float(self.meta.get("map_mm_per_px", 10.0))
-                        walls = walls * mm_per_px
-                        print(f"✓ Converted wall coordinates from pixels to mm (scale: {mm_per_px}mm/px)")
-                    else:
-                        print(f"✓ Wall coordinates appear to be in mm (max: {max_coord:.1f}mm)")
-                    
+                    # DataProcessor.wall_x/wall_y are already in mm
                     return walls.astype(np.float32)
             
             # Fallback: try DataCollection method
@@ -443,42 +431,46 @@ class EnvironmentSimulator:
         return result
     
     def simulate_robot_movement(self, start_x: float, start_y: float, start_orientation: float,
-                               actions: List[Dict[str, float]]) -> List[Dict[str, Union[float, Dict]]]:
+                               actions: List[Dict[str, float]],
+                               compute_sonar: bool = True) -> List[Dict[str, Union[float, Dict]]]:
         """
-        Simulate a sequence of robot movements and get sonar measurements.
-        
+        Simulate a sequence of robot movements and optionally get sonar measurements.
+
         Args:
             start_x, start_y: Starting position in mm
             start_orientation: Starting orientation in degrees
             actions: List of action dictionaries with keys:
                     'rotate1_deg', 'rotate2_deg', 'drive_mm'
-            
+            compute_sonar: If False, skip intermediate sonar queries (faster; use when
+                           the caller obtains sonar readings independently).
+
         Returns:
-            List of states with position, orientation, and sonar measurements
+            List of states with position, orientation, movement, and collision info.
+            'measurements' key is only present when compute_sonar=True.
         """
         trajectory = []
         current_x, current_y = start_x, start_y
         current_orientation = start_orientation
-        
+
         for step, action in enumerate(actions):
             # Apply rotate1
             current_orientation += action['rotate1_deg']
-            current_orientation = current_orientation % 360  # Normalize
-            
-            # Take measurement after rotate1
-            measurement_after_rotate1 = self.get_sonar_measurement(
-                current_x, current_y, current_orientation
-            )
-            
+            current_orientation = current_orientation % 360
+
+            if compute_sonar:
+                measurement_after_rotate1 = self.get_sonar_measurement(
+                    current_x, current_y, current_orientation
+                )
+
             # Apply rotate2
             current_orientation += action['rotate2_deg']
-            current_orientation = current_orientation % 360  # Normalize
-            
-            # Take measurement after rotate2 (before driving)
-            measurement_after_rotate2 = self.get_sonar_measurement(
-                current_x, current_y, current_orientation
-            )
-            
+            current_orientation = current_orientation % 360
+
+            if compute_sonar:
+                measurement_after_rotate2 = self.get_sonar_measurement(
+                    current_x, current_y, current_orientation
+                )
+
             # Apply drive (collision-aware)
             drive_distance = action['drive_mm']
             drive_rad = np.deg2rad(current_orientation)
@@ -490,13 +482,12 @@ class EnvironmentSimulator:
                 current_x, current_y, target_x, target_y
             )
             current_x, current_y = safe_x, safe_y
-            
-            # Take measurement after driving
-            measurement_after_drive = self.get_sonar_measurement(
-                current_x, current_y, current_orientation
-            )
-            
-            # Store state
+
+            if compute_sonar:
+                measurement_after_drive = self.get_sonar_measurement(
+                    current_x, current_y, current_orientation
+                )
+
             state = {
                 'step': step,
                 'position': {'x': current_x, 'y': current_y},
@@ -509,14 +500,15 @@ class EnvironmentSimulator:
                 'collision': {
                     'drive_blocked': bool(blocked)
                 },
-                'measurements': {
+            }
+            if compute_sonar:
+                state['measurements'] = {
                     'after_rotate1': measurement_after_rotate1,
                     'after_rotate2': measurement_after_rotate2,
-                    'after_drive': measurement_after_drive
+                    'after_drive': measurement_after_drive,
                 }
-            }
             trajectory.append(state)
-        
+
         return trajectory
     
     def get_arena_info(self) -> Dict[str, Union[float, int]]:

@@ -151,7 +151,7 @@ class EchoProcessor:
         right = w[:, 1]
         e_left = float(np.sum(left * left))
         e_right = float(np.sum(right * right))
-        return float(10.0 * np.log10((e_left + eps) / (e_right + eps)))
+        return float(10.0 * np.log10((e_right + eps) / (e_left + eps)))
 
     def compute_iid(
         self,

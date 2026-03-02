@@ -363,7 +363,7 @@ def iid_from_distance_window(sonar_lr, dist_axis_mm, target_dist_mm, pre, post, 
     r = w[:, 1]
     el = float(np.sum(l * l))
     er = float(np.sum(r * r))
-    return float(10.0 * np.log10((el + eps) / (er + eps)))
+    return float(10.0 * np.log10((er + eps) / (el + eps)))
 
 
 def compute_profile_min_location_deg(profiles_mm, profile_centers_deg):
@@ -409,7 +409,7 @@ def iid_side_accuracy(iid_values, min_location_deg, center_band_deg):
     if not np.any(lr):
         return np.nan
     true_side = true_side[lr]
-    pred_side = np.where(iid[lr] >= 0.0, "L", "R")
+    pred_side = np.where(iid[lr] >= 0.0, "R", "L")
     return float(np.mean(pred_side == true_side))
 
 
@@ -429,7 +429,7 @@ def iid_sign_confusion(iid_values, min_location_deg, center_band_deg=0.0):
     true_side[az < -float(center_band_deg)] = "R"
     lr = np.isin(true_side, ["L", "R"])
     true_side = true_side[lr]
-    pred_side = np.where(iid[lr] >= 0.0, "L", "R")
+    pred_side = np.where(iid[lr] >= 0.0, "R", "L")
 
     cm = np.zeros((2, 2), dtype=np.int32)  # [L,R]x[L,R]
     labels = ["L", "R"]
@@ -514,12 +514,12 @@ def plot_distance_scatter(y_true, y_pred, corrected_distance_mm_test):
     plt.close(fig)
 
 
-def plot_iid_sign_confusions(iid_pred, iid_oracle, iid_baseline_sign_inverted, min_location_deg, center_band_deg):
+def plot_iid_sign_confusions(iid_pred, iid_oracle, iid_baseline, min_location_deg, center_band_deg):
     fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.6))
     entries = [
         ("Pred-distance IID", iid_pred),
         ("Oracle-distance IID", iid_oracle),
-        ("Baseline corrected IID (-IID)", iid_baseline_sign_inverted),
+        ("Baseline corrected IID", iid_baseline),
     ]
     for ax, (title, iid_vals) in zip(axes, entries):
         cm, n, acc = iid_sign_confusion(iid_vals, min_location_deg, center_band_deg=center_band_deg)
@@ -542,12 +542,12 @@ def plot_iid_sign_confusions(iid_pred, iid_oracle, iid_baseline_sign_inverted, m
     plt.close(fig)
 
 
-def plot_iid_vs_zero_split(asym_zero_mm, iid_pred, iid_oracle, iid_baseline_sign_inverted):
+def plot_iid_vs_zero_split(asym_zero_mm, iid_pred, iid_oracle, iid_baseline):
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.6))
     entries = [
         ("Pred-distance IID", iid_pred),
         ("Oracle-distance IID", iid_oracle),
-        ("Baseline corrected IID (-IID)", iid_baseline_sign_inverted),
+        ("Baseline corrected IID", iid_baseline),
     ]
     for ax, (title, iid_vals) in zip(axes, entries):
         m = np.isfinite(asym_zero_mm) & np.isfinite(iid_vals)
@@ -681,8 +681,8 @@ def main():
     # Min-location target (deg) for IID side/location analysis.
     profile_min_location_deg = compute_profile_min_location_deg(profiles, profile_centers)
     half = profiles.shape[1] // 2
-    left_min = np.min(profiles[:, :half], axis=1)
-    right_min = np.min(profiles[:, half:], axis=1)
+    right_min = np.min(profiles[:, :half], axis=1)
+    left_min = np.min(profiles[:, half:], axis=1)
     profile_asym_zero_mm = (left_min - right_min).astype(np.float32)
 
     # Basic filtering
@@ -817,15 +817,15 @@ def main():
                 for i in range(len(yt_true))
             ], dtype=np.float32)
 
-    iid_baseline_sign_inverted = -iid_baseline_test
+    iid_baseline = iid_baseline_test
     cm_pred, n_pred_sign, acc_pred_sign = iid_sign_confusion(
         iid_pred, min_location_test_deg, center_band_deg=min_location_center_band_deg
     )
     cm_oracle, n_oracle_sign, acc_oracle_sign = iid_sign_confusion(
         iid_oracle, min_location_test_deg, center_band_deg=min_location_center_band_deg
     )
-    cm_base_inv, n_base_inv_sign, acc_base_inv_sign = iid_sign_confusion(
-        iid_baseline_sign_inverted, min_location_test_deg, center_band_deg=min_location_center_band_deg
+    cm_base, n_base_sign, acc_base_sign = iid_sign_confusion(
+        iid_baseline, min_location_test_deg, center_band_deg=min_location_center_band_deg
     )
 
     # Distance metrics
@@ -845,18 +845,16 @@ def main():
         "oracle_iid_sign_n": n_oracle_sign,
         "baseline_iid_pearson": pearson_corr(iid_baseline_test, min_location_test_deg),
         "baseline_iid_spearman": spearman_corr(iid_baseline_test, min_location_test_deg),
-        "baseline_sign_inverted_iid_pearson": pearson_corr(iid_baseline_sign_inverted, min_location_test_deg),
-        "baseline_sign_inverted_iid_spearman": spearman_corr(iid_baseline_sign_inverted, min_location_test_deg),
-        "baseline_sign_inverted_iid_sign_acc": acc_base_inv_sign,
-        "baseline_sign_inverted_iid_sign_n": n_base_inv_sign,
+        "baseline_iid_sign_acc": acc_base_sign,
+        "baseline_iid_sign_n": n_base_sign,
     }
     metrics_zero_split = {
         "pred_iid_pearson": pearson_corr(iid_pred, asym_zero_test),
         "pred_iid_spearman": spearman_corr(iid_pred, asym_zero_test),
         "oracle_iid_pearson": pearson_corr(iid_oracle, asym_zero_test),
         "oracle_iid_spearman": spearman_corr(iid_oracle, asym_zero_test),
-        "baseline_sign_inverted_iid_pearson": pearson_corr(iid_baseline_sign_inverted, asym_zero_test),
-        "baseline_sign_inverted_iid_spearman": spearman_corr(iid_baseline_sign_inverted, asym_zero_test),
+        "baseline_iid_pearson": pearson_corr(iid_baseline, asym_zero_test),
+        "baseline_iid_spearman": spearman_corr(iid_baseline, asym_zero_test),
     }
     metrics = {
         "min_location": metrics_min_location,
@@ -877,9 +875,9 @@ def main():
     if len(history.get("train", [])) > 0 and len(history.get("val", [])) > 0:
         plot_training(history)
     plot_distance_scatter(yt_true, yt_pred, corrected_distance_mm_test)
-    plot_iid_vs_zero_split(asym_zero_test, iid_pred, iid_oracle, iid_baseline_sign_inverted)
+    plot_iid_vs_zero_split(asym_zero_test, iid_pred, iid_oracle, iid_baseline)
     plot_iid_sign_confusions(
-        iid_pred, iid_oracle, iid_baseline_sign_inverted,
+        iid_pred, iid_oracle, iid_baseline,
         min_location_test_deg, center_band_deg=min_location_center_band_deg
     )
     if enable_window_sweep:
@@ -931,7 +929,7 @@ def main():
         "iid_sign_confusions": {
             "pred": cm_pred.tolist(),
             "oracle": cm_oracle.tolist(),
-            "baseline_sign_inverted": cm_base_inv.tolist(),
+            "baseline": cm_base.tolist(),
         },
         "iid_window_sweep_results": sweep_results,
     }

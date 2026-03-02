@@ -154,15 +154,15 @@ def build_profile_features(profiles):
     min_val = np.min(p, axis=1)
     argmin = np.argmin(p, axis=1).astype(np.float32)
     argmin_norm = argmin / max(steps - 1, 1)
-    left_min = np.min(p[:, :half], axis=1)
-    right_min = np.min(p[:, half:], axis=1)
+    right_min = np.min(p[:, :half], axis=1)
+    left_min = np.min(p[:, half:], axis=1)
     asym = left_min - right_min
 
     # local slope around minimum bin (simple finite difference)
     argmin_i = argmin.astype(np.int64)
-    left_i = np.clip(argmin_i - 1, 0, steps - 1)
-    right_i = np.clip(argmin_i + 1, 0, steps - 1)
-    local_slope = p[np.arange(n), right_i] - p[np.arange(n), left_i]
+    prev_i = np.clip(argmin_i - 1, 0, steps - 1)
+    next_i = np.clip(argmin_i + 1, 0, steps - 1)
+    local_slope = p[np.arange(n), next_i] - p[np.arange(n), prev_i]
 
     # weighted center-of-mass with inverse distance weights
     w = 1.0 / np.clip(p, 1e-3, None)

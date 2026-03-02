@@ -3,10 +3,10 @@
 GA training script with history-based NN steering.
 
 Design:
-- rotate1 is fixed to 0 deg
+- policy controls both rotate1 and rotate2 (each scaled to ±90°)
 - drive distance is fixed to 100 mm
-- policy controls rotate2 from a short history of:
-  IID, distance, previous rotate2, previous executed drive, previous blocked flag
+- inputs: short history of IID, distance, previous rotate1, previous rotate2,
+  previous executed drive, previous blocked flag
 """
 
 import csv
@@ -326,7 +326,7 @@ class Evaluator:
                 "drive_mm": self.cfg.fixed_drive_mm,
             }
 
-            step = self.sim.simulate_robot_movement(x, y, yaw, [action])[0]
+            step = self.sim.simulate_robot_movement(x, y, yaw, [action], compute_sonar=False)[0]
             nx = safe_float(step["position"]["x"], x)
             ny = safe_float(step["position"]["y"], y)
             nyaw = safe_float(step["orientation"], yaw)
@@ -969,6 +969,23 @@ def draw_episode_on_axis(
     ax.plot(xs, ys, "-", color="#1565c0", linewidth=2, label="Trajectory")
     ax.scatter(xs[0], ys[0], s=60, color="#2e7d32", label="Start")
     ax.scatter(xs[-1], ys[-1], s=60, marker="x", color="#c62828", label="End")
+
+    # Look-direction arrows every 5 steps
+    ARROW_STRIDE = 5
+    ARROW_LEN_MM = 150.0
+    indices = range(0, len(traj), ARROW_STRIDE)
+    qx = [traj[i]["x"] for i in indices]
+    qy = [traj[i]["y"] for i in indices]
+    look_rad = [np.deg2rad(traj[i]["yaw_deg"] - traj[i]["rotate2_deg"]) for i in indices]
+    qu = [ARROW_LEN_MM * np.cos(r) for r in look_rad]
+    qv = [ARROW_LEN_MM * np.sin(r) for r in look_rad]
+    ax.quiver(
+        qx, qy, qu, qv,
+        units="xy", angles="xy", scale_units="xy", scale=1,
+        color="#ff9800", alpha=0.7, width=8.0,
+        headwidth=4, headlength=5,
+        label="Look dir",
+    )
 
     all_x = list(xs)
     all_y = list(ys)
