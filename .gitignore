@@ -11,6 +11,7 @@ Control_code/Data/
 Control_code/CompareModels/
 Control_code/TrainingClosest/
 Control_code/EchoProcessor/
+Control_code/Emulator/
 Control_code/policy_training_results_history_nn/
 ############## Robot code sub repo
 robot_code/.Trash-1000/
