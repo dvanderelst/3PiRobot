@@ -53,7 +53,7 @@ current echo for both (impossible: rotate1 hadn't happened yet) or for neither
   │   HEAD 1        │                                 │  (taken after rotate1
   │   rotate1       │                                 │   is executed)
   │                 │                                 │
-  │  W2a (8×16)     │                      [ h1 (16,) | iid_norm | dist_norm ]
+  │  W2a (8×16)     │             [ h1 (16,) | iid_norm {-1,0,+1} | dist_norm [0,2] ]
   │  b2a (8,)       │                                 │  (18,)
   │  tanh           │                                 ▼
   │  136 params     │                      ┌─────────────────┐
@@ -131,10 +131,10 @@ IID (just measured at the look direction).
 
 ## History features (6 per step)
 
-| Index | Feature    | Range     | Meaning                                        |
-|-------|------------|-----------|------------------------------------------------|
-| 0     | iid_norm   | [−2, +2]  | IID at look direction ÷ 12 dB                  |
-| 1     | dist_norm  | [0, 2]    | Distance at look direction ÷ 2000 mm           |
+| Index | Feature    | Range      | Meaning                                        |
+|-------|------------|------------|------------------------------------------------|
+| 0     | iid_norm   | {−1, 0, +1}| Pure IID sign: +1 = right wall closer, -1 = left wall closer, 0 = deadband |
+| 1     | dist_norm  | [0, 2]     | Distance at look direction ÷ 2000 mm           |
 | 2     | rot1_norm  | [−1, +1]  | Head turn this step ÷ 90° (pre-mirroring)      |
 | 3     | rot2_norm  | [−1, +1]  | Body turn this step ÷ 90° (pre-mirroring)      |
 | 4     | drive_norm | [0, 1.5]  | Executed drive last step ÷ 100 mm              |
@@ -164,10 +164,10 @@ concatenates the current measurement onto the shared encoding.
 ## Training
 
 - **Algorithm**: Genetic Algorithm (no backprop). Genome = all 802 weights flattened.
-- **Directional bias prevention**: each evaluation batch is split 50 / 50
-  normal / mirrored episodes. Mirroring negates IID and both rotation outputs so the
-  policy must be able to wall-follow in *both* directions.
-  `fitness = min(mean_fitness_normal, mean_fitness_mirrored)`
+- **Directional bias prevention**: random per-episode mirroring (50% probability by default).
+  Mirroring negates IID inputs and rotation outputs, forcing the policy to learn symmetric
+  wall-following behavior that works equally well for left and right walls.
+  `fitness = mean(reward across all episodes, both normal and mirrored)`
 - **Fitness**: sum of per-step sinuosity rewards
   `reward = 1 − w_turn_penalty × (sinuosity − 1)`,  episode terminates on wall hit.
 - **Arena**: trained on multiple distinct physical arenas (sessions B02–B05),

@@ -46,7 +46,7 @@ class Config:
     fixed_drive_mm: float = 100.0
     iid_deadband_db: float = 0.25
     history_len: int = 5
-    hidden_sizes: Tuple[int, int] = (16, 8)
+    hidden_sizes: Tuple[int, int] = (8, 4)
 
     # GA
     population_size: int = 80
@@ -59,7 +59,7 @@ class Config:
 
     # Evaluation
     episodes_per_policy: int = 8
-    max_steps: int = 250
+    max_steps: int = 50
     spawn_margin_mm: float = 150.0
     use_empirical_starts: bool = True
     randomize_empirical_yaw: bool = True
@@ -68,6 +68,12 @@ class Config:
     # Directional bias prevention: episodes are split 50/50 forced-normal / forced-mirrored;
     # genome fitness = min(mean_normal_fitness, mean_mirrored_fitness) so neither direction can be ignored.
     use_random_mirroring: bool = True
+    
+    # Progressive difficulty: increase max_steps over generations to prevent early stopping
+    use_progressive_steps: bool = True  # Enable progressive step increase
+    progressive_steps_start: int = 50     # Starting max_steps (short episodes for initial learning)
+    progressive_steps_end: int = 250     # Final max_steps (full-length episodes)
+    progressive_steps_generations: int = 40  # Number of generations to reach final step count
 
     # Simplified fitness: reward survival and straight paths
     # (removed complex reward weights - now using simple 1 - w_turn * turn_penalty)
@@ -190,7 +196,7 @@ class HistoryNNPolicy:
         if abs(safe_float(current_iid_db, 0.0)) < self.deadband_db:
             return 0.0
         h1 = self._shared_h1(hist_vec)
-        iid_n = float(np.clip(safe_float(current_iid_db, 0.0) / 12.0, -2.0, 2.0))
+        iid_n = 1.0 if current_iid_db > 0 else -1.0  # sign-only, matches history representation
         dist_n = float(np.clip(safe_float(current_dist_mm, 1800.0) / 2000.0, 0.0, 2.0))
         h1_aug = np.concatenate([h1, np.array([[iid_n], [dist_n]], dtype=np.float32)], axis=0)
         w2b, b2b, w3b, b3b = self.params[6], self.params[7], self.params[8], self.params[9]
@@ -344,7 +350,11 @@ class Evaluator:
             if is_mirrored:
                 iid = -iid
             last_iid = iid
-            iid_norm = float(np.clip(iid / 12.0, -2.0, 2.0))
+            # Pure sign-based IID representation for environment robustness
+            if abs(iid) > self.cfg.iid_deadband_db:
+                iid_norm = 1.0 if iid > 0 else -1.0  # Only direction matters: +1 = right wall closer, -1 = left wall closer
+            else:
+                iid_norm = 0.0  # Deadband: no clear wall
             dist_norm = float(np.clip(dist_mm / 2000.0, 0.0, 2.0))
 
             # --- Head 2: decide body turn using current measurement ---
@@ -444,8 +454,13 @@ class Evaluator:
         net_displacement = float(np.hypot(x - start_x, y - start_y))
 
         sign_match_rate = float(np.mean(sign_match_terms)) if sign_match_terms else 0.5
+        
+        # Normalize fitness by episode length for fair comparison across different max_steps
+        normalized_fitness = float(total_reward) / float(self.cfg.max_steps)
+        
         return {
-            "fitness": float(total_reward),
+            "fitness": normalized_fitness,  # Length-normalized fitness
+            "fitness_raw": float(total_reward),  # Original unnormalized fitness for reference
             "steps": len(trajectory),
             "total_executed_drive_mm": float(total_drive),
             "net_displacement_mm": net_displacement,
@@ -685,6 +700,18 @@ class SimpleGATrainer:
     def train(self) -> np.ndarray:
         pop = self.init_population()
         for gen in range(self.cfg.generations):
+            # Apply progressive step increase if enabled
+            if self.cfg.use_progressive_steps and self.cfg.progressive_steps_generations > 0:
+                # Calculate current max_steps based on generation
+                progress = min(gen / self.cfg.progressive_steps_generations, 1.0)
+                current_max_steps = int(
+                    self.cfg.progressive_steps_start + 
+                    progress * (self.cfg.progressive_steps_end - self.cfg.progressive_steps_start)
+                )
+                # Update the config for this generation
+                self.cfg.max_steps = current_max_steps
+                print(f"Generation {gen+1}: max_steps = {current_max_steps} (progressive)")
+            
             starts_by_env = self._generation_starts(gen)
             fitness: List[float] = [0.0] * len(pop)
             details: List[Dict[str, Any]] = [None] * len(pop)  # type: ignore
@@ -984,71 +1011,84 @@ def plot_policy_curve(
     output_dir: str,
     filename: str = "plot_policy_curve_best.png",
 ) -> None:
+    """
+    Simple visualization of the two-head policy response to wall directions.
+    """
     os.makedirs(output_dir, exist_ok=True)
-    iid = np.linspace(-12, 12, 300)
-    dists = [300.0, 700.0, 1200.0, 1800.0]
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
-    ax_r1, ax_r2 = axes[0, 0], axes[0, 1]
-    ax_net, ax_lv = axes[1, 0], axes[1, 1]
-    for d in dists:
-        iid_norm = np.clip(iid / 12.0, -2.0, 2.0)
-        dist_norm = np.clip(d / 2000.0, 0.0, 2.0)
-        feat = np.array(
-            [
-                iid_norm,
-                np.full_like(iid_norm, dist_norm),
-                np.zeros_like(iid_norm),
-                np.zeros_like(iid_norm),
-                np.ones_like(iid_norm),
-                np.zeros_like(iid_norm),
-            ],
-            dtype=np.float32,
-        ).T
-        # Repeat the same feature row across the history window for a probe view.
-        # rot1 uses last_iid=iv (deadband probe); rot2 uses current measurement (iv, d).
-        rotate1 = np.array([
-            policy.decide_rotate1(np.tile(frow, cfg.history_len).astype(np.float32), float(iv))
-            for frow, iv in zip(feat, iid)
-        ], dtype=np.float32)
-        rotate2 = np.array([
-            policy.decide_rotate2(np.tile(frow, cfg.history_len).astype(np.float32), float(iv), d)
-            for frow, iv in zip(feat, iid)
-        ], dtype=np.float32)
-        net_drive = rotate1 + rotate2
-        ax_r1.plot(iid, rotate1, linewidth=2, label=f"distance={int(d)}mm")
-        ax_r2.plot(iid, rotate2, linewidth=2, label=f"distance={int(d)}mm")
-        ax_net.plot(iid, net_drive, linewidth=2, label=f"distance={int(d)}mm")
-        # Look-vs-drive panel: y=rotate1, x=net drive turn.
-        ax_lv.plot(net_drive, rotate1, linewidth=2, label=f"distance={int(d)}mm")
-
-    for ax, title, xlabel, ylabel in [
-        (ax_r1, "IID vs rotate1", "IID (dB)", "rotate1 (deg)"),
-        (ax_r2, "IID vs rotate2", "IID (dB)", "rotate2 (deg)"),
-        (ax_net, "IID vs net drive turn (rotate1+rotate2)", "IID (dB)", "net drive turn (deg)"),
-    ]:
-        ax.axhline(0, color="black", linewidth=1, alpha=0.5)
-        ax.axvline(0, color="black", linewidth=1, alpha=0.5)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_title(f"History-NN probe: {title}")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-
-    # Look-vs-drive panel with y=x reference line.
-    lim = float(cfg.max_rotate1_deg + cfg.max_rotate2_deg)
-    ax_lv.plot([-lim, lim], [-lim, lim], "--", color="black", alpha=0.6, linewidth=1.2, label="look=drive")
-    ax_lv.axhline(0, color="black", linewidth=1, alpha=0.3)
-    ax_lv.axvline(0, color="black", linewidth=1, alpha=0.3)
-    ax_lv.set_xlim(-lim, lim)
-    ax_lv.set_ylim(-lim, lim)
-    ax_lv.set_xlabel("net drive turn (deg)")
-    ax_lv.set_ylabel("rotate1 / look turn (deg)")
-    ax_lv.set_title("History-NN probe: look vs drive")
-    ax_lv.grid(True, alpha=0.3)
-    ax_lv.legend()
-
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, filename), dpi=180)
+    
+    # Create a simple 1x2 figure layout
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    
+    # Test different IID signs and distances
+    iid_signs = [-1.0, 1.0]  # Left wall, Right wall
+    distances = [500.0, 1000.0, 1500.0]  # Different distances
+    
+    # Store results for both panels
+    look_results = []  # For panel 1: rotate1 values
+    strategy_results = []  # For panel 2: (total_rotation, correction) pairs
+    
+    for iid_sign in iid_signs:
+        for dist in distances:
+            # Create history feature vector
+            hist_vec = np.zeros(cfg.history_len * 6, dtype=np.float32)
+            for step in range(cfg.history_len):
+                hist_vec[step*6 + 1] = np.clip(dist / 2000.0, 0.0, 2.0)
+            
+            iid_val = iid_sign * 6.0
+            
+            # Get policy decisions
+            rotate1 = policy.decide_rotate1(hist_vec, iid_val)
+            rotate2 = policy.decide_rotate2(hist_vec, iid_val, dist)
+            
+            # Calculate metrics
+            total_rotation = rotate1 + rotate2
+            look_vs_drive_diff = -rotate2  # How much look direction differed from drive direction
+            
+            look_results.append((iid_sign, rotate1))
+            strategy_results.append((total_rotation, look_vs_drive_diff))
+            
+            # Simple scatter plot - no complex annotations
+            marker = 'o' if iid_sign > 0 else 's'
+            color = 'C0' if iid_sign > 0 else 'C1'
+            
+            # Panel 1: Total rotation response by wall type
+            ax1.scatter(iid_sign, total_rotation, marker=marker, color=color, alpha=0.8, s=100)
+            
+            # Panel 2: Total rotation vs look-drive difference
+            ax2.scatter(total_rotation, look_vs_drive_diff, marker=marker, color=color, alpha=0.8, s=100)
+    
+    # Format panel 1: Total rotation response
+    ax1.axhline(0, color='black', linewidth=1, alpha=0.3)
+    ax1.axvline(0, color='black', linewidth=1, alpha=0.3)
+    ax1.set_xlabel('Wall Direction', fontsize=11)
+    ax1.set_ylabel('Total Rotation Response (deg)', fontsize=11)
+    ax1.set_title('Total Rotation Response to Walls', fontsize=13, fontweight='bold')
+    ax1.set_xlim(-1.5, 1.5)
+    ax1.set_xticks([-1, 1])
+    ax1.set_xticklabels(['Left Wall', 'Right Wall'])
+    ax1.set_ylim(-100, 100)
+    ax1.grid(True, alpha=0.3)
+    
+    # Simple legend with explanation
+    ax1.scatter([], [], marker='o', color='C0', label='Right wall (3 distances)', alpha=0.8, s=80)
+    ax1.scatter([], [], marker='s', color='C1', label='Left wall (3 distances)', alpha=0.8, s=80)
+    ax1.legend(fontsize=10, loc='upper right', title='Wall Response (500/1000/1500mm)')
+    
+    # Format panel 2: Rotation strategy
+    ax2.axhline(0, color='black', linewidth=1, alpha=0.3)
+    ax2.axvline(0, color='black', linewidth=1, alpha=0.3)
+    lim = cfg.max_rotate1_deg + cfg.max_rotate2_deg
+    ax2.plot([-lim, lim], [0, 0], '--', color='gray', alpha=0.5)  # Reference line at y=0
+    ax2.set_xlabel('Total Rotation Response (deg)', fontsize=11)
+    ax2.set_ylabel('Look-Drive Direction Difference (deg)', fontsize=11)
+    ax2.set_title('Rotation Strategy: Total vs Look-Drive Difference', fontsize=13, fontweight='bold')
+    ax2.set_xlim(-lim*1.1, lim*1.1)
+    ax2.set_ylim(-lim*1.1, lim*1.1)
+    ax2.set_aspect('equal')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, filename), dpi=180, bbox_inches='tight')
     plt.close(fig)
 
 
