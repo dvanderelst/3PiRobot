@@ -131,10 +131,10 @@ IID (just measured at the look direction).
 
 ## History features (6 per step)
 
-| Index | Feature    | Range      | Meaning                                        |
-|-------|------------|------------|------------------------------------------------|
-| 0     | iid_norm   | {−1, 0, +1}| Pure IID sign: +1 = right wall closer, -1 = left wall closer, 0 = deadband |
-| 1     | dist_norm  | [0, 2]     | Distance at look direction ÷ 2000 mm           |
+| Index | Feature    | Range     | Meaning                                        |
+|-------|------------|-----------|------------------------------------------------|
+| 0     | iid_norm   | [−2, +2]  | IID at look direction ÷ 12 dB                  |
+| 1     | dist_norm  | [0, 2]    | Distance at look direction ÷ 2000 mm           |
 | 2     | rot1_norm  | [−1, +1]  | Head turn this step ÷ 90° (pre-mirroring)      |
 | 3     | rot2_norm  | [−1, +1]  | Body turn this step ÷ 90° (pre-mirroring)      |
 | 4     | drive_norm | [0, 1.5]  | Executed drive last step ÷ 100 mm              |

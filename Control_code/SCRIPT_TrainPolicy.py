@@ -41,12 +41,12 @@ class Config:
     validation_session_name: Optional[str] = "sessionB01"
 
     # Action limits/components
-    max_rotate1_deg: float = 90.0
-    max_rotate2_deg: float = 90.0
+    max_rotate1_deg: float = 45.0
+    max_rotate2_deg: float = 45.0
     fixed_drive_mm: float = 100.0
     iid_deadband_db: float = 0.25
     history_len: int = 5
-    hidden_sizes: Tuple[int, int] = (8, 4)
+    hidden_sizes: Tuple[int, int] = (16, 8)
 
     # GA
     population_size: int = 80
@@ -73,12 +73,12 @@ class Config:
     use_progressive_steps: bool = True  # Enable progressive step increase
     progressive_steps_start: int = 50     # Starting max_steps (short episodes for initial learning)
     progressive_steps_end: int = 250     # Final max_steps (full-length episodes)
-    progressive_steps_generations: int = 40  # Number of generations to reach final step count
+    progressive_steps_generations: int = 20  # Number of generations to reach final step count
 
     # Simplified fitness: reward survival and straight paths
     # (removed complex reward weights - now using simple 1 - w_turn * turn_penalty)
     w_turn_penalty: float = 2.0  # Weight for turn penalty (2.0 means full turn = -1.0 reward)
-    sinuosity_window: int = 5    # Steps over which sinuosity is measured (longer = penalises slower oscillations)
+    sinuosity_window: int = 15    # Steps over which sinuosity is measured (longer = penalises slower oscillations)
     # Proximity shaping: penalize being close to geometry (walls/bounds).
     warning_distance_mm: float = 300.0
     collision_distance_mm: float = 150.0
@@ -196,7 +196,7 @@ class HistoryNNPolicy:
         if abs(safe_float(current_iid_db, 0.0)) < self.deadband_db:
             return 0.0
         h1 = self._shared_h1(hist_vec)
-        iid_n = 1.0 if current_iid_db > 0 else -1.0  # sign-only, matches history representation
+        iid_n = float(np.clip(safe_float(current_iid_db, 0.0) / 12.0, -2.0, 2.0))
         dist_n = float(np.clip(safe_float(current_dist_mm, 1800.0) / 2000.0, 0.0, 2.0))
         h1_aug = np.concatenate([h1, np.array([[iid_n], [dist_n]], dtype=np.float32)], axis=0)
         w2b, b2b, w3b, b3b = self.params[6], self.params[7], self.params[8], self.params[9]
@@ -342,6 +342,7 @@ class Evaluator:
             rot1_norm = float(np.clip(rotate1 / self.cfg.max_rotate1_deg, -1.0, 1.0))
             if is_mirrored:
                 rotate1 = -rotate1
+                rot1_norm = -rot1_norm
 
             # --- Execute rotate1 then measure at the new look direction ---
             meas = self.sim.get_sonar_measurement(x, y, yaw + rotate1)
@@ -350,11 +351,8 @@ class Evaluator:
             if is_mirrored:
                 iid = -iid
             last_iid = iid
-            # Pure sign-based IID representation for environment robustness
-            if abs(iid) > self.cfg.iid_deadband_db:
-                iid_norm = 1.0 if iid > 0 else -1.0  # Only direction matters: +1 = right wall closer, -1 = left wall closer
-            else:
-                iid_norm = 0.0  # Deadband: no clear wall
+            # Full IID representation for smoother path generation
+            iid_norm = float(np.clip(iid / 12.0, -2.0, 2.0))  # Normalized IID with full range
             dist_norm = float(np.clip(dist_mm / 2000.0, 0.0, 2.0))
 
             # --- Head 2: decide body turn using current measurement ---
@@ -362,6 +360,7 @@ class Evaluator:
             rot2_norm = float(np.clip(rotate2 / self.cfg.max_rotate2_deg, -1.0, 1.0))
             if is_mirrored:
                 rotate2 = -rotate2
+                rot2_norm = -rot2_norm
 
             # History entry: what was seen after this step's look + what was decided
             current_feat = np.array(
@@ -1029,12 +1028,16 @@ def plot_policy_curve(
     
     for iid_sign in iid_signs:
         for dist in distances:
-            # Create history feature vector
+            iid_val = iid_sign * 6.0
+            iid_norm_val = float(np.clip(iid_val / 12.0, -2.0, 2.0))
+            dist_norm_val = float(np.clip(dist / 2000.0, 0.0, 2.0))
+
+            # Create history feature vector with realistic steady-state values
             hist_vec = np.zeros(cfg.history_len * 6, dtype=np.float32)
             for step in range(cfg.history_len):
-                hist_vec[step*6 + 1] = np.clip(dist / 2000.0, 0.0, 2.0)
-            
-            iid_val = iid_sign * 6.0
+                hist_vec[step*6 + 0] = iid_norm_val   # iid_norm
+                hist_vec[step*6 + 1] = dist_norm_val   # dist_norm
+                hist_vec[step*6 + 4] = 1.0             # drive_norm (robot was driving)
             
             # Get policy decisions
             rotate1 = policy.decide_rotate1(hist_vec, iid_val)
