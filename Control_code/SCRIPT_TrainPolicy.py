@@ -50,7 +50,7 @@ class Config:
 
     # GA
     population_size: int = 80
-    generations: int = 80
+    generations: int = 120
     elitism_count: int = 8
     tournament_size: int = 5
     crossover_rate: float = 0.85
@@ -116,8 +116,15 @@ def build_simulator(session_name: str, quiet_setup: bool = True) -> EnvironmentS
 
 class HistoryNNPolicy:
     """
-    Small MLP policy mapping history features to [rotate1, rotate2].
-    Input per history step: [iid_norm, dist_norm, prev_rot1_norm, prev_rot2_norm, prev_drive_norm, prev_blocked]
+    Two-head MLP with shared history encoder.
+    See policy_architecture.md for full design rationale.
+
+    Shared encoder processes the history, then two separate heads decide:
+      - Head 1 (rotate1): where to point the sonar head — decided before measuring.
+      - Head 2 (rotate2): how to turn the body — decided after measuring at the look direction,
+        with the current [iid_norm, dist_norm] injected alongside the shared encoding.
+
+    History features per step: [iid_norm, dist_norm, rot1_norm, rot2_norm, drive_norm, blocked]
     """
 
     def __init__(
@@ -137,9 +144,11 @@ class HistoryNNPolicy:
         self.in_dim = self.history_len * self.feature_dim
         h1, h2 = self.hidden_sizes
         self.shapes = [
-            (h1, self.in_dim), (h1,),
-            (h2, h1), (h2,),
-            (2, h2), (2,),
+            (h1, self.in_dim), (h1,),   # shared encoder:       W1, b1
+            (h2, h1),          (h2,),   # rot1 head hidden:     W2a, b2a
+            (1,  h2),          (1,),    # rot1 head output:     W3a, b3a
+            (h2, h1 + 2),      (h2,),   # rot2 head hidden:     W2b, b2b  (+2 = iid_norm, dist_norm)
+            (1,  h2),          (1,),    # rot2 head output:     W3b, b3b
         ]
         self.params: List[np.ndarray] = [np.zeros(s, dtype=np.float32) for s in self.shapes]
 
@@ -161,18 +170,33 @@ class HistoryNNPolicy:
     def get_genome(self) -> np.ndarray:
         return np.concatenate([p.reshape(-1) for p in self.params]).astype(np.float32)
 
-    def action_degrees(self, hist_vec: np.ndarray, current_iid_db: float) -> Tuple[float, float]:
-        iid = safe_float(current_iid_db, 0.0)
-        if abs(iid) < self.deadband_db:
-            return 0.0, 0.0
+    def _shared_h1(self, hist_vec: np.ndarray) -> np.ndarray:
         x = np.asarray(hist_vec, dtype=np.float32).reshape(self.in_dim, 1)
-        w1, b1, w2, b2, w3, b3 = self.params
-        z1 = np.tanh((w1 @ x + b1.reshape(-1, 1)))
-        z2 = np.tanh((w2 @ z1 + b2.reshape(-1, 1)))
-        y = np.tanh((w3 @ z2 + b3.reshape(-1, 1)))
-        rot1_norm = float(np.clip(y[0, 0], -1.0, 1.0))
-        rot2_norm = float(np.clip(y[1, 0], -1.0, 1.0))
-        return rot1_norm * self.max_rotate1_deg, rot2_norm * self.max_rotate2_deg
+        w1, b1 = self.params[0], self.params[1]
+        return np.tanh(w1 @ x + b1.reshape(-1, 1))
+
+    def decide_rotate1(self, hist_vec: np.ndarray, last_iid_db: float) -> float:
+        """Head 1: decide where to look. Deadband uses last step's measured IID."""
+        if abs(safe_float(last_iid_db, 0.0)) < self.deadband_db:
+            return 0.0
+        h1 = self._shared_h1(hist_vec)
+        w2a, b2a, w3a, b3a = self.params[2], self.params[3], self.params[4], self.params[5]
+        h2 = np.tanh(w2a @ h1 + b2a.reshape(-1, 1))
+        y = np.tanh(w3a @ h2 + b3a.reshape(-1, 1))
+        return float(np.clip(y[0, 0], -1.0, 1.0)) * self.max_rotate1_deg
+
+    def decide_rotate2(self, hist_vec: np.ndarray, current_iid_db: float, current_dist_mm: float) -> float:
+        """Head 2: decide body turn after looking. Current measurement injected alongside shared encoding."""
+        if abs(safe_float(current_iid_db, 0.0)) < self.deadband_db:
+            return 0.0
+        h1 = self._shared_h1(hist_vec)
+        iid_n = float(np.clip(safe_float(current_iid_db, 0.0) / 12.0, -2.0, 2.0))
+        dist_n = float(np.clip(safe_float(current_dist_mm, 1800.0) / 2000.0, 0.0, 2.0))
+        h1_aug = np.concatenate([h1, np.array([[iid_n], [dist_n]], dtype=np.float32)], axis=0)
+        w2b, b2b, w3b, b3b = self.params[6], self.params[7], self.params[8], self.params[9]
+        h2 = np.tanh(w2b @ h1_aug + b2b.reshape(-1, 1))
+        y = np.tanh(w3b @ h2 + b3b.reshape(-1, 1))
+        return float(np.clip(y[0, 0], -1.0, 1.0)) * self.max_rotate2_deg
 
 
 def config_from_dict(d: Dict[str, Any]) -> Config:
@@ -291,31 +315,14 @@ class Evaluator:
 
         is_mirrored = mirrored
 
-        prev_rot1_norm = 0.0
-        prev_rot2_norm = 0.0
+        last_iid = 0.0  # IID from previous step's look; used for deadband on first step
         prev_drive_norm = 0.0
         prev_blocked = 0.0
         # For sinuosity calculation: track recent positions
         position_history: collections.deque = collections.deque(maxlen=self.cfg.sinuosity_window)
 
         for t in range(self.cfg.max_steps):
-            # Get real measurement
-            meas = self.sim.get_sonar_measurement(x, y, yaw)
-            iid = safe_float(meas.get("iid_db"), 0.0)
-            dist_mm = safe_float(meas.get("distance_mm"), 1800.0)
-            
-            # Behavioral symmetry training: flip IID to create virtual mirrored scenario
-            if is_mirrored:
-                iid = -iid  # Present left walls as right walls and vice versa
-                # Policy will learn to respond symmetrically to achieve same wall-following behavior
-            
-            iid_norm = float(np.clip(iid / 12.0, -2.0, 2.0))
-            dist_norm = float(np.clip(dist_mm / 2000.0, 0.0, 2.0))
-            current_feat = np.array(
-                [iid_norm, dist_norm, prev_rot1_norm, prev_rot2_norm, prev_drive_norm, prev_blocked],
-                dtype=np.float32,
-            )
-            hist.append(current_feat)
+            # --- Build history vector (rotate1 decided here; rotate2 decided after measuring) ---
             pad_n = self.cfg.history_len - len(hist)
             if pad_n > 0:
                 hist_vec = np.concatenate(
@@ -324,18 +331,36 @@ class Evaluator:
                 ).astype(np.float32)
             else:
                 hist_vec = np.concatenate(list(hist), axis=0).astype(np.float32)
-            rotate1, rotate2 = policy.action_degrees(hist_vec, iid)
-
-            # Capture the policy's own output (pre-negation) for history so that the
-            # mirrored frame's history is consistent with what the policy decided.
+            # --- Head 1: decide where to look (before measuring) ---
+            rotate1 = policy.decide_rotate1(hist_vec, last_iid)
             rot1_norm = float(np.clip(rotate1 / self.cfg.max_rotate1_deg, -1.0, 1.0))
-            rot2_norm = float(np.clip(rotate2 / self.cfg.max_rotate2_deg, -1.0, 1.0))
-
-            # Mirror rotation outputs for symmetric behavior
             if is_mirrored:
                 rotate1 = -rotate1
+
+            # --- Execute rotate1 then measure at the new look direction ---
+            meas = self.sim.get_sonar_measurement(x, y, yaw + rotate1)
+            iid = safe_float(meas.get("iid_db"), 0.0)
+            dist_mm = safe_float(meas.get("distance_mm"), 1800.0)
+            if is_mirrored:
+                iid = -iid
+            last_iid = iid
+            iid_norm = float(np.clip(iid / 12.0, -2.0, 2.0))
+            dist_norm = float(np.clip(dist_mm / 2000.0, 0.0, 2.0))
+
+            # --- Head 2: decide body turn using current measurement ---
+            rotate2 = policy.decide_rotate2(hist_vec, iid, dist_mm)
+            rot2_norm = float(np.clip(rotate2 / self.cfg.max_rotate2_deg, -1.0, 1.0))
+            if is_mirrored:
                 rotate2 = -rotate2
 
+            # History entry: what was seen after this step's look + what was decided
+            current_feat = np.array(
+                [iid_norm, dist_norm, rot1_norm, rot2_norm, prev_drive_norm, prev_blocked],
+                dtype=np.float32,
+            )
+            hist.append(current_feat)
+
+            # --- Execute rotate2 + drive ---
             action = {
                 "rotate1_deg": rotate1,
                 "rotate2_deg": rotate2,
@@ -357,8 +382,6 @@ class Evaluator:
             net_turn_deg = rotate1 + rotate2
             prev_drive_norm = float(np.clip(exec_drive / max(self.cfg.fixed_drive_mm, 1e-6), 0.0, 1.5))
             prev_blocked = 1.0 if blocked else 0.0
-            prev_rot1_norm = rot1_norm
-            prev_rot2_norm = rot2_norm
             clearance_mm = self._geometry_clearance_mm(nx, ny)
             warn = max(float(self.cfg.warning_distance_mm), 1e-6)
             proximity_term = float(np.clip((warn - clearance_mm) / warn, 0.0, 1.0))
@@ -374,32 +397,19 @@ class Evaluator:
             # Add current position to history for sinuosity calculation
             position_history.append((nx, ny))
             if len(position_history) >= 2:
-                # Calculate actual path distance (sum of segment lengths)
-                path_distance = 0.0
-                for i in range(1, len(position_history)):
-                    x1, y1 = position_history[i-1]
-                    x2, y2 = position_history[i]
-                    path_distance += np.hypot(x2 - x1, y2 - y1)
-                
-                # Calculate straight-line distance from first to last point
-                if len(position_history) > 1:
-                    first_x, first_y = position_history[0]
-                    last_x, last_y = position_history[-1]
-                    straight_distance = np.hypot(last_x - first_x, last_y - first_y)
-                    
-                    # Sinuosity = path_distance / straight_distance (>=1.0, 1.0 = perfectly straight)
-                    # Cap sinuosity to prevent extreme values when movement is very small
-                    sinuosity = path_distance / straight_distance if straight_distance > 1e-6 else 1.0
-                    sinuosity = min(sinuosity, 2.0)  # Cap at 2.0 (100% extra distance)
-                    
-                    # Fitness: reward survival, penalize sinuosity
-                    # sinuosity_penalty ranges from 0 (straight) to ~0.5 (very tortuous) with current history length
-                    sinuosity_penalty = self.cfg.w_turn_penalty * (sinuosity - 1.0)  # 0 for straight, >0 for curved
-                    reward = 1.0 - sinuosity_penalty
-                else:
-                    reward = 1.0  # Not enough history yet
+                path_distance = sum(
+                    np.hypot(position_history[i][0] - position_history[i-1][0],
+                             position_history[i][1] - position_history[i-1][1])
+                    for i in range(1, len(position_history))
+                )
+                first_x, first_y = position_history[0]
+                last_x, last_y = position_history[-1]
+                straight_distance = np.hypot(last_x - first_x, last_y - first_y)
+                sinuosity = path_distance / straight_distance if straight_distance > 1e-6 else 1.0
+                sinuosity = min(sinuosity, 2.0)
+                reward = 1.0 - self.cfg.w_turn_penalty * (sinuosity - 1.0)
             else:
-                reward = 1.0  # Not enough history yet
+                reward = 1.0  # window not yet full
             total_reward += reward
 
             trajectory.append(
@@ -408,6 +418,7 @@ class Evaluator:
                     "x": nx,
                     "y": ny,
                     "yaw_deg": nyaw,
+                    "look_yaw_deg": yaw + rotate1,  # body yaw at step start + head turn = actual measurement direction
                     "iid_db": iid,
                     "distance_mm": dist_mm,
                     "rotate1_deg": rotate1,
@@ -994,12 +1005,15 @@ def plot_policy_curve(
             dtype=np.float32,
         ).T
         # Repeat the same feature row across the history window for a probe view.
-        actions = np.array([
-            policy.action_degrees(np.tile(frow, cfg.history_len).astype(np.float32), float(iv))
+        # rot1 uses last_iid=iv (deadband probe); rot2 uses current measurement (iv, d).
+        rotate1 = np.array([
+            policy.decide_rotate1(np.tile(frow, cfg.history_len).astype(np.float32), float(iv))
             for frow, iv in zip(feat, iid)
-        ], dtype=np.float32)  # [N,2] => rotate1, rotate2
-        rotate1 = actions[:, 0]
-        rotate2 = actions[:, 1]
+        ], dtype=np.float32)
+        rotate2 = np.array([
+            policy.decide_rotate2(np.tile(frow, cfg.history_len).astype(np.float32), float(iv), d)
+            for frow, iv in zip(feat, iid)
+        ], dtype=np.float32)
         net_drive = rotate1 + rotate2
         ax_r1.plot(iid, rotate1, linewidth=2, label=f"distance={int(d)}mm")
         ax_r2.plot(iid, rotate2, linewidth=2, label=f"distance={int(d)}mm")
@@ -1064,7 +1078,7 @@ def draw_episode_on_axis(
     indices = range(0, len(traj), ARROW_STRIDE)
     qx = [traj[i]["x"] for i in indices]
     qy = [traj[i]["y"] for i in indices]
-    look_rad = [np.deg2rad(traj[i]["yaw_deg"] + traj[i]["rotate1_deg"]) for i in indices]
+    look_rad = [np.deg2rad(traj[i]["look_yaw_deg"]) for i in indices]
     qu = [ARROW_LEN_MM * np.cos(r) for r in look_rad]
     qv = [ARROW_LEN_MM * np.sin(r) for r in look_rad]
     ax.quiver(
