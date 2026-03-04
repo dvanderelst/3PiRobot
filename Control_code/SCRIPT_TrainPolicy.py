@@ -58,14 +58,15 @@ class Config:
     # GA
     population_size: int = 80
     generations: int = 120
-    elitism_count: int = 8
+    elitism_count: int = 30   # keep top-30 so most of the population is proven-good
     tournament_size: int = 5
     crossover_rate: float = 0.85
-    mutation_rate: float = 0.2
+    mutation_rate: float = 0.05   # ~40/802 weights perturbed per offspring; was 0.2
+                                   # (160 changes destroyed parent behaviour)
     mutation_sigma: float = 0.2
 
     # Evaluation
-    episodes_per_policy: int = 8
+    episodes_per_policy: int = 16
     max_steps: int = 50
     spawn_margin_mm: float = 150.0
     use_empirical_starts: bool = True
@@ -75,7 +76,7 @@ class Config:
     # raw empirical positions.  Valid-starts already carry pre-filtered yaws so
     # randomize_empirical_yaw is ignored for them.
     valid_starts_dir: str = "ValidStarts"
-    validation_episodes_per_generation: int = 8
+    validation_episodes_per_generation: int = 16
 
     # Progressive difficulty
     use_progressive_steps: bool = True
@@ -801,12 +802,16 @@ class SimpleGATrainer:
             self._save_live_policy_probe(best_g)
 
             if gen < self.cfg.generations - 1:
-                order  = np.argsort(f_np)[::-1]
+                order   = np.argsort(f_np)[::-1]
                 elite_n = min(self.cfg.elitism_count, len(pop))
-                nxt    = [pop[int(i)].copy() for i in order[:elite_n]]
+                elites  = [pop[int(i)].copy() for i in order[:elite_n]]
+                # Copy elites unchanged, then fill remaining slots by mutating
+                # a randomly chosen elite.  Avoids destructive crossover between
+                # unrelated weight configurations (competing-conventions problem).
+                nxt = elites[:]
                 while len(nxt) < self.cfg.population_size:
-                    p1, p2 = self.select(pop, fitness)
-                    nxt.append(self.mutate(self.crossover(p1, p2)).astype(np.float32))
+                    parent = elites[random.randrange(len(elites))]
+                    nxt.append(self.mutate(parent).astype(np.float32))
                 pop = nxt
 
         if self.best_genome is None:
