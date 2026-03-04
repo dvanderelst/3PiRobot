@@ -13,7 +13,8 @@ Control_code/TrainingClosest/
 Control_code/EchoProcessor/
 Control_code/Emulator/
 Control_code/Policy/
-Control_code/Replay/
+Control_code/PolicyAssessment/
+Control_code/ValidStarts/
 ############## Robot code sub repo
 robot_code/.Trash-1000/
 robot_code/System Volume Information/
