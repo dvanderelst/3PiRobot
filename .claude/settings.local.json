@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git check-ignore:*)",
+      "Bash(git rm:*)",
+      "Bash(ls:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(python3:*)"
+    ]
+  }
+}

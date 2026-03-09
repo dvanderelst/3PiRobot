@@ -11,10 +11,10 @@ from LorexLib.Environment import capture_environment_layout
 
 
 robot_number = 1
-session = 'sessionB05'
-wait_for_confirmation = False
-do_rotation = True
-do_translation = True
+session = 'test'
+wait_for_confirmation = True
+do_rotation = False
+do_translation = False
 do_plot = True
 selection_mode = 'first'
 max_steps = 500
