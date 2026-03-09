@@ -75,13 +75,8 @@ for step in range(MAX_STEPS):
         time.sleep(0.15)
 
     # --- Sonar ping at post-rotate1 orientation ---
-    sonar_package    = client.read_and_process(do_ping=True, plot=True)
-    position = tracker.get_position(ROBOT_ID)
-    #
-    corrected_iid = sonar_package['corrected_iid']
-    corrected_distance = sonar_package['corrected_distance']
-    print('Debug: corrected_iid =', corrected_iid)
-    print('Debug: corrected_distance =', corrected_distance)
+    sonar_package = client.read_and_process(do_ping=True, plot=True)
+    position      = tracker.get_position(ROBOT_ID)
 
     if sonar_package is None:
         print(f"Warning: No sonar data at step {step}, skipping.")
