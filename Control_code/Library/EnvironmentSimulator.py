@@ -183,15 +183,10 @@ class ArenaLayout:
         rel_x_rot = rel_x_px * cos_yaw + rel_y_px * sin_yaw
         rel_y_rot = -rel_x_px * sin_yaw + rel_y_px * cos_yaw
         
-        # Convert back to mm.
-        # Negate rel_y to convert from image coordinates (y increases downward,
-        # so positive rel_y = robot's physical RIGHT) to the CCW-positive convention
-        # used by DataProcessor and the emulator (positive azimuth = LEFT).
-        # Without this negation the profile is left-right flipped relative to the
-        # training data, which inverts the IID sign produced by the emulator.
-        rel_x_mm =  rel_x_rot * self.mm_per_px
-        rel_y_mm = -rel_y_rot * self.mm_per_px   # sign flip: image y-down → CCW-positive
-
+        # Convert back to mm
+        rel_x_mm = rel_x_rot * self.mm_per_px
+        rel_y_mm = rel_y_rot * self.mm_per_px
+        
         return rel_x_mm, rel_y_mm
     
     def compute_profile(self, rob_x: float, rob_y: float, rob_yaw_deg: float, 
