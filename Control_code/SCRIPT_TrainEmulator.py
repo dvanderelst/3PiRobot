@@ -22,9 +22,9 @@ profile_steps = None
 echo_artifact_dir = "EchoProcessor"
 output_dir = "Emulator"
 
-train_quadrants = [0, 1, 2]
-test_quadrant = 3
-validation_split = 0.2
+train_quadrants = [0, 2]
+val_quadrants   = [1, 3]
+# Test set = all original (non-flipped) samples across all quadrants.
 seed = 42
 
 batch_size = 64
@@ -50,11 +50,17 @@ enable_output_calibration = True
 
 # IID sample weighting (applied to IID loss term)
 use_iid_sample_weighting = True
-iid_positive_weight = 1.25
+iid_positive_weight = 1.0        # set to 1.0: flip augmentation balances pos/neg IID
 iid_near_zero_abs_db = 1.5
 iid_near_zero_weight = 1.25
 iid_tail_abs_db = 5.0
 iid_tail_weight = 1.25
+
+# Profile flip augmentation: for each training sample add a horizontally mirrored
+# copy (profile bins reversed) with IID sign negated and distance unchanged.
+# This forces the emulator to learn a perfectly symmetric profile->IID mapping
+# regardless of any wall-side bias in the original data collection.
+use_profile_flip_augmentation = True
 
 
 # ============================================
@@ -154,8 +160,15 @@ def build_profile_features(profiles):
     min_val = np.min(p, axis=1)
     argmin = np.argmin(p, axis=1).astype(np.float32)
     argmin_norm = argmin / max(steps - 1, 1)
-    right_min = np.min(p[:, :half], axis=1)
-    left_min = np.min(p[:, half:], axis=1)
+    # Exclude center bin for odd step counts so the split is symmetric under
+    # left-right reversal: asym(flipped) == -asym(original).
+    if steps % 2 == 1:
+        center = steps // 2
+        right_min = np.min(p[:, :center], axis=1)
+        left_min = np.min(p[:, center + 1:], axis=1)
+    else:
+        right_min = np.min(p[:, :half], axis=1)
+        left_min = np.min(p[:, half:], axis=1)
     asym = left_min - right_min
 
     # local slope around minimum bin (simple finite difference)
@@ -375,26 +388,34 @@ def plot_training(history):
     plt.close()
 
 
+def _scatter_panel(ax, yt, yp, title):
+    lo = float(min(np.min(yt), np.min(yp)))
+    hi = float(max(np.max(yt), np.max(yp)))
+    ax.scatter(yt, yp, s=10, alpha=0.3)
+    ax.plot([lo, hi], [lo, hi], "r--", linewidth=1)
+    p = pearson_corr(yt, yp)
+    s = spearman_corr(yt, yp)
+    bias = float(np.mean(yp - yt))
+    ax.set_xlabel(f"True {title}")
+    ax.set_ylabel(f"Pred {title}")
+    if "IID" in title:
+        sign_acc = float(np.mean(np.sign(yp) == np.sign(yt)))
+        pos_acc  = float(np.mean(yp[yt >= 0] >= 0)) if np.any(yt >= 0) else float("nan")
+        neg_acc  = float(np.mean(yp[yt <  0] <  0)) if np.any(yt <  0) else float("nan")
+        ax.set_title(
+            f"{title}\nPearson={p:.3f}, Spearman={s:.3f}, "
+            f"Bias={bias:+.3f} dB\n"
+            f"SignAcc={sign_acc:.3f}  PosAcc={pos_acc:.3f}  NegAcc={neg_acc:.3f}"
+        )
+    else:
+        ax.set_title(f"{title}\nPearson={p:.3f}, Spearman={s:.3f}, Bias={bias:+.1f} mm")
+    ax.grid(True, alpha=0.3)
+
+
 def plot_scatter(y_true, y_pred):
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    labels = [("Distance (mm)", 0), ("IID (dB)", 1)]
-    for ax, (title, k) in zip(axes, labels):
-        yt = y_true[:, k]
-        yp = y_pred[:, k]
-        lo = float(min(np.min(yt), np.min(yp)))
-        hi = float(max(np.max(yt), np.max(yp)))
-        ax.scatter(yt, yp, s=10, alpha=0.3)
-        ax.plot([lo, hi], [lo, hi], "r--", linewidth=1)
-        p = pearson_corr(yt, yp)
-        s = spearman_corr(yt, yp)
-        ax.set_xlabel(f"True {title}")
-        ax.set_ylabel(f"Pred {title}")
-        if k == 1:
-            sign_acc = float(np.mean(np.sign(yp) == np.sign(yt)))
-            ax.set_title(f"{title}\nPearson={p:.3f}, Spearman={s:.3f}, SignAcc={sign_acc:.3f}")
-        else:
-            ax.set_title(f"{title}\nPearson={p:.3f}, Spearman={s:.3f}")
-        ax.grid(True, alpha=0.3)
+    for ax, (title, k) in zip(axes, [("Distance (mm)", 0), ("IID (dB)", 1)]):
+        _scatter_panel(ax, y_true[:, k], y_pred[:, k], title)
     plt.tight_layout()
     save_plot("test_scatter")
     plt.close(fig)
@@ -460,18 +481,35 @@ def main():
     quadrants = quadrants[valid_target]
     print(f"Kept {len(profiles)} samples after teacher target filtering.")
 
-    x_features = build_profile_features(profiles)
+    # Flip augmentation applied to all data before splitting.
+    # Each split (train/val/test) gets both original and flipped samples.
+    if use_profile_flip_augmentation:
+        profiles_flipped = profiles[:, ::-1].copy()
+        targets_flipped  = targets.copy()
+        targets_flipped[:, 1] *= -1.0          # negate IID; distance unchanged
+        profiles_aug  = np.concatenate([profiles,  profiles_flipped],  axis=0)
+        targets_aug   = np.concatenate([targets,   targets_flipped],   axis=0)
+        quadrants_aug = np.concatenate([quadrants, quadrants],         axis=0)
+        print(f"Profile flip augmentation: {len(profiles)} -> {len(profiles_aug)} samples.")
+    else:
+        profiles_aug  = profiles
+        targets_aug   = targets
+        quadrants_aug = quadrants
 
-    train_mask = np.isin(quadrants, train_quadrants)
-    test_mask = quadrants == test_quadrant
+    # Quadrant-based split on augmented data.
+    train_mask = np.isin(quadrants_aug, train_quadrants)
+    val_mask   = np.isin(quadrants_aug, val_quadrants)
 
-    ds_train_full = ProfileTargetDataset(x_features[train_mask], targets[train_mask])
-    ds_test = ProfileTargetDataset(x_features[test_mask], targets[test_mask])
-    n_train = int((1.0 - validation_split) * len(ds_train_full))
-    n_val = len(ds_train_full) - n_train
-    ds_train, ds_val = random_split(
-        ds_train_full, [n_train, n_val], generator=torch.Generator().manual_seed(seed)
-    )
+    x_train = build_profile_features(profiles_aug[train_mask])
+    y_train = targets_aug[train_mask]
+    x_val   = build_profile_features(profiles_aug[val_mask])
+    y_val   = targets_aug[val_mask]
+    x_test  = build_profile_features(profiles_aug)   # all quadrants, orig + flipped
+    y_test  = targets_aug
+
+    ds_train = ProfileTargetDataset(x_train, y_train)
+    ds_val   = ProfileTargetDataset(x_val,   y_val)
+    ds_test  = ProfileTargetDataset(x_test,  y_test)
 
     norm = compute_norm_stats(ds_train)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -480,7 +518,7 @@ def main():
     val_loader = DataLoader(ds_val, batch_size=batch_size, shuffle=False, pin_memory=pin)
     test_loader = DataLoader(ds_test, batch_size=batch_size, shuffle=False, pin_memory=pin)
 
-    model = ProfileMLP(in_dim=x_features.shape[1])
+    model = ProfileMLP(in_dim=x_train.shape[1])
     history = train_model(model, train_loader, val_loader, norm)
     ckpt = torch.load(f"{output_dir}/best_model_pytorch.pth", map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -569,8 +607,7 @@ def main():
         "profile_steps": effective_profile_steps,
         "echo_artifact_dir": echo_artifact_dir,
         "train_quadrants": train_quadrants,
-        "test_quadrant": test_quadrant,
-        "validation_split": validation_split,
+        "val_quadrants": val_quadrants,
         "batch_size": batch_size,
         "epochs": epochs,
         "patience": patience,
@@ -587,6 +624,7 @@ def main():
         "distance_huber_delta": distance_huber_delta,
         "iid_huber_delta": iid_huber_delta,
         "enable_output_calibration": enable_output_calibration,
+        "use_profile_flip_augmentation": use_profile_flip_augmentation,
         "use_iid_sample_weighting": use_iid_sample_weighting,
         "iid_positive_weight": iid_positive_weight,
         "iid_near_zero_abs_db": iid_near_zero_abs_db,
@@ -597,7 +635,7 @@ def main():
         "num_train": len(ds_train),
         "num_val": len(ds_val),
         "num_test": len(ds_test),
-        "input_feature_dim": int(x_features.shape[1]),
+        "input_feature_dim": int(x_train.shape[1]),
         "metrics": metrics,
         "calibration": calibration,
         "norm_stats": {

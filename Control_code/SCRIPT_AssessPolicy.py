@@ -4,13 +4,13 @@ Policy assessment script: visualise the weights of a saved HistoryNNPolicy.
 """
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-GENERATION     = "last"             # integer generation number, "last", or None for best_policy.json
-POLICY_DIR     = "Policy"           # where training saved the policy JSON files
+GENERATION     = "last"        # integer generation number, "last", or None for best_policy.json
+POLICY_DIR     = "Policy/memory05"           # where training saved the policy JSON files
 ASSESSMENT_DIR = "PolicyAssessment" # where plots are written (created if needed)
 
 # Trajectory assessment
 TRAIN_SESSIONS = ["sessionB02", "sessionB03", "sessionB04", "sessionB05"]
-N_TRIALS       = 6    # episodes per session
+N_TRIALS       = 4   # episodes per session
 MAX_STEPS      = 150  # steps per episode
 SEED           = 42
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21,6 +21,8 @@ import os
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
 import numpy as np
 
 
@@ -442,7 +444,10 @@ def find_json(output_dir: str, generation) -> str:
 
 # ── Trajectory assessment ─────────────────────────────────────────────────────
 
-TRIAL_COLORS = ["#1565c0", "#c62828", "#2e7d32", "#6a1b9a", "#e65100", "#00838f"]
+# Separate palettes for left-wall (green tones) and right-wall (red/orange tones).
+# Up to 5 shades each — enough for N_TRIALS=10 with 50/50 split.
+LEFT_COLORS  = ["#1b5e20", "#388e3c", "#66bb6a", "#00897b", "#26a69a"]   # dark→light green
+RIGHT_COLORS = ["#b71c1c", "#e53935", "#ef9a9a", "#e65100", "#ff8f00"]   # dark→light red
 
 
 def make_policy(data: dict):
@@ -460,7 +465,13 @@ def make_policy(data: dict):
 
 def run_episodes(data: dict, sessions: list, n_trials: int,
                  max_steps: int, seed: int) -> dict:
-    """Run n_trials episodes for each session."""
+    """Run n_trials episodes for each session.
+
+    Episodes are split 50/50 between wall-left and wall-right sided starts
+    (loaded from ValidStarts/) so both IID signs are exercised.  Falls back
+    to general valid_starts / empirical starts if sided files are missing.
+    Left-wall episodes come first in the returned list (indices 0..n_left-1).
+    """
     import random as _random
     from SCRIPT_TrainPolicy import Evaluator, Config, build_simulator
 
@@ -482,9 +493,22 @@ def run_episodes(data: dict, sessions: list, n_trials: int,
         cfg.use_empirical_starts    = True
         cfg.randomize_empirical_yaw = True
 
-        ev  = Evaluator(sim, cfg)
-        eps = [ev.episode(policy, ev.sample_start(rng)) for _ in range(n_trials)]
-        results[session] = {"sim": sim, "episodes": eps}
+        ev = Evaluator(sim, cfg)
+        sl = ev.sided_starts.get("left",  [])
+        sr = ev.sided_starts.get("right", [])
+
+        if sl and sr:
+            n_left  = n_trials - n_trials // 2
+            n_right = n_trials // 2
+            starts  = [sl[rng.randrange(len(sl))] for _ in range(n_left)]
+            starts += [sr[rng.randrange(len(sr))] for _ in range(n_right)]
+        else:
+            # Fallback: general starts, no side guarantee
+            n_left  = 0
+            starts  = [ev.sample_start(rng) for _ in range(n_trials)]
+
+        eps = [ev.episode(policy, s) for s in starts]
+        results[session] = {"sim": sim, "episodes": eps, "n_left": n_left}
         print("done")
 
     return results
@@ -500,8 +524,11 @@ def plot_trajectories(results: dict, gen, output_path: str) -> None:
                              figsize=(5.5 * n_cols, 5.5 * n_rows))
     axes = np.array(axes).reshape(n_rows, n_cols)
 
+    iid_norm = Normalize(vmin=-8, vmax=8)
+    iid_cmap = plt.cm.RdYlBu_r  # blue = IID<0 (left wall), yellow = ~0, red = IID>0 (right wall)
+
     fig.suptitle(f"Trajectories  |  gen {gen}  |  {N_TRIALS} trials per session  "
-                 f"(arrows = look direction)",
+                 f"(colour=IID: blue<0<red, yellow≈0  arrows=look dir  ●=start  ×=end)",
                  fontsize=10, fontweight="bold")
 
     for idx, session in enumerate(sessions):
@@ -517,17 +544,39 @@ def plot_trajectories(results: dict, gen, output_path: str) -> None:
             all_x.extend(walls[:, 0].tolist())
             all_y.extend(walls[:, 1].tolist())
 
+        n_left = results[session].get("n_left", 0)
+        left_i = right_i = 0
         for i, ep in enumerate(episodes):
-            color = TRIAL_COLORS[i % len(TRIAL_COLORS)]
-            traj  = ep.get("trajectory", [])
+            is_left = (n_left > 0 and i < n_left)
+            if is_left:
+                side_label = f"L{left_i+1}"
+                left_i += 1
+            else:
+                side_label = f"R{right_i+1}"
+                right_i += 1
+            traj = ep.get("trajectory", [])
             if not traj:
                 continue
-            xs = [s["x"] for s in traj]
-            ys = [s["y"] for s in traj]
+            xs   = [s["x"]      for s in traj]
+            ys   = [s["y"]      for s in traj]
+            iids = [s["iid_db"] for s in traj]
             all_x.extend(xs); all_y.extend(ys)
-            ax.plot(xs, ys, "-", color=color, linewidth=1.5, alpha=0.75, label=f"T{i+1}")
-            ax.scatter(xs[0],  ys[0],  s=45, color=color, marker="o", zorder=5)
-            ax.scatter(xs[-1], ys[-1], s=45, color=color, marker="x", zorder=5, linewidths=1.5)
+
+            # Path coloured by IID value
+            pts  = np.array([xs, ys]).T.reshape(-1, 1, 2)
+            segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+            lc   = LineCollection(segs, cmap=iid_cmap, norm=iid_norm,
+                                  linewidth=1.5, alpha=0.85, zorder=2)
+            lc.set_array(np.array(iids[:-1]))
+            ax.add_collection(lc)
+
+            # Start / end markers and label
+            ax.scatter(xs[0],  ys[0],  s=45, color="black", marker="o", zorder=5)
+            ax.scatter(xs[-1], ys[-1], s=45, color="black", marker="x", zorder=5, linewidths=1.5)
+            ax.text(xs[0], ys[0], side_label, fontsize=5, color="black",
+                    ha="center", va="bottom", zorder=6)
+
+            # Look-direction arrows (neutral gray)
             STRIDE = 5; ARROW_LEN = 160.0
             idxs = range(0, len(traj), STRIDE)
             ax.quiver(
@@ -535,7 +584,7 @@ def plot_trajectories(results: dict, gen, output_path: str) -> None:
                 [ARROW_LEN * np.cos(np.deg2rad(traj[k]["look_yaw_deg"])) for k in idxs],
                 [ARROW_LEN * np.sin(np.deg2rad(traj[k]["look_yaw_deg"])) for k in idxs],
                 units="xy", angles="xy", scale_units="xy", scale=1,
-                color=color, alpha=0.5, width=6.0, headwidth=4, headlength=5,
+                color="#555555", alpha=0.45, width=6.0, headwidth=4, headlength=5,
             )
 
         if all_x and all_y:
@@ -550,7 +599,9 @@ def plot_trajectories(results: dict, gen, output_path: str) -> None:
         ax.set_ylabel("Y (mm)", fontsize=7)
         ax.tick_params(labelsize=6)
         ax.grid(True, alpha=0.2)
-        ax.legend(loc="best", fontsize=6, markerscale=0.8)
+        sm = plt.cm.ScalarMappable(cmap=iid_cmap, norm=iid_norm)
+        sm.set_array([])
+        plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02, label="IID (dB)")
 
     # Hide any unused panels
     for idx in range(n_sessions, n_rows * n_cols):

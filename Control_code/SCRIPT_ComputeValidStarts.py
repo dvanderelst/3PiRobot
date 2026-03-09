@@ -41,10 +41,19 @@ WALL_MARGIN_MM        = 150    # min distance robot centre → any wall point (m
                                 #   150 mm > robot radius (85 mm) + comfortable margin
 MIN_FORWARD_CLEARANCE_MM = 3 * WALL_MARGIN_MM
                                 # heading blocked if wall within this distance ahead (mm)
-                                #   set to 2× wall margin so orientation cutoff scales
+                                #   set to 3× wall margin so orientation cutoff scales
                                 #   automatically with the position clearance
 CONE_HALF_WIDTH_DEG   = 15     # half-width of the forward-clearance cone (deg)
 HEADING_STEP_DEG      = 10     # angular resolution for heading sweep (deg)
+
+# Sided starts — positions near (but not too near) a wall with the wall
+# clearly to the left or right.
+NEAR_WALL_MAX_MM      = 600    # maximum distance to nearest wall for sided starts (mm)
+WALL_SIDE_MIN_ANGLE_DEG = 25   # minimum lateral angle to wall centroid for a clear
+                                #   left/right classification (degrees); headings where
+                                #   the wall is nearly dead ahead or behind are excluded
+WALL_SIDE_K_NEAREST   = 10     # number of nearest wall points used to estimate the
+                                #   wall centroid direction (more robust than single point)
 
 # How many example heading-fan arrows to draw per session in the plot
 N_FAN_EXAMPLES = 12
@@ -212,6 +221,188 @@ def compute_valid_starts(
     return starts
 
 
+# ── Sided starts ───────────────────────────────────────────────────────────────
+
+def _wall_lateral_angle(x: float, y: float, heading_deg: float,
+                        walls: np.ndarray,
+                        k_nearest: int = WALL_SIDE_K_NEAREST) -> float:
+    """
+    Estimate the lateral angle (degrees) from the robot to the nearest wall.
+
+    Uses the centroid of the K nearest wall points for robustness against
+    sparse / unevenly sampled wall point clouds.
+
+    Returns
+    -------
+    float in [-180, 180]
+        Positive  → wall centroid is to the LEFT  of the heading  (IID < 0)
+        Negative  → wall centroid is to the RIGHT of the heading  (IID > 0)
+    """
+    if len(walls) == 0:
+        return 0.0
+
+    dx = walls[:, 0] - x
+    dy = walls[:, 1] - y
+    dists = np.hypot(dx, dy)
+
+    k = min(k_nearest, len(walls))
+    idx = np.argpartition(dists, k)[:k]
+    cx = dx[idx].mean()
+    cy = dy[idx].mean()
+
+    abs_angle = np.degrees(np.arctan2(cy, cx))
+    rel_angle = abs_angle - heading_deg
+    return float((rel_angle + 180.0) % 360.0 - 180.0)   # wrap to [-180, 180]
+
+
+def compute_sided_starts(
+    arena: ArenaLayout,
+    wall_margin_mm: float       = WALL_MARGIN_MM,
+    near_wall_max_mm: float     = NEAR_WALL_MAX_MM,
+    min_forward_clearance_mm: float = None,
+    grid_step_mm: float         = GRID_STEP_MM,
+    heading_step_deg: int       = HEADING_STEP_DEG,
+    cone_half_width_deg: float  = CONE_HALF_WIDTH_DEG,
+    wall_side_min_angle: float  = WALL_SIDE_MIN_ANGLE_DEG,
+    k_nearest: int              = WALL_SIDE_K_NEAREST,
+) -> tuple:
+    """
+    Compute starting configurations where the nearest wall is clearly to the
+    LEFT or RIGHT of the robot's heading.
+
+    Positions must be:
+      - Inside the arena
+      - At least wall_margin_mm from any wall (robot fits)
+      - At most near_wall_max_mm from the nearest wall (robot is close to it)
+
+    Headings must additionally:
+      - Pass the forward-clearance check (no wall dead ahead)
+      - Have the wall centroid at a lateral angle > wall_side_min_angle degrees
+        to the left OR right (no ambiguous nearly-ahead / nearly-behind cases)
+
+    Returns
+    -------
+    starts_left  : list of {"x", "y", "yaw_deg"}  — wall on LEFT  (IID < 0)
+    starts_right : list of {"x", "y", "yaw_deg"}  — wall on RIGHT (IID > 0)
+    """
+    if min_forward_clearance_mm is None:
+        min_forward_clearance_mm = float(MIN_FORWARD_CLEARANCE_MM)
+
+    walls = arena.walls
+
+    # ── 1. Grid & position filter ─────────────────────────────────────────────
+    xs = np.arange(arena.arena_min_x, arena.arena_max_x + grid_step_mm, grid_step_mm)
+    ys = np.arange(arena.arena_min_y, arena.arena_max_y + grid_step_mm, grid_step_mm)
+    gx, gy = np.meshgrid(xs, ys)
+    gx, gy = gx.ravel(), gy.ravel()
+
+    if len(walls) > 0:
+        inside = _inside_arena_mask(walls, gx, gy, n_sectors=8)
+        min_d  = _min_wall_distances(walls, gx, gy)
+        # Near-wall band: far enough to fit, close enough to sense the wall
+        pos_mask = inside & (min_d >= wall_margin_mm) & (min_d <= near_wall_max_mm)
+    else:
+        pos_mask = np.ones(len(gx), dtype=bool)
+
+    valid_x = gx[pos_mask]
+    valid_y = gy[pos_mask]
+
+    # ── 2. For each near-wall position, classify headings ────────────────────
+    starts_left:  list = []
+    starts_right: list = []
+
+    for x, y in zip(valid_x, valid_y):
+        headings = _valid_headings(
+            x, y, walls,
+            heading_step=heading_step_deg,
+            min_clearance=min_forward_clearance_mm,
+            cone_half=cone_half_width_deg,
+        )
+        for h in headings:
+            lat = _wall_lateral_angle(x, y, h, walls, k_nearest=k_nearest)
+            if lat > wall_side_min_angle:
+                starts_left.append({"x": float(x), "y": float(y), "yaw_deg": float(h)})
+            elif lat < -wall_side_min_angle:
+                starts_right.append({"x": float(x), "y": float(y), "yaw_deg": float(h)})
+
+    return starts_left, starts_right
+
+
+def _plot_sided_session(ax, arena: ArenaLayout,
+                        starts_left: list, starts_right: list,
+                        session: str, arrow_len_mm: float = 200.0,
+                        n_examples: int = 8):
+    """Draw diagnostic panel for sided starts (left=green, right=red)."""
+    walls = arena.walls
+    if len(walls) > 0:
+        ax.scatter(walls[:, 0], walls[:, 1], s=0.8, c="#aaaaaa", alpha=0.4,
+                   linewidths=0, zorder=1)
+
+    def _draw(starts, colour, label):
+        if not starts:
+            return
+        pts = np.unique([[s["x"], s["y"]] for s in starts], axis=0)
+        ax.scatter(pts[:, 0], pts[:, 1], s=8, c=colour, alpha=0.5,
+                   linewidths=0, zorder=2, label=f"{label} ({len(pts)} pos)")
+        # Example arrows
+        pos_to_heads: dict = {}
+        for s in starts:
+            pos_to_heads.setdefault((s["x"], s["y"]), []).append(s["yaw_deg"])
+        idx = np.round(np.linspace(0, len(pts) - 1, min(n_examples, len(pts)))).astype(int)
+        for i in idx:
+            px, py = pts[i]
+            for h in pos_to_heads.get((px, py), []):
+                rad = np.radians(h)
+                ax.annotate("",
+                    xy=(px + arrow_len_mm * np.cos(rad),
+                        py + arrow_len_mm * np.sin(rad)),
+                    xytext=(px, py),
+                    arrowprops=dict(arrowstyle="-|>", color=colour,
+                                    lw=0.8, mutation_scale=5),
+                    zorder=3)
+            ax.plot(px, py, "o", ms=3, color=colour, zorder=4)
+
+    _draw(starts_left,  "#2e7d32", "wall-left")   # dark green
+    _draw(starts_right, "#c62828", "wall-right")  # dark red
+
+    ax.set_title(
+        f"{session}  |  wall-left: {len(starts_left)}  wall-right: {len(starts_right)}",
+        fontsize=9,
+    )
+    ax.set_xlabel("X (mm)", fontsize=8)
+    ax.set_ylabel("Y (mm)", fontsize=8)
+    ax.set_aspect("equal")
+    ax.tick_params(labelsize=7)
+    ax.legend(fontsize=7, loc="upper right")
+
+
+def plot_sided_starts(session_data: dict, out_path: str):
+    """session_data: {session: {"arena", "starts_left", "starts_right"}}"""
+    n = len(session_data)
+    n_cols = min(n, 2)
+    n_rows = (n + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(6.5 * n_cols, 6.5 * n_rows))
+    axes = np.array(axes).reshape(n_rows, n_cols)
+    fig.suptitle(
+        f"Sided starts  |  wall margin={WALL_MARGIN_MM}–{NEAR_WALL_MAX_MM} mm  |  "
+        f"side angle >{WALL_SIDE_MIN_ANGLE_DEG}°  |  "
+        f"green=wall-left  red=wall-right",
+        fontsize=10,
+    )
+    for idx, (session, data) in enumerate(session_data.items()):
+        row, col = divmod(idx, n_cols)
+        _plot_sided_session(axes[row, col], data["arena"],
+                            data["starts_left"], data["starts_right"], session)
+    for idx in range(n, n_rows * n_cols):
+        row, col = divmod(idx, n_cols)
+        axes[row, col].set_visible(False)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def _plot_session(ax, fig, arena: ArenaLayout, starts: list, session: str,
@@ -361,11 +552,52 @@ def main():
             }, f, indent=2)
         print(f"  Saved: {json_path}")
 
-        session_data[session] = {"arena": arena, "starts": starts}
+        # ── Sided starts ──────────────────────────────────────────────────
+        starts_left, starts_right = compute_sided_starts(
+            arena,
+            wall_margin_mm           = WALL_MARGIN_MM,
+            near_wall_max_mm         = NEAR_WALL_MAX_MM,
+            min_forward_clearance_mm = MIN_FORWARD_CLEARANCE_MM,
+            grid_step_mm             = GRID_STEP_MM,
+            heading_step_deg         = HEADING_STEP_DEG,
+            cone_half_width_deg      = CONE_HALF_WIDTH_DEG,
+        )
+        n_left  = len({(s["x"], s["y"]) for s in starts_left})
+        n_right = len({(s["x"], s["y"]) for s in starts_right})
+        print(f"  sided: {n_left} wall-left positions ({len(starts_left)} pairs), "
+              f"{n_right} wall-right positions ({len(starts_right)} pairs)")
 
-    # Combined plot
+        for side, side_starts, suffix in [
+            ("wall_left",  starts_left,  "starts_wall_left"),
+            ("wall_right", starts_right, "starts_wall_right"),
+        ]:
+            jp = os.path.join(OUTPUT_DIR, f"{session}_{suffix}.json")
+            with open(jp, "w") as f:
+                json.dump({
+                    "session":               session,
+                    "side":                  side,
+                    "wall_margin_mm":        WALL_MARGIN_MM,
+                    "near_wall_max_mm":      NEAR_WALL_MAX_MM,
+                    "wall_side_min_angle_deg": WALL_SIDE_MIN_ANGLE_DEG,
+                    "n_positions":           n_left if side == "wall_left" else n_right,
+                    "n_starts":              len(side_starts),
+                    "starts":                side_starts,
+                }, f, indent=2)
+            print(f"  Saved: {jp}")
+
+        session_data[session] = {
+            "arena":        arena,
+            "starts":       starts,
+            "starts_left":  starts_left,
+            "starts_right": starts_right,
+        }
+
+    # Combined plots
     plot_path = os.path.join(OUTPUT_DIR, "plot_valid_starts.png")
     plot_valid_starts(session_data, plot_path)
+
+    sided_plot_path = os.path.join(OUTPUT_DIR, "plot_sided_starts.png")
+    plot_sided_starts(session_data, sided_plot_path)
 
 
 if __name__ == "__main__":

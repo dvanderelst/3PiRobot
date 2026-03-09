@@ -279,8 +279,15 @@ class Emulator:
         min_val = np.min(p, axis=1)
         argmin = np.argmin(p, axis=1).astype(np.float32)
         argmin_norm = argmin / max(steps - 1, 1)
-        right_min = np.min(p[:, :half], axis=1)
-        left_min = np.min(p[:, half:], axis=1)
+        # Exclude center bin for odd step counts so the split is symmetric under
+        # left-right reversal: asym(flipped) == -asym(original).
+        if steps % 2 == 1:
+            center = steps // 2
+            right_min = np.min(p[:, :center], axis=1)
+            left_min = np.min(p[:, center + 1:], axis=1)
+        else:
+            right_min = np.min(p[:, :half], axis=1)
+            left_min = np.min(p[:, half:], axis=1)
         asym = left_min - right_min
 
         # local slope around minimum bin (simple finite difference)
@@ -298,42 +305,43 @@ class Emulator:
         extras = np.stack([min_val, argmin_norm, asym, local_slope, com_norm], axis=1).astype(np.float32)
         return np.concatenate([p, extras], axis=1).astype(np.float32)
 
+    def _forward(self, profiles: np.ndarray) -> np.ndarray:
+        """Run one forward pass: sanitize → features → normalize → model → denormalize → calibrate."""
+        x = self.build_profile_features(profiles)
+        with torch.no_grad():
+            y = self.model(self._normalize_input(x))["reg"]
+        return self._apply_calibration(self._denormalize_output(y))
+
     def predict(self, profiles: np.ndarray) -> Dict[str, np.ndarray]:
         """
         Predict distance and IID from profile data.
-        
+
+        Symmetrized inference: the profile is passed through the model twice —
+        once as-is and once horizontally flipped.  The two predictions are
+        combined so that the result is guaranteed to be antisymmetric in IID
+        (flipping the profile negates the predicted IID) regardless of any
+        residual asymmetry the network may have learned.
+
         Args:
             profiles: Array of shape (n_samples, profile_steps) containing distance profiles
-            
+
         Returns:
             Dictionary with keys:
             - 'distance_mm': Predicted distances in millimeters (n_samples,)
             - 'iid_db': Predicted IID in decibels (n_samples,)
         """
-        # Build features (matches training preprocessing)
-        x_features = self.build_profile_features(profiles)
-        
-        # Normalize and convert to tensor
-        x_tensor = self._normalize_input(x_features)
-        
-        # Predict
-        with torch.no_grad():
-            pred_out = self.model(x_tensor)
-            y_pred = pred_out["reg"]
-        
-        # Denormalize
-        y_pred = self._denormalize_output(y_pred)
-        
-        # Apply calibration
-        y_pred = self._apply_calibration(y_pred)
-        
-        # Split into distance and IID
-        distance_mm = y_pred[:, 0]
-        iid_db = y_pred[:, 1]
-        
+        p = self._sanitize_profiles(np.asarray(profiles, dtype=np.float32))
+
+        y_orig = self._forward(p)
+        y_flip = self._forward(p[:, ::-1].copy())
+
+        # distance is symmetric; iid is antisymmetric under left-right flip
+        distance_mm = (y_orig[:, 0] + y_flip[:, 0]) / 2.0
+        iid_db      = (y_orig[:, 1] - y_flip[:, 1]) / 2.0
+
         return {
             'distance_mm': distance_mm,
-            'iid_db': iid_db
+            'iid_db':      iid_db,
         }
 
     def predict_single(self, profile: np.ndarray) -> Dict[str, float]:
