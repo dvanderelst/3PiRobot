@@ -31,11 +31,11 @@ ROBOT_ID        = 1
 SESSION         = "sessionB05_policy"     # data session folder name
 MAX_STEPS       = 200
 FIXED_DRIVE_MM  = 100.0
-wait_for_confirmation = True
+wait_for_confirmation = False
 
 # Dry-run flags (mirror SCRIPT_DataAcquisition.py convention)
-do_rotation     = False
-do_translation  = False
+do_rotation     = True
+do_translation  = True
 
 POLICY_DIR          = "Policy"               # root folder containing CONDITION sub-folder
 ECHO_PROCESSOR_DIR  = "EchoProcessor"        # folder containing echoprocessor_artifacts.pth
@@ -107,7 +107,7 @@ for step in range(MAX_STEPS):
 
     print(
         f"Step {step:3d}: IID={iid_db:+6.2f} dB  dist={dist_mm:6.0f} mm  "
-        f"rot1={rotate1:+6.1f}°  rot2={rotate2:+6.1f}°  "
+        f"rot1={rotate1:+6.1f}°  rot2={rotate2:+6.1f}°  net={rotate1+rotate2:+6.1f}°  "
         f"drive={FIXED_DRIVE_MM:.0f} mm  pos={pos_str}"
     )
 

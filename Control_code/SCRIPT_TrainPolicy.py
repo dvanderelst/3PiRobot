@@ -61,17 +61,17 @@ def pushover_notify(message: str, title: str = "3PiRobot training") -> None:
 # Set CONDITION to a short label for this run; results go to Policy/<CONDITION>/.
 # If that folder already exists and is non-empty, the script will ask via a
 # dialog whether to overwrite it or abort.
-CONDITION   = "memory10"   # subfolder under Policy/
+CONDITION   = "memory05"   # subfolder under Policy
 DESCRIPTION = ""          # free-text note saved with results
 
 # ── Pushover notifications ───────────────────────────────────────────────────────
-PUSHOVER_EVERY_N  = 5    # send a notification every N generations (0 = disable mid-run)
+PUSHOVER_EVERY_N  = 10    # send a notification every N generations (0 = disable mid-run)
 # ─────────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
 class Config:
-    history_len: int = 10
+    history_len: int = 5
     seed: int = 42
     session_name: str = "sessionB01"
     train_session_names: Optional[List[str]] = field(
