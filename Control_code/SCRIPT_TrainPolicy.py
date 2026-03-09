@@ -40,17 +40,38 @@ from tqdm import tqdm
 from Library.EnvironmentSimulator import EnvironmentSimulator
 
 
+# ── Pushover helper ─────────────────────────────────────────────────────────────
+
+try:
+    from Library.PushOver import send as _pushover_send
+    _PUSHOVER_AVAILABLE = True
+except Exception:
+    _PUSHOVER_AVAILABLE = False
+
+def pushover_notify(message: str, title: str = "3PiRobot training") -> None:
+    """Send a Pushover notification via Library.PushOver.  Silently skips on failure."""
+    if not _PUSHOVER_AVAILABLE:
+        return
+    try:
+        _pushover_send(f"[{title}] {message}")
+    except Exception as e:
+        print(f"[Pushover] notification failed: {e}")
+
 # ── Experiment condition ────────────────────────────────────────────────────────
 # Set CONDITION to a short label for this run; results go to Policy/<CONDITION>/.
 # If that folder already exists and is non-empty, the script will ask via a
 # dialog whether to overwrite it or abort.
-CONDITION   = "memory05"   # subfolder under Policy/
+CONDITION   = "memory10"   # subfolder under Policy/
 DESCRIPTION = ""          # free-text note saved with results
+
+# ── Pushover notifications ───────────────────────────────────────────────────────
+PUSHOVER_EVERY_N  = 5    # send a notification every N generations (0 = disable mid-run)
+# ─────────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
 class Config:
-    history_len: int = 5
+    history_len: int = 10
     seed: int = 42
     session_name: str = "sessionB01"
     train_session_names: Optional[List[str]] = field(
@@ -98,6 +119,10 @@ class Config:
     sinuosity_window: int = 15
     warning_distance_mm: float = 300.0
     collision_distance_mm: float = 150.0
+    w_consistency: float = 0.1          # weight for cross-episode path consistency term
+    consistency_grid_mm: float = 200.0  # spatial bin size (mm)
+    consistency_yaw_bins: int = 8       # angular bins (45° each) for body and look yaw
+    consistency_min_episodes: int = 4   # min distinct episodes to count a cell as consistent
 
     # IO
     output_dir: str = f"Policy/{CONDITION}"
@@ -621,6 +646,39 @@ _WORKER_CFG: Optional[Config] = None
 _WORKER_EVS: Optional[List[Evaluator]] = None
 
 
+def compute_consistency_score(episodes_raw: list, grid_mm: float,
+                              yaw_bins: int, min_episodes: int) -> float:
+    """Fraction of trajectory steps that fall in cells visited by >= min_episodes distinct episodes.
+
+    A cell is defined by (floor(x/grid_mm), floor(y/grid_mm), body_yaw_bin, look_yaw_bin).
+    Returns a value in [0, 1]; higher means the robot follows more consistent paths.
+    """
+    if not episodes_raw or min_episodes < 2 or len(episodes_raw) < min_episodes:
+        return 0.0
+
+    bin_width = 360.0 / yaw_bins
+    cell_ep_sets: Dict[tuple, set] = {}
+    step_cells: list = []
+
+    for ep_i, ep in enumerate(episodes_raw):
+        for step in ep.get("trajectory", []):
+            cx    = int(np.floor(step["x"]            / grid_mm))
+            cy    = int(np.floor(step["y"]            / grid_mm))
+            cyaw  = int(step["yaw_deg"]      % 360 / bin_width) % yaw_bins
+            clook = int(step["look_yaw_deg"] % 360 / bin_width) % yaw_bins
+            cell  = (cx, cy, cyaw, clook)
+            step_cells.append(cell)
+            if cell not in cell_ep_sets:
+                cell_ep_sets[cell] = set()
+            cell_ep_sets[cell].add(ep_i)
+
+    if not step_cells:
+        return 0.0
+
+    consistent = sum(1 for c in step_cells if len(cell_ep_sets[c]) >= min_episodes)
+    return consistent / len(step_cells)
+
+
 def _init_worker(cfg_dict: Dict[str, Any]) -> None:
     global _WORKER_CFG, _WORKER_EVS
     _WORKER_CFG = config_from_dict(cfg_dict)
@@ -650,8 +708,24 @@ def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float
         vals = [v for v in vals if np.isfinite(v)]
         return float(np.mean(vals)) if vals else float("nan")
 
+    episode_fitness = mean_key("fitness")
+    w = _WORKER_CFG.w_consistency
+    per_env_consistency = [
+        compute_consistency_score(
+            r.get("episodes_raw", []),
+            _WORKER_CFG.consistency_grid_mm,
+            _WORKER_CFG.consistency_yaw_bins,
+            _WORKER_CFG.consistency_min_episodes,
+        )
+        for r in per_env
+    ]
+    consistency_score = float(np.mean(per_env_consistency)) if per_env_consistency else 0.0
+    combined_fitness  = (1.0 - w) * episode_fitness + w * consistency_score
+
     return {
-        "fitness":                 mean_key("fitness"),
+        "fitness":                 combined_fitness,
+        "episode_fitness":         episode_fitness,
+        "consistency_score":       consistency_score,
         "fitness_std":             mean_key("fitness_std"),
         "left_fit":                mean_key("left_fit"),
         "right_fit":               mean_key("right_fit"),
@@ -691,6 +765,7 @@ class SimpleGATrainer:
             "best_alignment_mean": [], "best_sign_match_rate": [],
             "best_collision_rate": [], "best_proximity_mean": [],
             "best_avg_net_displacement_mm": [],
+            "best_consistency": [],
             "val_best_fitness": [], "val_collision_rate": [],
             "val_avg_net_displacement_mm": [],
         }
@@ -777,8 +852,24 @@ class SimpleGATrainer:
             vals = [v for v in vals if np.isfinite(v)]
             return float(np.mean(vals)) if vals else float("nan")
 
+        episode_fitness = mean_key("fitness")
+        w = self.cfg.w_consistency
+        per_env_consistency = [
+            compute_consistency_score(
+                r.get("episodes_raw", []),
+                self.cfg.consistency_grid_mm,
+                self.cfg.consistency_yaw_bins,
+                self.cfg.consistency_min_episodes,
+            )
+            for r in per_env
+        ]
+        consistency_score = float(np.mean(per_env_consistency)) if per_env_consistency else 0.0
+        combined_fitness  = (1.0 - w) * episode_fitness + w * consistency_score
+
         return {
-            "fitness":                 mean_key("fitness"),
+            "fitness":                 combined_fitness,
+            "episode_fitness":         episode_fitness,
+            "consistency_score":       consistency_score,
             "fitness_std":             mean_key("fitness_std"),
             "left_fit":                mean_key("left_fit"),
             "right_fit":               mean_key("right_fit"),
@@ -862,6 +953,7 @@ class SimpleGATrainer:
             self.history["best_collision_rate"].append(float(best_res["collision_rate"]))
             self.history["best_proximity_mean"].append(float(best_res.get("proximity_mean", 0.0)))
             self.history["best_avg_net_displacement_mm"].append(float(best_res["avg_net_displacement_mm"]))
+            self.history["best_consistency"].append(float(best_res.get("consistency_score", float("nan"))))
 
             eps = best_res.get("episodes_raw", [])
             if eps:
@@ -887,10 +979,12 @@ class SimpleGATrainer:
             best_right_fit = safe_float(best_res.get("right_fit", float("nan")), float("nan"))
             side_str = (f"L={best_left_fit:.3f} R={best_right_fit:.3f}"
                         if np.isfinite(best_left_fit) else "no-split")
+            best_consistency = self.history["best_consistency"][-1]
             print(
                 f"Gen {gen+1}: best={self.history['best_fitness'][-1]:.3f} [{side_str}], "
                 f"avg={self.history['avg_fitness'][-1]:.3f}, "
                 f"best_ep={best_ep_fit:.3f}, med_ep={median_ep_fit:.3f}, worst_ep={worst_ep_fit:.3f}, "
+                f"consist={best_consistency:.3f}, "
                 f"align={best_res['alignment_mean']:.3f}, "
                 f"sign_match={best_res['sign_match_rate']:.3f}, "
                 f"coll={best_res['collision_rate']:.3f}, "
@@ -904,6 +998,16 @@ class SimpleGATrainer:
             self._save_generation_best_plot(gen + 1, best_res, val_res)
             self._save_generation_best_genome(gen + 1, best_g, best_res, val_fit, val_coll)
             self._save_live_policy_probe(best_g)
+
+            # ── Pushover: mid-run notification every PUSHOVER_EVERY_N generations ──
+            is_last_gen = (gen == self.cfg.generations - 1)
+            if PUSHOVER_EVERY_N > 0 and ((gen + 1) % PUSHOVER_EVERY_N == 0) and not is_last_gen:
+                pushover_notify(
+                    f"Gen {gen+1}/{self.cfg.generations} | {CONDITION}\n"
+                    f"best={self.history['best_fitness'][-1]:.3f} [{side_str}]\n"
+                    f"consist={best_consistency:.3f}  coll={best_res['collision_rate']:.3f}\n"
+                    f"val_fit={val_fit:.3f}"
+                )
 
             if gen < self.cfg.generations - 1:
                 order   = np.argsort(f_np)[::-1]
@@ -923,6 +1027,18 @@ class SimpleGATrainer:
 
         if self.best_genome is None:
             raise RuntimeError("No best genome found")
+
+        # ── Pushover: final notification ──────────────────────────────────────────
+        pushover_notify(
+            f"Training done! | {CONDITION}\n"
+            f"{self.cfg.generations} gens, pop={self.cfg.population_size}\n"
+            f"best_ever={self.best_fitness:.3f}\n"
+            f"last gen: best={self.history['best_fitness'][-1]:.3f}  "
+            f"consist={self.history['best_consistency'][-1]:.3f}  "
+            f"coll={self.history['best_collision_rate'][-1]:.3f}",
+            title=f"3Pi done: {CONDITION}",
+        )
+
         return self.best_genome
 
     def _save_population_history(self, genomes: np.ndarray, fitnesses: np.ndarray) -> None:
