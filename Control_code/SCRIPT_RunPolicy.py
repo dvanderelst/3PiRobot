@@ -28,7 +28,7 @@ from LorexLib.Environment import capture_environment_layout
 
 CONDITION       = "memory05"              # sub-folder under Policy/ that holds the JSON
 ROBOT_ID        = 1
-SESSION         = "sessionB05_policy"     # data session folder name
+SESSION         = "policy_memory05_01"     # data session folder name
 MAX_STEPS       = 200
 FIXED_DRIVE_MM  = 100.0
 wait_for_confirmation = False
@@ -78,13 +78,11 @@ for step in range(MAX_STEPS):
     sonar_package = client.read_and_process(do_ping=True, plot=True)
     position      = tracker.get_position(ROBOT_ID)
 
+    sonar_package_iid = sonar_package['corrected_iid']
+    sonar_package_distance = sonar_package['corrected_distance']
+
     if sonar_package is None:
         print(f"Warning: No sonar data at step {step}, skipping.")
-        writer.save_data(
-            sonar_package=None,
-            position=position,
-            motion={"rotate1": rotate1, "rotate2": 0.0, "drive_mm": 0.0},
-        )
         continue
 
     sonar_package["robot_number"] = ROBOT_ID
@@ -104,6 +102,8 @@ for step in range(MAX_STEPS):
         pos_str = f"({rob_x:.3f}, {rob_y:.3f}, {rob_yaw_deg:.1f}°)"
     else:
         pos_str = "N/A"
+
+    print(f"Sonar package data: IID={sonar_package_iid:+6.2f} dB, Distance={1000 * sonar_package_distance:6.0f} mm")
 
     print(
         f"Step {step:3d}: IID={iid_db:+6.2f} dB  dist={dist_mm:6.0f} mm  "

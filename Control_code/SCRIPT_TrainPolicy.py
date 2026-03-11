@@ -96,7 +96,7 @@ class Config:
     mutation_sigma: float = 0.2
 
     # Evaluation
-    episodes_per_policy: int = 32
+    episodes_per_policy: int = 50
     max_steps: int = 50
     spawn_margin_mm: float = 150.0
     use_empirical_starts: bool = True
@@ -110,19 +110,19 @@ class Config:
 
     # Progressive difficulty
     use_progressive_steps: bool = True
-    progressive_steps_start: int = 50
-    progressive_steps_end: int = 250
-    progressive_steps_generations: int = 10
+    progressive_steps_start: int = 30
+    progressive_steps_end: int = 120
+    progressive_steps_generations: int = 50
 
     # Fitness
     w_turn_penalty: float = 2.0
     sinuosity_window: int = 15
-    warning_distance_mm: float = 300.0
+    warning_distance_mm: float = 500.0
     collision_distance_mm: float = 150.0
-    w_consistency: float = 0.1          # weight for cross-episode path consistency term
+    w_consistency: float = 0.0         # weight for cross-episode path consistency term
     consistency_grid_mm: float = 200.0  # spatial bin size (mm)
     consistency_yaw_bins: int = 8       # angular bins (45° each) for body and look yaw
-    consistency_min_episodes: int = 4   # min distinct episodes to count a cell as consistent
+    consistency_min_episodes: int = 3   # min distinct episodes to count a cell as consistent
 
     # IO
     output_dir: str = f"Policy/{CONDITION}"

@@ -306,7 +306,9 @@ def plot_sonar_package(sonar_package, file_name=None, close_after=False):
     if iid_correction_applied:
         iid = sonar_package['corrected_iid']
         side_code = sonar_package['side_code']
-        processed_msg = f'[{robot_name}] Corrected IID: {iid:.2f} dB ({side_code})'
+        dist = sonar_package.get('corrected_distance', sonar_package.get('raw_distance'))
+        dist_str = f'{dist:.2f} m' if dist is not None else 'N/A'
+        processed_msg = f'[{robot_name}] Corrected IID: {iid:.2f} dB ({side_code})  dist: {dist_str}'
 
     # Show the robot name in the bottom left corner of the plot
     # Use relative coordinates (0 to 1)
