@@ -20,7 +20,6 @@ from Library import LorexTracker
 from Library import PauseControl
 from Library import PushOver
 from Library.PolicyController import PolicyController, load_policy
-from Library.EchoProcessor import EchoProcessor
 from LorexLib.Environment import capture_environment_layout
 
 
@@ -38,14 +37,12 @@ do_rotation     = True
 do_translation  = True
 
 POLICY_DIR          = "Policy"               # root folder containing CONDITION sub-folder
-ECHO_PROCESSOR_DIR  = "EchoProcessor"        # folder containing echoprocessor_artifacts.pth
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 
 policy_path = f"{POLICY_DIR}/{CONDITION}/best_policy.json"
 policy      = load_policy(policy_path)
 ctrl        = PolicyController(policy, fixed_drive_mm=FIXED_DRIVE_MM)
-ep          = EchoProcessor.load(ECHO_PROCESSOR_DIR)
 
 control = PauseControl.PauseControl()
 client  = Client.Client(robot_number=ROBOT_ID)
@@ -78,19 +75,13 @@ for step in range(MAX_STEPS):
     sonar_package = client.read_and_process(do_ping=True, plot=True)
     position      = tracker.get_position(ROBOT_ID)
 
-    sonar_package_iid = sonar_package['corrected_iid']
-    sonar_package_distance = sonar_package['corrected_distance']
-
     if sonar_package is None:
         print(f"Warning: No sonar data at step {step}, skipping.")
         continue
 
     sonar_package["robot_number"] = ROBOT_ID
-    sonar_lr       = np.asarray(sonar_package["sonar_data"], dtype=np.float32)[:, [1, 2]]
-    dist_axis_mm   = np.asarray(sonar_package["corrected_distance_axis"], dtype=np.float32) * 1000.0
-    ep_result      = ep.predict(sonar_lr, dist_axis_mm)
-    iid_db         = float(ep_result["iid_db"][0])
-    dist_mm        = float(ep_result["distance_mm"][0])
+    iid_db  = float(sonar_package['corrected_iid'])
+    dist_mm = float(sonar_package['corrected_distance']) * 1000.0
 
     # --- Rotate2: body turn based on current ping ---
     rotate2 = ctrl.compute_rotate2(iid_db, dist_mm)
@@ -102,8 +93,6 @@ for step in range(MAX_STEPS):
         pos_str = f"({rob_x:.3f}, {rob_y:.3f}, {rob_yaw_deg:.1f}°)"
     else:
         pos_str = "N/A"
-
-    print(f"Sonar package data: IID={sonar_package_iid:+6.2f} dB, Distance={1000 * sonar_package_distance:6.0f} mm")
 
     print(
         f"Step {step:3d}: IID={iid_db:+6.2f} dB  dist={dist_mm:6.0f} mm  "

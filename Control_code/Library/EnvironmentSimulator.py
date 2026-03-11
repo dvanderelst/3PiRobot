@@ -416,16 +416,20 @@ class EnvironmentSimulator:
     
     def get_sonar_measurement(self, x: float, y: float, orientation_deg: float) -> Dict[str, float]:
         """
-        Get predicted sonar measurement (distance and IID) at position/orientation.
-        
+        Get predicted sonar measurement at position/orientation.
+
         This is the main interface for policy learning.
-        
+
         Args:
             x, y: Position in mm
             orientation_deg: Robot orientation in degrees
-            
+
         Returns:
-            Dictionary with 'distance_mm' and 'iid_db'
+            Dictionary with keys:
+            - 'echo_present_prob': Predicted echo presence probability
+            - 'echo_distance_mm': Predicted distance in millimeters (echo-present head)
+            - 'distance_mm': Alias for echo_distance_mm (backward compat)
+            - 'iid_db': Predicted IID in decibels
         """
         # Get distance profile
         profile = self.get_profile_at_position(x, y, orientation_deg)

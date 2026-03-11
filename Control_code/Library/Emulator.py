@@ -26,24 +26,22 @@ class EmulatorMLP(nn.Module):
             layers.append(nn.Dropout(dropout))
             dim = h
         self.trunk = nn.Sequential(*layers)
-        self.distance_head = nn.Sequential(
-            nn.Linear(dim, head_hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(head_hidden_size, 1),
+        self.echo_present_head = nn.Sequential(
+            nn.Linear(dim, head_hidden_size), nn.ReLU(), nn.Dropout(dropout), nn.Linear(head_hidden_size, 1),
+        )
+        self.echo_distance_head = nn.Sequential(
+            nn.Linear(dim, head_hidden_size), nn.ReLU(), nn.Dropout(dropout), nn.Linear(head_hidden_size, 1),
         )
         self.iid_head = nn.Sequential(
-            nn.Linear(dim, head_hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(head_hidden_size, 1),
+            nn.Linear(dim, head_hidden_size), nn.ReLU(), nn.Dropout(dropout), nn.Linear(head_hidden_size, 1),
         )
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         z = self.trunk(x)
-        d = self.distance_head(z)
+        ep = self.echo_present_head(z)
+        d = self.echo_distance_head(z)
         i = self.iid_head(z)
-        return {"reg": torch.cat([d, i], dim=1)}
+        return {"echo_logit": ep, "reg": torch.cat([d, i], dim=1)}
 
 
 class Emulator:
@@ -55,7 +53,7 @@ class Emulator:
     in an environment.
     
     The emulator reads profile parameters (opening_angle, steps) from its own
-    training artifact (with EchoProcessor fallback for backward compatibility).
+    training artifact.
     """
     
     def __init__(
@@ -72,11 +70,12 @@ class Emulator:
         profile_steps: int,
         use_feature_augmentation: bool = True,
         device: Optional[str] = None,
+        no_echo_min_distance_mm: float = 3500.0,
     ):
         self.device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model = model.to(self.device)
         self.model.eval()
-        
+
         self.x_mean = np.asarray(x_mean, dtype=np.float32)
         self.x_std = np.asarray(x_std, dtype=np.float32)
         self.y_mean = np.asarray(y_mean, dtype=np.float32)
@@ -84,26 +83,25 @@ class Emulator:
         self.normalize_x = bool(normalize_x)
         self.normalize_y = bool(normalize_y)
         self.calibration = calibration
-        
+
         # Profile parameters used for profile generation/validation in simulation.
         self.profile_opening_angle = float(profile_opening_angle)
         self.profile_steps = int(profile_steps)
         self.use_feature_augmentation = bool(use_feature_augmentation)
+        self.no_echo_min_distance_mm = float(no_echo_min_distance_mm)
 
     @staticmethod
     def load(
         emulator_dir: str = "Emulator",
-        echo_processor_dir: str = "EchoProcessor",
         device: Optional[str] = None
     ) -> 'Emulator':
         """
         Load a trained emulator from disk.
-        
+
         Args:
             emulator_dir: Directory containing emulator artifacts
-            echo_processor_dir: Directory containing EchoProcessor artifacts
             device: Device to load model onto (None for auto-detection)
-            
+
         Returns:
             Loaded Emulator instance
         """
@@ -120,26 +118,14 @@ class Emulator:
         with open(emulator_artifact_path, 'r') as f:
             params = json.load(f)
 
-        # Prefer profile parameters from emulator training params.
         profile_opening_angle = params.get("profile_opening_angle", None)
         profile_steps = params.get("profile_steps", None)
 
-        # Backward compatibility: fall back to EchoProcessor artifact if needed.
         if profile_opening_angle is None or profile_steps is None:
-            echo_artifact_path = os.path.join(echo_processor_dir, "echoprocessor_artifacts.pth")
-            if not os.path.exists(echo_artifact_path):
-                raise FileNotFoundError(
-                    "Missing profile parameters in emulator training params and "
-                    f"EchoProcessor artifacts not found at {echo_artifact_path}."
-                )
-            echo_payload = torch.load(echo_artifact_path, map_location="cpu")
-            profile_opening_angle = echo_payload["profile_opening_angle"]
-            profile_steps = echo_payload["profile_steps"]
-            if profile_opening_angle is None or profile_steps is None:
-                raise ValueError(
-                    "Could not resolve profile_opening_angle/profile_steps from emulator "
-                    "training params or EchoProcessor artifacts."
-                )
+            raise ValueError(
+                "Emulator training_params.json is missing profile_opening_angle/profile_steps. "
+                "Please retrain by running SCRIPT_TrainEmulator.py."
+            )
         
         # Load model
         model_path = os.path.join(emulator_dir, "best_model_pytorch.pth")
@@ -173,10 +159,11 @@ class Emulator:
         normalize_y = bool(params["normalize_y"])
         calibration = params.get("calibration", None)
         use_feature_augmentation = bool(params.get("use_feature_augmentation", True))
-        
+        no_echo_min_distance_mm = float(params.get("no_echo_min_distance_mm", 3500.0))
+
         # Move model to the target device
         model = model.to(target_device)
-        
+
         return Emulator(
             model=model,
             x_mean=x_mean,
@@ -190,6 +177,7 @@ class Emulator:
             profile_steps=profile_steps,
             use_feature_augmentation=use_feature_augmentation,
             device=target_device,
+            no_echo_min_distance_mm=no_echo_min_distance_mm,
         )
 
     def _sanitize_profiles(self, profiles: np.ndarray) -> np.ndarray:
@@ -305,16 +293,18 @@ class Emulator:
         extras = np.stack([min_val, argmin_norm, asym, local_slope, com_norm], axis=1).astype(np.float32)
         return np.concatenate([p, extras], axis=1).astype(np.float32)
 
-    def _forward(self, profiles: np.ndarray) -> np.ndarray:
-        """Run one forward pass: sanitize → features → normalize → model → denormalize → calibrate."""
+    def _forward(self, profiles: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Returns (reg_output [N,2], echo_prob [N])"""
         x = self.build_profile_features(profiles)
         with torch.no_grad():
-            y = self.model(self._normalize_input(x))["reg"]
-        return self._apply_calibration(self._denormalize_output(y))
+            out = self.model(self._normalize_input(x))
+            reg = self._apply_calibration(self._denormalize_output(out["reg"]))
+            echo_prob = torch.sigmoid(out["echo_logit"]).cpu().numpy().squeeze(1)
+        return reg, echo_prob
 
     def predict(self, profiles: np.ndarray) -> Dict[str, np.ndarray]:
         """
-        Predict distance and IID from profile data.
+        Predict distance, echo_present, and IID from profile data.
 
         Symmetrized inference: the profile is passed through the model twice —
         once as-is and once horizontally flipped.  The two predictions are
@@ -327,39 +317,49 @@ class Emulator:
 
         Returns:
             Dictionary with keys:
-            - 'distance_mm': Predicted distances in millimeters (n_samples,)
+            - 'echo_present_prob': Predicted echo presence probability (n_samples,)
+            - 'echo_distance_mm': Predicted distances in millimeters (n_samples,)
+            - 'distance_mm': Alias for echo_distance_mm (backward compat)
             - 'iid_db': Predicted IID in decibels (n_samples,)
         """
         p = self._sanitize_profiles(np.asarray(profiles, dtype=np.float32))
 
-        y_orig = self._forward(p)
-        y_flip = self._forward(p[:, ::-1].copy())
+        reg_orig, ep_orig = self._forward(p)
+        reg_flip, ep_flip = self._forward(p[:, ::-1].copy())
 
-        # distance is symmetric; iid is antisymmetric under left-right flip
-        distance_mm = (y_orig[:, 0] + y_flip[:, 0]) / 2.0
-        iid_db      = (y_orig[:, 1] - y_flip[:, 1]) / 2.0
+        # distance and echo_present are symmetric under flip
+        echo_distance_mm  = (reg_orig[:, 0] + reg_flip[:, 0]) / 2.0
+        echo_present_prob = (ep_orig + ep_flip) / 2.0
+        # iid is antisymmetric under flip
+        iid_db = (reg_orig[:, 1] - reg_flip[:, 1]) / 2.0
 
         return {
-            'distance_mm': distance_mm,
-            'iid_db':      iid_db,
+            'echo_present_prob': echo_present_prob,
+            'echo_distance_mm':  echo_distance_mm,
+            'distance_mm':       echo_distance_mm,   # backward compat alias
+            'iid_db':            iid_db,
         }
 
     def predict_single(self, profile: np.ndarray) -> Dict[str, float]:
         """
-        Predict distance and IID for a single profile.
-        
+        Predict distance, echo_present, and IID for a single profile.
+
         Args:
             profile: Single profile array of shape (profile_steps,)
-            
+
         Returns:
             Dictionary with keys:
-            - 'distance_mm': Predicted distance in millimeters
+            - 'echo_present_prob': Predicted echo presence probability
+            - 'echo_distance_mm': Predicted distance in millimeters
+            - 'distance_mm': Alias for echo_distance_mm (backward compat)
             - 'iid_db': Predicted IID in decibels
         """
         result = self.predict(profile[np.newaxis, :])
         return {
-            'distance_mm': float(result['distance_mm'][0]),
-            'iid_db': float(result['iid_db'][0])
+            'echo_present_prob': float(result['echo_present_prob'][0]),
+            'echo_distance_mm':  float(result['echo_distance_mm'][0]),
+            'distance_mm':       float(result['distance_mm'][0]),
+            'iid_db':            float(result['iid_db'][0]),
         }
 
     def get_profile_params(self) -> Dict[str, Union[float, int]]:
