@@ -55,6 +55,15 @@ WALL_SIDE_MIN_ANGLE_DEG = 25   # minimum lateral angle to wall centroid for a cl
 WALL_SIDE_K_NEAREST   = 10     # number of nearest wall points used to estimate the
                                 #   wall centroid direction (more robust than single point)
 
+# Head-on starts — robot points directly at a nearby wall.
+# Min margin must be > collision_distance_mm + one-step forward component so
+# the robot has at least one step to react before triggering collision.
+# With drive=100mm and max rotate2=45°: forward component ≈ 71mm, so
+# min safe spawn = 150 (collision threshold) + 71 + buffer ≈ 300mm.
+HEADON_WALL_MARGIN_MM = 300    # min clearance for head-on starts (mm)
+HEADON_MAX_DIST_MM    = NEAR_WALL_MAX_MM   # wall must be within this distance in the forward cone
+HEADON_CONE_HALF_DEG  = CONE_HALF_WIDTH_DEG  # same cone half-width as the avoidance filter
+
 # How many example heading-fan arrows to draw per session in the plot
 N_FAN_EXAMPLES = 12
 
@@ -328,6 +337,64 @@ def compute_sided_starts(
     return starts_left, starts_right
 
 
+def compute_headon_starts(
+    arena: ArenaLayout,
+    wall_margin_mm: float       = HEADON_WALL_MARGIN_MM,
+    near_wall_max_mm: float     = NEAR_WALL_MAX_MM,
+    grid_step_mm: float         = GRID_STEP_MM,
+    heading_step_deg: int       = HEADING_STEP_DEG,
+    headon_max_dist_mm: float   = HEADON_MAX_DIST_MM,
+    headon_cone_half_deg: float = HEADON_CONE_HALF_DEG,
+) -> list:
+    """
+    Compute starting configurations where the robot faces directly toward a
+    nearby wall.  The heading filter is the *inverse* of _valid_headings: a
+    heading is included only if there IS a wall within `headon_max_dist_mm`
+    inside a cone of ±headon_cone_half_deg around it.
+
+    Positions must be inside the arena and between wall_margin_mm and
+    near_wall_max_mm from the nearest wall.
+
+    Returns
+    -------
+    list of dict  [{\"x\": float, \"y\": float, \"yaw_deg\": float}, ...]
+    """
+    walls = arena.walls
+
+    xs = np.arange(arena.arena_min_x, arena.arena_max_x + grid_step_mm, grid_step_mm)
+    ys = np.arange(arena.arena_min_y, arena.arena_max_y + grid_step_mm, grid_step_mm)
+    gx, gy = np.meshgrid(xs, ys)
+    gx, gy = gx.ravel(), gy.ravel()
+
+    if len(walls) > 0:
+        inside = _inside_arena_mask(walls, gx, gy, n_sectors=8)
+        min_d  = _min_wall_distances(walls, gx, gy)
+        pos_mask = inside & (min_d >= wall_margin_mm) & (min_d <= near_wall_max_mm)
+    else:
+        pos_mask = np.ones(len(gx), dtype=bool)
+
+    valid_x = gx[pos_mask]
+    valid_y = gy[pos_mask]
+
+    headings_all = np.arange(0, 360, heading_step_deg, dtype=float)
+    starts = []
+    for x, y in zip(valid_x, valid_y):
+        if len(walls) == 0:
+            continue
+        dx = walls[:, 0] - x
+        dy = walls[:, 1] - y
+        wall_angles = np.degrees(np.arctan2(dy, dx))
+        wall_dists  = np.hypot(dx, dy)
+        for h in headings_all:
+            dang = wall_angles - h
+            dang = (dang + 180.0) % 360.0 - 180.0
+            in_cone = np.abs(dang) <= headon_cone_half_deg
+            if np.any(in_cone) and wall_dists[in_cone].min() <= headon_max_dist_mm:
+                starts.append({"x": float(x), "y": float(y), "yaw_deg": float(h)})
+
+    return starts
+
+
 def _plot_sided_session(ax, arena: ArenaLayout,
                         starts_left: list, starts_right: list,
                         session: str, arrow_len_mm: float = 200.0,
@@ -394,6 +461,77 @@ def plot_sided_starts(session_data: dict, out_path: str):
         row, col = divmod(idx, n_cols)
         _plot_sided_session(axes[row, col], data["arena"],
                             data["starts_left"], data["starts_right"], session)
+    for idx in range(n, n_rows * n_cols):
+        row, col = divmod(idx, n_cols)
+        axes[row, col].set_visible(False)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+
+# ── Head-on plotting ──────────────────────────────────────────────────────────
+
+def _plot_headon_session(ax, arena: ArenaLayout, starts: list, session: str,
+                         arrow_len_mm: float = 200.0, n_examples: int = 12):
+    """Draw diagnostic panel for head-on starts."""
+    walls = arena.walls
+    if len(walls) > 0:
+        ax.scatter(walls[:, 0], walls[:, 1], s=0.8, c="#aaaaaa", alpha=0.4,
+                   linewidths=0, zorder=1)
+    if not starts:
+        ax.set_title(f"{session}  |  no head-on starts", fontsize=9)
+        return
+
+    pts = np.unique([[s["x"], s["y"]] for s in starts], axis=0)
+    ax.scatter(pts[:, 0], pts[:, 1], s=8, c="#e65100", alpha=0.5,
+               linewidths=0, zorder=2, label=f"{len(pts)} positions")
+
+    pos_to_heads: dict = {}
+    for s in starts:
+        pos_to_heads.setdefault((s["x"], s["y"]), []).append(s["yaw_deg"])
+
+    idx = np.round(np.linspace(0, len(pts) - 1, min(n_examples, len(pts)))).astype(int)
+    for i in idx:
+        px, py = pts[i]
+        for h in pos_to_heads.get((px, py), []):
+            rad = np.radians(h)
+            ax.annotate("",
+                xy=(px + arrow_len_mm * np.cos(rad),
+                    py + arrow_len_mm * np.sin(rad)),
+                xytext=(px, py),
+                arrowprops=dict(arrowstyle="-|>", color="#e65100",
+                                lw=0.8, mutation_scale=5),
+                zorder=3)
+        ax.plot(px, py, "o", ms=3, color="#e65100", zorder=4)
+
+    ax.set_title(
+        f"{session}  |  {len(pts)} positions  |  {len(starts)} (pos, yaw) pairs",
+        fontsize=9)
+    ax.set_xlabel("X (mm)", fontsize=8)
+    ax.set_ylabel("Y (mm)", fontsize=8)
+    ax.set_aspect("equal")
+    ax.tick_params(labelsize=7)
+    ax.legend(fontsize=7, loc="upper right")
+
+
+def plot_headon_starts(session_data: dict, out_path: str):
+    """session_data: {session: {"arena", "starts_headon"}}"""
+    n = len(session_data)
+    n_cols = min(n, 2)
+    n_rows = (n + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(6.5 * n_cols, 6.5 * n_rows))
+    axes = np.array(axes).reshape(n_rows, n_cols)
+    fig.suptitle(
+        f"Head-on starts  |  wall margin={HEADON_WALL_MARGIN_MM}–{NEAR_WALL_MAX_MM} mm  |  "
+        f"wall within {HEADON_MAX_DIST_MM} mm in ±{HEADON_CONE_HALF_DEG}° cone",
+        fontsize=10,
+    )
+    for idx, (session, data) in enumerate(session_data.items()):
+        row, col = divmod(idx, n_cols)
+        _plot_headon_session(axes[row, col], data["arena"],
+                             data["starts_headon"], session)
     for idx in range(n, n_rows * n_cols):
         row, col = divmod(idx, n_cols)
         axes[row, col].set_visible(False)
@@ -585,11 +723,39 @@ def main():
                 }, f, indent=2)
             print(f"  Saved: {jp}")
 
+        # ── Head-on starts ────────────────────────────────────────────
+        starts_headon = compute_headon_starts(
+            arena,
+            wall_margin_mm      = HEADON_WALL_MARGIN_MM,
+            near_wall_max_mm    = NEAR_WALL_MAX_MM,
+            grid_step_mm        = GRID_STEP_MM,
+            heading_step_deg    = HEADING_STEP_DEG,
+            headon_max_dist_mm  = HEADON_MAX_DIST_MM,
+            headon_cone_half_deg = HEADON_CONE_HALF_DEG,
+        )
+        n_headon = len({(s["x"], s["y"]) for s in starts_headon})
+        print(f"  headon: {n_headon} positions, {len(starts_headon)} (pos, heading) pairs")
+
+        jp = os.path.join(OUTPUT_DIR, f"{session}_starts_headon.json")
+        with open(jp, "w") as f:
+            json.dump({
+                "session":              session,
+                "wall_margin_mm":       WALL_MARGIN_MM,
+                "near_wall_max_mm":     NEAR_WALL_MAX_MM,
+                "headon_max_dist_mm":   HEADON_MAX_DIST_MM,
+                "headon_cone_half_deg": HEADON_CONE_HALF_DEG,
+                "n_positions":          n_headon,
+                "n_starts":             len(starts_headon),
+                "starts":               starts_headon,
+            }, f, indent=2)
+        print(f"  Saved: {jp}")
+
         session_data[session] = {
-            "arena":        arena,
-            "starts":       starts,
-            "starts_left":  starts_left,
-            "starts_right": starts_right,
+            "arena":          arena,
+            "starts":         starts,
+            "starts_left":    starts_left,
+            "starts_right":   starts_right,
+            "starts_headon":  starts_headon,
         }
 
     # Combined plots
@@ -598,6 +764,9 @@ def main():
 
     sided_plot_path = os.path.join(OUTPUT_DIR, "plot_sided_starts.png")
     plot_sided_starts(session_data, sided_plot_path)
+
+    headon_plot_path = os.path.join(OUTPUT_DIR, "plot_headon_starts.png")
+    plot_headon_starts(session_data, headon_plot_path)
 
 
 if __name__ == "__main__":

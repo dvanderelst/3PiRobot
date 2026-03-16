@@ -56,22 +56,21 @@ class HistoryNNPolicy:
 
     History features stored per step (always in canonical frame):
         [canonical_iid_norm, dist_norm, rot1_canonical_norm, rot2_canonical_norm,
-         drive_norm, blocked]
+         drive_norm, echo_present_prob]
     where canonical_iid = abs(physical_iid) and canonical_rotX = physical_rotX
-    reflected back to the positive-IID frame.
+    reflected back to the positive-IID frame.  echo_present_prob is symmetric
+    (unchanged by flip) and passed directly.
     """
 
     def __init__(
         self,
         max_rotate1_deg: float,
         max_rotate2_deg: float,
-        deadband_db: float,
         history_len: int,
         hidden_sizes: Tuple[int, int],
     ):
         self.max_rotate1_deg = float(max_rotate1_deg)
         self.max_rotate2_deg = float(max_rotate2_deg)
-        self.deadband_db = float(deadband_db)
         self.history_len = int(history_len)
         self.hidden_sizes = tuple(int(v) for v in hidden_sizes)
         self.feature_dim = 6
@@ -81,7 +80,7 @@ class HistoryNNPolicy:
             (h1, self.in_dim), (h1,),   # shared encoder:       W1, b1
             (h2, h1),          (h2,),   # rot1 head hidden:     W2a, b2a
             (1,  h2),          (1,),    # rot1 head output:     W3a, b3a
-            (h2, h1 + 2),      (h2,),   # rot2 head hidden:     W2b, b2b  (+2 = iid_n, dist_n)
+            (h2, h1 + 3),      (h2,),   # rot2 head hidden:     W2b, b2b  (+3 = iid_n, dist_n, echo_n)
             (1,  h2),          (1,),    # rot2 head output:     W3b, b3b
         ]
         self.params: List[np.ndarray] = [np.zeros(s, dtype=np.float32) for s in self.shapes]
@@ -115,11 +114,7 @@ class HistoryNNPolicy:
         and negate the output so the head turns toward the correct physical side.
         Pass the raw physical IID — do NOT pre-flip.
         """
-        phys_last = safe_float(last_iid_db, 0.0)
-        flip = phys_last < 0.0
-        canonical_last = abs(phys_last)
-        if canonical_last < self.deadband_db:
-            return 0.0
+        flip = safe_float(last_iid_db, 0.0) < 0.0
         h1 = self._shared_h1(hist_vec)
         w2a, b2a, w3a, b3a = self.params[2], self.params[3], self.params[4], self.params[5]
         h2 = np.tanh(w2a @ h1 + b2a.reshape(-1, 1))
@@ -127,23 +122,24 @@ class HistoryNNPolicy:
         rotate1_canonical = float(np.clip(y[0, 0], -1.0, 1.0)) * self.max_rotate1_deg
         return -rotate1_canonical if flip else rotate1_canonical
 
-    def decide_rotate2(self, hist_vec: np.ndarray, current_iid_db: float, current_dist_mm: float) -> float:
+    def decide_rotate2(self, hist_vec: np.ndarray, current_iid_db: float, current_dist_mm: float,
+                       echo_present_prob: float = 1.0) -> float:
         """Head 2: decide body turn after looking (current measurement injected).
 
         SYMMETRY WRAPPER: current_iid_db is the raw physical IID just measured.
         If negative (wall on left), we reflect to canonical positive-IID frame,
         run the network, and negate the output so the body turns the correct
         physical direction.  Pass the raw physical IID — do NOT pre-flip.
+        echo_present_prob is symmetric and injected directly without flip.
         """
         phys = safe_float(current_iid_db, 0.0)
         flip = phys < 0.0
         canonical_iid = abs(phys)
-        if canonical_iid < self.deadband_db:
-            return 0.0
         h1 = self._shared_h1(hist_vec)
         iid_n  = float(np.clip(canonical_iid / 12.0, 0.0, 2.0))
         dist_n = float(np.clip(safe_float(current_dist_mm, 1800.0) / 2000.0, 0.0, 2.0))
-        h1_aug = np.concatenate([h1, np.array([[iid_n], [dist_n]], dtype=np.float32)], axis=0)
+        echo_n = float(np.clip(safe_float(echo_present_prob, 1.0), 0.0, 1.0))
+        h1_aug = np.concatenate([h1, np.array([[iid_n], [dist_n], [echo_n]], dtype=np.float32)], axis=0)
         w2b, b2b, w3b, b3b = self.params[6], self.params[7], self.params[8], self.params[9]
         h2 = np.tanh(w2b @ h1_aug + b2b.reshape(-1, 1))
         y = np.tanh(w3b @ h2 + b3b.reshape(-1, 1))
@@ -163,7 +159,6 @@ def load_policy(json_path: str) -> HistoryNNPolicy:
     policy = HistoryNNPolicy(
         max_rotate1_deg=data["max_rotate1_deg"],
         max_rotate2_deg=data["max_rotate2_deg"],
-        deadband_db=data["iid_deadband_db"],
         history_len=data["history_len"],
         hidden_sizes=data["hidden_sizes"],
     )
@@ -211,7 +206,6 @@ class PolicyController:
         self.hist: collections.deque = collections.deque(maxlen=policy.history_len)
         self.last_physical_iid: float = 0.0
         self.prev_drive_norm: float = 0.0
-        self.prev_blocked: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -222,7 +216,6 @@ class PolicyController:
         self.hist = collections.deque(maxlen=self.policy.history_len)
         self.last_physical_iid = 0.0
         self.prev_drive_norm   = 0.0
-        self.prev_blocked      = 0.0
 
     def _build_hist_vec(self) -> np.ndarray:
         """Build the flat history vector with zero-padding for early steps."""
@@ -231,7 +224,7 @@ class PolicyController:
         pad_n = self.policy.history_len - len(self.hist)
         if pad_n > 0:
             return np.concatenate(
-                [np.zeros((pad_n * 6,), dtype=np.float32)] + list(self.hist), axis=0
+                [np.zeros((pad_n * self.policy.feature_dim,), dtype=np.float32)] + list(self.hist), axis=0
             ).astype(np.float32)
         return np.concatenate(list(self.hist), axis=0).astype(np.float32)
 
@@ -243,13 +236,13 @@ class PolicyController:
         hist_vec = self._build_hist_vec()
         return self.policy.decide_rotate1(hist_vec, self.last_physical_iid)
 
-    def compute_rotate2(self, iid_db: float, distance_mm: float) -> float:
+    def compute_rotate2(self, iid_db: float, distance_mm: float, echo_present_prob: float = 1.0) -> float:
         """Compute head-2 rotation using the current sonar measurement.
 
         Call this after taking the current step's sonar ping.
         """
         hist_vec = self._build_hist_vec()
-        return self.policy.decide_rotate2(hist_vec, iid_db, distance_mm)
+        return self.policy.decide_rotate2(hist_vec, iid_db, distance_mm, echo_present_prob)
 
     def update(
         self,
@@ -258,7 +251,7 @@ class PolicyController:
         iid_db: float,
         distance_mm: float,
         executed_drive_mm: float = None,
-        blocked: bool = False,
+        echo_present_prob: float = 1.0,
     ) -> None:
         """Update canonical history after executing a step.
 
@@ -272,8 +265,8 @@ class PolicyController:
             Distance measured this step (mm).
         executed_drive_mm : float, optional
             Actual drive executed (mm).  Defaults to fixed_drive_mm.
-        blocked : bool
-            Whether the drive was blocked by a collision.
+        echo_present_prob : float
+            Echo detection confidence from the sonar processor (0–1).
         """
         if executed_drive_mm is None:
             executed_drive_mm = self.fixed_drive_mm
@@ -290,22 +283,22 @@ class PolicyController:
         canonical_rot1_norm = float(np.clip(canonical_rot1 / max(self.policy.max_rotate1_deg, 1e-6), -1.0, 1.0))
         canonical_rot2_norm = float(np.clip(canonical_rot2 / max(self.policy.max_rotate2_deg, 1e-6), -1.0, 1.0))
         drive_norm          = float(np.clip(executed_drive_mm / max(self.fixed_drive_mm, 1e-6), 0.0, 1.5))
+        echo_n              = float(np.clip(safe_float(echo_present_prob, 1.0), 0.0, 1.0))
 
         self.hist.append(np.array(
             [canonical_iid_norm, dist_norm, canonical_rot1_norm, canonical_rot2_norm,
-             drive_norm, 1.0 if blocked else 0.0],
+             self.prev_drive_norm, echo_n],
             dtype=np.float32,
         ))
         self.last_physical_iid = physical_iid
         self.prev_drive_norm   = drive_norm
-        self.prev_blocked      = 1.0 if blocked else 0.0
 
     def step(
         self,
         iid_db: float,
         distance_mm: float,
         executed_drive_mm: float = None,
-        blocked: bool = False,
+        echo_present_prob: float = 1.0,
     ) -> Tuple[float, float, float]:
         """Convenience method: compute both actions and update history.
 
@@ -319,6 +312,6 @@ class PolicyController:
             drive_mm — forward distance to drive (mm, always fixed_drive_mm)
         """
         rotate1 = self.compute_rotate1()
-        rotate2 = self.compute_rotate2(iid_db, distance_mm)
-        self.update(rotate1, rotate2, iid_db, distance_mm, executed_drive_mm, blocked)
+        rotate2 = self.compute_rotate2(iid_db, distance_mm, echo_present_prob)
+        self.update(rotate1, rotate2, iid_db, distance_mm, executed_drive_mm, echo_present_prob)
         return rotate1, rotate2, self.fixed_drive_mm

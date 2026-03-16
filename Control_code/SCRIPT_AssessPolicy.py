@@ -5,7 +5,7 @@ Policy assessment script: visualise the weights of a saved HistoryNNPolicy.
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 GENERATION     = "last"        # integer generation number, "last", or None for best_policy.json
-POLICY_DIR     = "Policy/memory05"           # where training saved the policy JSON files
+POLICY_DIR     = "Policy/memory05b"           # where training saved the policy JSON files
 ASSESSMENT_DIR = "PolicyAssessment" # where plots are written (created if needed)
 
 # Trajectory assessment
@@ -457,7 +457,6 @@ def make_policy(data: dict):
     policy = HistoryNNPolicy(
         max_rotate1_deg=data["max_rotate1_deg"],
         max_rotate2_deg=data["max_rotate2_deg"],
-        deadband_db=data["iid_deadband_db"],
         history_len=data["history_len"],
         hidden_sizes=tuple(data["hidden_sizes"]),
     )
@@ -490,7 +489,6 @@ def run_episodes(data: dict, sessions: list, n_trials: int,
         cfg.history_len             = data["history_len"]
         cfg.max_rotate1_deg         = data["max_rotate1_deg"]
         cfg.max_rotate2_deg         = data["max_rotate2_deg"]
-        cfg.iid_deadband_db         = data["iid_deadband_db"]
         cfg.quiet_setup             = True
         cfg.use_empirical_starts    = True
         cfg.randomize_empirical_yaw = True
@@ -654,13 +652,13 @@ def main():
     plot_trajectories(results, gen, traj_file)
 
     look_file = os.path.join(assessment_dir, f"plot_look_vs_drive_gen{gen}.png")
-    plot_look_vs_drive(results, data["iid_deadband_db"], gen, look_file)
+    plot_look_vs_drive(results, data.get("iid_deadband_db", 0.0), gen, look_file)
 
     corr_file = os.path.join(assessment_dir, f"plot_input_correlations_gen{gen}.png")
     plot_input_correlations(results, arch, gen, corr_file)
 
     hist_file = os.path.join(assessment_dir, f"plot_rot2_histogram_gen{gen}.png")
-    plot_rot2_histogram(results, data["iid_deadband_db"], gen, hist_file)
+    plot_rot2_histogram(results, data.get("iid_deadband_db", 0.0), gen, hist_file)
 
 
 if __name__ == "__main__":

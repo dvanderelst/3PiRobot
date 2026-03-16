@@ -8,7 +8,7 @@ from Library import DataProcessor, Utils
 # ============================================
 # CONFIGURATION
 # ============================================
-session = "policy_memory05_01"
+session = "policy_memory05c"
 
 # Session trajectory/profile visualization.
 show_trajectory_plot = True

@@ -25,9 +25,9 @@ from LorexLib.Environment import capture_environment_layout
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-CONDITION       = "memory05"              # sub-folder under Policy/ that holds the JSON
+CONDITION       = "memory05c"              # sub-folder under Policy/ that holds the JSON
 ROBOT_ID        = 1
-SESSION         = "policy_memory05_01"     # data session folder name
+SESSION         = "policy_memory05c"     # data session folder name
 MAX_STEPS       = 200
 FIXED_DRIVE_MM  = 100.0
 wait_for_confirmation = False
@@ -69,7 +69,7 @@ for step in range(MAX_STEPS):
     rotate1 = ctrl.compute_rotate1()
     if do_rotation:
         client.step(angle=rotate1)
-        time.sleep(0.15)
+        time.sleep(0.5)
 
     # --- Sonar ping at post-rotate1 orientation ---
     sonar_package = client.read_and_process(do_ping=True, plot=True)
@@ -80,11 +80,12 @@ for step in range(MAX_STEPS):
         continue
 
     sonar_package["robot_number"] = ROBOT_ID
-    iid_db  = float(sonar_package['corrected_iid'])
-    dist_mm = float(sonar_package['corrected_distance']) * 1000.0
+    iid_db            = float(sonar_package['corrected_iid'])
+    dist_mm           = float(sonar_package['corrected_distance']) * 1000.0
+    echo_present_prob = float(sonar_package.get('echo_present_prob', 1.0))
 
     # --- Rotate2: body turn based on current ping ---
-    rotate2 = ctrl.compute_rotate2(iid_db, dist_mm)
+    rotate2 = ctrl.compute_rotate2(iid_db, dist_mm, echo_present_prob)
 
     rob_x       = position["x"]
     rob_y       = position["y"]
@@ -103,14 +104,14 @@ for step in range(MAX_STEPS):
     # --- Execute rotate2 and drive ---
     if do_rotation:
         client.step(angle=rotate2)
-        time.sleep(0.15)
+        time.sleep(0.5)
 
     if do_translation:
         client.step(distance=FIXED_DRIVE_MM / 1000.0)   # Client expects metres
         time.sleep(0.15)
 
     # --- Update controller history ---
-    ctrl.update(rotate1, rotate2, iid_db, dist_mm)
+    ctrl.update(rotate1, rotate2, iid_db, dist_mm, echo_present_prob=echo_present_prob)
 
     # --- Save data ---
     writer.save_data(

@@ -16,7 +16,7 @@ import pandas as pd
 
 
 az_steps = 121
-opening_angles = [60, 90, 120, 150, 180]  # full opening angles in degrees
+opening_angles = [60, 70, 80, 90]  # full opening angles in degrees
 max_opening_angle = max(opening_angles)
 
 sessions = ['sessionB01', 'sessionB02', 'sessionB03', 'sessionB04', 'sessionB05']

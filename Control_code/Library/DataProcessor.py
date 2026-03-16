@@ -1262,25 +1262,31 @@ class DataProcessor:
                 )
                 
                 if params_match:
-                    self.profiles = cached_profiles
-                    self.profile_centers = cached_centers
-                    self.profiles_loaded = True
-                    self.profile_opening_angle = opening_angle
-                    self.profile_steps = steps
-                    self.profile_fill_nans = fill_nans
-                    self.profile_method = profile_method
-                    print(f"✅ Loaded {len(self.profiles)} distance profiles from cache")
-                    print(f"   Profile shape: {self.profiles.shape}")
-                    print(f"   Centers shape: {self.profile_centers.shape}")
-                    print(
-                        f"   Parameters matched: opening_angle={opening_angle}, "
-                        f"steps={steps}, method={profile_method}"
-                    )
-                    
-                    # Ensure arena metadata is loaded even when using cached profiles
-                    if not hasattr(self, 'arena_metadata_loaded') or not self.arena_metadata_loaded:
-                        self.load_arena_metadata()
-                    return
+                    if len(cached_profiles) != self.n:
+                        print(
+                            f"⚠️  Cached profile count ({len(cached_profiles)}) != "
+                            f"current data count ({self.n}) - recomputing (stale cache)."
+                        )
+                    else:
+                        self.profiles = cached_profiles
+                        self.profile_centers = cached_centers
+                        self.profiles_loaded = True
+                        self.profile_opening_angle = opening_angle
+                        self.profile_steps = steps
+                        self.profile_fill_nans = fill_nans
+                        self.profile_method = profile_method
+                        print(f"✅ Loaded {len(self.profiles)} distance profiles from cache")
+                        print(f"   Profile shape: {self.profiles.shape}")
+                        print(f"   Centers shape: {self.profile_centers.shape}")
+                        print(
+                            f"   Parameters matched: opening_angle={opening_angle}, "
+                            f"steps={steps}, method={profile_method}"
+                        )
+
+                        # Ensure arena metadata is loaded even when using cached profiles
+                        if not hasattr(self, 'arena_metadata_loaded') or not self.arena_metadata_loaded:
+                            self.load_arena_metadata()
+                        return
                 else:
                     print(f"⚠️  Cache parameters don't match - recomputing...")
                     print(f"   Cached params: {cached_params}")
