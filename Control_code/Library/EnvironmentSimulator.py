@@ -149,49 +149,26 @@ class ArenaLayout:
     def get_relative_wall_coordinates(self, rob_x: float, rob_y: float, rob_yaw_deg: float) -> Tuple[np.ndarray, np.ndarray]:
         """
         Get wall coordinates relative to robot position and orientation.
-        
+
         Args:
             rob_x, rob_y: Robot position in mm
             rob_yaw_deg: Robot orientation in degrees
-            
+
         Returns:
-            rel_x, rel_y: Wall coordinates relative to robot
+            rel_x, rel_y: Wall coordinates relative to robot (mm, CCW-positive convention)
         """
         if len(self.walls) == 0:
             return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
-        
-        # Convert robot yaw to radians
+
+        # Translate then rotate — walls are already in mm so the px round-trip is unnecessary.
+        # rel_y sign-flip converts from image coords (y-down) to CCW-positive convention.
         yaw_rad = np.deg2rad(rob_yaw_deg)
-        
-        # Transform wall coordinates to robot-centric frame
-        # Robot position in pixels
-        rob_x_px = rob_x / self.mm_per_px
-        rob_y_px = rob_y / self.mm_per_px
-        
-        # Wall coordinates in pixels (assuming walls are in mm)
-        wall_x_px = self.walls[:, 0] / self.mm_per_px
-        wall_y_px = self.walls[:, 1] / self.mm_per_px
-        
-        # Translate to robot position
-        rel_x_px = wall_x_px - rob_x_px
-        rel_y_px = wall_y_px - rob_y_px
-        
-        # Rotate to robot orientation
         cos_yaw = np.cos(yaw_rad)
         sin_yaw = np.sin(yaw_rad)
-        
-        rel_x_rot = rel_x_px * cos_yaw + rel_y_px * sin_yaw
-        rel_y_rot = -rel_x_px * sin_yaw + rel_y_px * cos_yaw
-        
-        # Convert back to mm.
-        # Negate rel_y to convert from image coordinates (y increases downward,
-        # so positive rel_y = robot's physical RIGHT) to the CCW-positive convention
-        # used by DataProcessor and the emulator (positive azimuth = LEFT).
-        # Without this negation the profile is left-right flipped relative to the
-        # training data, which inverts the IID sign produced by the emulator.
-        rel_x_mm =  rel_x_rot * self.mm_per_px
-        rel_y_mm = -rel_y_rot * self.mm_per_px   # sign flip: image y-down → CCW-positive
-
+        dx = self.walls[:, 0] - rob_x
+        dy = self.walls[:, 1] - rob_y
+        rel_x_mm =  dx * cos_yaw + dy * sin_yaw
+        rel_y_mm =  dx * sin_yaw - dy * cos_yaw   # sign flip: image y-down → CCW-positive
         return rel_x_mm, rel_y_mm
     
     def compute_profile(self, rob_x: float, rob_y: float, rob_yaw_deg: float, 
@@ -230,11 +207,13 @@ class ArenaLayout:
         min_distances = np.full(n_steps, np.nan, dtype=np.float32)
         
         if profile_method == 'min_bin':
-            # Minimum distance within each azimuth bin
-            for i in range(n_steps):
-                in_bin = (angles_deg >= edges[i]) & (angles_deg < edges[i + 1])
-                if np.any(in_bin):
-                    min_distances[i] = np.min(distances[in_bin])
+            # Vectorised minimum: assign each wall point to its bin, take the min per bin.
+            bin_idx = np.digitize(angles_deg, edges) - 1  # 0-based; -1 or n_steps = out of range
+            valid = (bin_idx >= 0) & (bin_idx < n_steps)
+            if valid.any():
+                min_distances[:] = np.inf   # sentinel for minimum operation
+                np.minimum.at(min_distances, bin_idx[valid], distances[valid])
+                min_distances[min_distances == np.inf] = np.nan  # unfilled bins → nan
                     
         elif profile_method == 'ray_center':
             # Approximate ray-cast at each bin center
@@ -460,6 +439,54 @@ class EnvironmentSimulator:
 
         return result
     
+    def get_sonar_measurements_batch(
+        self,
+        positions: List[Tuple[float, float, float]],
+    ) -> List[Dict[str, float]]:
+        """
+        Batch sonar measurements for N positions using a single CNN forward pass.
+
+        Profile geometry is computed per-position (sequential), but all CNN
+        inference runs as one batched call — avoids N-fold PyTorch call overhead.
+
+        Args:
+            positions: List of (x, y, orientation_deg) tuples
+
+        Returns:
+            List of measurement dicts (same keys as get_sonar_measurement)
+        """
+        if not positions:
+            return []
+
+        profiles = np.array(
+            [self.get_profile_at_position(x, y, o) for x, y, o in positions],
+            dtype=np.float32,
+        )  # (N, profile_steps)
+
+        # Single batched CNN inference for all positions
+        emulator_results = self.emulator.predict(profiles)
+
+        # Geometric distance: min over central 90° bins (same logic as get_sonar_measurement)
+        n = self.profile_steps
+        central_frac = min(90.0 / float(self.opening_angle), 1.0)
+        margin = (1.0 - central_frac) / 2.0
+        lo = int(np.round(margin * (n - 1)))
+        hi = int(np.round((1.0 - margin) * (n - 1))) + 1  # exclusive
+        central = profiles[:, lo:hi]  # (N, central_bins)
+
+        results: List[Dict[str, float]] = []
+        for k in range(len(positions)):
+            fv = central[k]
+            fv = fv[np.isfinite(fv)]
+            geo_dist = float(np.min(fv)) if len(fv) > 0 else 3000.0
+            results.append({
+                'echo_present_prob': float(emulator_results['echo_present_prob'][k]),
+                'echo_distance_mm':  geo_dist,
+                'distance_mm':       geo_dist,
+                'iid_db':            float(emulator_results['iid_db'][k]),
+            })
+        return results
+
     def simulate_robot_movement(self, start_x: float, start_y: float, start_orientation: float,
                                actions: List[Dict[str, float]],
                                compute_sonar: bool = True) -> List[Dict[str, Union[float, Dict]]]:

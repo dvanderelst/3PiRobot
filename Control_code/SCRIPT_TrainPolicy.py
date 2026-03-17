@@ -286,6 +286,20 @@ class Evaluator:
         walls = getattr(self.sim.arena, "walls", np.array([], dtype=np.float32))
         self._wall_points = np.asarray(walls, dtype=np.float32) if walls is not None else np.array([], dtype=np.float32)
 
+        # Precompute arena bounds once — avoids repeated meta dict lookups in the hot path.
+        meta = getattr(self.sim.arena, "meta", {}) or {}
+        b = meta.get("arena_bounds_mm", None)
+        if isinstance(b, dict):
+            self._bmin_x = safe_float(b.get("min_x"), 0.0)
+            self._bmax_x = safe_float(b.get("max_x"), self.sim.arena.arena_width)
+            self._bmin_y = safe_float(b.get("min_y"), 0.0)
+            self._bmax_y = safe_float(b.get("max_y"), self.sim.arena.arena_height)
+        else:
+            self._bmin_x = 0.0
+            self._bmax_x = float(self.sim.arena.arena_width)
+            self._bmin_y = 0.0
+            self._bmax_y = float(self.sim.arena.arena_height)
+
     def _load_starts(self) -> List[Tuple[float, float, float]]:
         """Load pre-computed (x, y, yaw) starts from ValidStarts JSON.
 
@@ -323,24 +337,15 @@ class Evaluator:
         return self.starts[rng.randrange(len(self.starts))]
 
     def _geometry_clearance_mm(self, x: float, y: float) -> float:
-        meta = getattr(self.sim.arena, "meta", {}) or {}
-        b = meta.get("arena_bounds_mm", None)
-        if isinstance(b, dict):
-            min_x = safe_float(b.get("min_x"), 0.0)
-            max_x = safe_float(b.get("max_x"), self.sim.arena.arena_width)
-            min_y = safe_float(b.get("min_y"), 0.0)
-            max_y = safe_float(b.get("max_y"), self.sim.arena.arena_height)
-        else:
-            min_x, max_x = 0.0, float(self.sim.arena.arena_width)
-            min_y, max_y = 0.0, float(self.sim.arena.arena_height)
-        boundary_clearance = float(min(x - min_x, max_x - x, y - min_y, max_y - y))
-        boundary_clearance = max(0.0, boundary_clearance)
+        boundary_clearance = max(0.0, float(min(
+            x - self._bmin_x, self._bmax_x - x,
+            y - self._bmin_y, self._bmax_y - y,
+        )))
         if self._wall_points.size == 0:
             return boundary_clearance
         dx = self._wall_points[:, 0] - float(x)
         dy = self._wall_points[:, 1] - float(y)
-        wall_clearance = float(np.min(np.hypot(dx, dy)))
-        return min(boundary_clearance, wall_clearance)
+        return min(boundary_clearance, float(np.min(np.hypot(dx, dy))))
 
     def episode(self, policy: HistoryNNPolicy, start: Tuple[float, float, float]) -> Dict[str, Any]:
         """Run one episode.
@@ -573,9 +578,12 @@ def _init_worker(cfg_dict: Dict[str, Any]) -> None:
 
 
 def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float, float, float]]],
-                        n_lefts_by_env: Optional[List[int]] = None) -> Dict[str, Any]:
+                        n_lefts_by_env: Optional[List[int]] = None,
+                        max_steps: Optional[int] = None) -> Dict[str, Any]:
     if _WORKER_CFG is None or _WORKER_EVS is None:
         raise RuntimeError("Worker not initialized")
+    if max_steps is not None:
+        _WORKER_CFG.max_steps = max_steps
     pol = HistoryNNPolicy(
         _WORKER_CFG.max_rotate1_deg, _WORKER_CFG.max_rotate2_deg,
         _WORKER_CFG.history_len, _WORKER_CFG.hidden_sizes,
@@ -738,7 +746,21 @@ class SimpleGATrainer:
             val_starts_fixed = [self.ev_validation.sample_start(rng_val_init)
                                  for _ in range(n_val)]
 
-        for gen in range(self.cfg.generations):
+        # ── Create parallel pool once (reused across all generations) ───────────
+        _pool: Optional[ProcessPoolExecutor] = None
+        if self.cfg.parallel_eval and len(pop) > 1:
+            _workers  = self.cfg.num_workers or max(1, min(os.cpu_count() or 1, 8))
+            _cfg_dict = asdict(self.cfg)
+            try:
+                _pool = ProcessPoolExecutor(
+                    max_workers=_workers, initializer=_init_worker, initargs=(_cfg_dict,)
+                )
+                print(f"Parallel pool created with {_workers} workers.")
+            except Exception as e:
+                print(f"Could not create parallel pool ({type(e).__name__}: {e}); using serial.")
+
+        try:
+          for gen in range(self.cfg.generations):
             if self.cfg.use_progressive_steps and self.cfg.progressive_steps_generations > 0:
                 progress = min(gen / self.cfg.progressive_steps_generations, 1.0)
                 self.cfg.max_steps = int(
@@ -751,25 +773,25 @@ class SimpleGATrainer:
             fitness: List[float]          = [0.0] * len(pop)
             details: List[Dict[str, Any]] = [None] * len(pop)  # type: ignore
 
-            use_parallel = self.cfg.parallel_eval and len(pop) > 1
-            if use_parallel:
-                workers  = self.cfg.num_workers or max(1, min(os.cpu_count() or 1, 8))
-                cfg_dict = asdict(self.cfg)
+            if _pool is not None:
                 try:
-                    with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker,
-                                             initargs=(cfg_dict,)) as ex:
-                        results = ex.map(_eval_genome_worker, pop,
-                                         [starts_by_env] * len(pop),
-                                         [n_lefts_by_env] * len(pop))
-                        for i, res in enumerate(tqdm(results, total=len(pop),
-                                                     desc=f"Gen {gen+1}/{self.cfg.generations}")):
-                            fitness[i] = float(res["fitness"])
-                            details[i] = res
+                    cur_max_steps = self.cfg.max_steps
+                    results = _pool.map(
+                        _eval_genome_worker, pop,
+                        [starts_by_env] * len(pop),
+                        [n_lefts_by_env] * len(pop),
+                        [cur_max_steps] * len(pop),
+                    )
+                    for i, res in enumerate(tqdm(results, total=len(pop),
+                                                 desc=f"Gen {gen+1}/{self.cfg.generations}")):
+                        fitness[i] = float(res["fitness"])
+                        details[i] = res
                 except Exception as e:
                     print(f"Parallel eval failed ({type(e).__name__}: {e}); using serial.")
-                    use_parallel = False
+                    _pool.shutdown(wait=False)
+                    _pool = None
 
-            if not use_parallel:
+            if _pool is None:
                 for i, g in enumerate(tqdm(pop, desc=f"Gen {gen+1}/{self.cfg.generations}")):
                     if details[i] is not None:
                         continue
@@ -872,6 +894,10 @@ class SimpleGATrainer:
                     parent = elites[np.random.choice(elite_n, p=rank_weights)]
                     nxt.append(self.mutate(parent).astype(np.float32))
                 pop = nxt
+
+        finally:
+            if _pool is not None:
+                _pool.shutdown()
 
         if self.best_genome is None:
             raise RuntimeError("No best genome found")
