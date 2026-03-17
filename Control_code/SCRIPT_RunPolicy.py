@@ -15,6 +15,7 @@ import time
 import numpy as np
 from Library import Dialog
 from Library import Client
+from Library import CodeLogger
 from Library import DataStorage
 from Library import LorexTracker
 from Library import PauseControl
@@ -25,10 +26,10 @@ from LorexLib.Environment import capture_environment_layout
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-CONDITION       = "memory05c"              # sub-folder under Policy/ that holds the JSON
+CONDITION       = "memory06"              # sub-folder under Policy/ that holds the JSON
 ROBOT_ID        = 1
-SESSION         = "policy_memory05c"     # data session folder name
-MAX_STEPS       = 200
+SESSION         = "policy_memory06b"     # data session folder name
+MAX_STEPS       = 500
 FIXED_DRIVE_MM  = 100.0
 wait_for_confirmation = False
 
@@ -51,6 +52,7 @@ writer  = DataStorage.DataWriter(SESSION, autoclear=True, verbose=False)
 writer.add_file("Library/PolicyController.py")
 writer.add_file("SCRIPT_RunPolicy.py")
 snapshot = capture_environment_layout(save_root=f"Data/{SESSION}")
+CodeLogger.log_code(f"Data/{SESSION}", ['.', 'Library'], label=SESSION)
 
 # Warm up sonar (flush stale buffers)
 for _ in range(5):

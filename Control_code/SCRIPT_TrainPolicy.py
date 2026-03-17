@@ -38,6 +38,7 @@ import numpy as np
 from tqdm import tqdm
 
 from Library.EnvironmentSimulator import EnvironmentSimulator
+from Library import CodeLogger
 
 
 # ── Pushover helper ─────────────────────────────────────────────────────────────
@@ -61,8 +62,8 @@ def pushover_notify(message: str, title: str = "3PiRobot training") -> None:
 # Set CONDITION to a short label for this run; results go to Policy/<CONDITION>/.
 # If that folder already exists and is non-empty, the script will ask via a
 # dialog whether to overwrite it or abort.
-CONDITION   = "memory05"   # subfolder under Policy
-DESCRIPTION = ""          # free-text note saved with results
+CONDITION   = "memory07"   # subfolder under Policy
+DESCRIPTION = "Progressive steps 15→100 over 20 gens; geometric distance emulator, IID-only NN, 90° profile."
 
 # ── Pushover notifications ───────────────────────────────────────────────────────
 PUSHOVER_EVERY_N  = 10    # send a notification every N generations (0 = disable mid-run)
@@ -71,7 +72,7 @@ PUSHOVER_EVERY_N  = 10    # send a notification every N generations (0 = disable
 
 @dataclass
 class Config:
-    history_len: int = 5
+    history_len: int = 7
     seed: int = 42
     session_name: str = "sessionB01"
     train_session_names: Optional[List[str]] = field(
@@ -80,14 +81,14 @@ class Config:
     validation_session_name: Optional[str] = "sessionB04"
 
     # Action limits
-    max_rotate1_deg: float = 30.0
-    max_rotate2_deg: float = 30.0
+    max_rotate1_deg: float = 45.0
+    max_rotate2_deg: float = 45.0
     fixed_drive_mm: float = 100.0
     hidden_sizes: Tuple[int, int] = (16, 8)
 
     # GA
     population_size: int = 50
-    generations: int = 50
+    generations: int = 150
     elitism_count: int = 10   # keep top-n
     mutation_rate: float = 0.05   # ~40/890 weights perturbed per offspring; was 0.2
                                    # (160 changes destroyed parent behaviour)
@@ -95,7 +96,7 @@ class Config:
 
     # Evaluation
     episodes_per_policy: int = 16
-    max_steps: int = 50
+    max_steps: int = 15
     # Start positions are loaded from pre-computed JSON files produced by
     # SCRIPT_ComputeValidStarts.py.  Set starts_suffix to select which file:
     #   "starts_headon"    — robot faces a nearby wall (hardest)
@@ -106,10 +107,10 @@ class Config:
     validation_episodes_per_generation: int = 16
 
     # Progressive difficulty
-    use_progressive_steps: bool = False
-    progressive_steps_start: int = 30
+    use_progressive_steps: bool = True
+    progressive_steps_start: int = 15
     progressive_steps_end: int = 250
-    progressive_steps_generations: int = 15
+    progressive_steps_generations: int = 30
 
     # Fitness
     w_turn_penalty: float = 2.0
@@ -559,6 +560,8 @@ _WORKER_EVS: Optional[List[Evaluator]] = None
 
 
 def _init_worker(cfg_dict: Dict[str, Any]) -> None:
+    import torch as _torch
+    _torch.set_num_threads(1)   # prevent fork+MKL deadlock on Linux
     global _WORKER_CFG, _WORKER_EVS
     _WORKER_CFG = config_from_dict(cfg_dict)
     train_sessions = list(_WORKER_CFG.train_session_names) if _WORKER_CFG.train_session_names else [_WORKER_CFG.session_name]
@@ -774,10 +777,15 @@ class SimpleGATrainer:
                     fitness[i] = float(res["fitness"])
                     details[i] = res
 
-            f_np     = np.asarray(fitness, dtype=np.float32)
-            best_idx = int(np.argmax(f_np))
-            best_g   = pop[best_idx].copy()
-            best_res = details[best_idx]
+            f_np       = np.asarray(fitness, dtype=np.float32)
+            order_asc  = np.argsort(f_np)
+            best_idx   = int(order_asc[-1])
+            median_idx = int(order_asc[len(order_asc) // 2])
+            worst_idx  = int(order_asc[0])
+            best_g     = pop[best_idx].copy()
+            best_res   = details[best_idx]
+            median_res = details[median_idx]
+            worst_res  = details[worst_idx]
 
             self.history["best_fitness"].append(float(np.max(f_np)))
             self.history["avg_fitness"].append(float(np.mean(f_np)))
@@ -834,7 +842,7 @@ class SimpleGATrainer:
                 np.stack([g.copy() for g in pop]),  # (pop_size, genome_size)
                 f_np.copy(),                         # (pop_size,)
             )
-            self._save_generation_best_plot(gen + 1, best_res, val_res)
+            self._save_generation_best_plot(gen + 1, best_res, median_res, worst_res, val_res)
             self._save_generation_best_genome(gen + 1, best_g, best_res, val_fit, val_coll)
             self._save_live_policy_probe(best_g)
             self._save_live_best_policy(gen + 1)
@@ -894,59 +902,75 @@ class SimpleGATrainer:
         os.replace(tmp_path, path)
 
     def _save_generation_best_plot(self, generation_number: int, detail: Dict[str, Any],
+                                    median_detail: Optional[Dict[str, Any]],
+                                    worst_detail: Optional[Dict[str, Any]],
                                     validation_detail: Optional[Dict[str, Any]] = None) -> None:
         if not self.cfg.save_generation_best_plots:
             return
 
-        def _selection(episodes, n_left=0):
+        def _pick_best(episodes):
             if not episodes:
                 return None
-            fitnesses = np.array([safe_float(ep.get("fitness"), float("-inf")) for ep in episodes])
-            if n_left > 0 and n_left < len(episodes):
-                # Show best-left, best-right, worst-overall so both wall sides
-                # are always visible regardless of which side the policy prefers.
-                left_order  = np.argsort(fitnesses[:n_left])
-                right_order = np.argsort(fitnesses[n_left:])
-                worst_idx   = int(np.argmin(fitnesses))
-                best_left   = int(left_order[-1])               # index within left half
-                best_right  = int(right_order[-1]) + n_left     # index in full array
-                return [("BestL", best_left), ("BestR", best_right), ("Worst", worst_idx)]
-            order = np.argsort(fitnesses)
-            return [("Best", int(order[-1])), ("Median", int(order[len(order) // 2])), ("Worst", int(order[0]))]
+            return int(np.argmax([safe_float(ep.get("fitness"), float("-inf")) for ep in episodes]))
 
-        episodes_train = detail.get("episodes_raw", [])
-        n_left_train   = int(detail.get("n_left", 0))
-        sel_train      = _selection(episodes_train, n_left_train)
-        episodes_val   = validation_detail.get("episodes_raw", []) if validation_detail else []
-        sel_val        = _selection(episodes_val)
-        if sel_train is None:
+        def _pick_crash_or_random(episodes):
+            """Return (idx, had_crash). Picks worst-fitness crash; falls back to random."""
+            if not episodes:
+                return None, False
+            crashes = [i for i, ep in enumerate(episodes) if ep.get("collided", False)]
+            if crashes:
+                idx = int(min(crashes, key=lambda i: safe_float(episodes[i].get("fitness"), float("inf"))))
+                return idx, True
+            return int(np.random.randint(len(episodes))), False
+
+        def _draw(sim, episodes, idx, ax, label, show_legend=False):
+            if idx is None or not episodes:
+                ax.set_visible(False)
+                return
+            ep = episodes[idx]
+            draw_episode_on_axis(sim, ep, ax,
+                                 f"{label} | ep_fit={safe_float(ep.get('fitness'), float('nan')):.2f} | end={ep.get('end_reason', '?')}",
+                                 show_legend=show_legend)
+
+        episodes_best   = detail.get("episodes_raw", [])
+        episodes_median = median_detail.get("episodes_raw", []) if median_detail else []
+        episodes_worst  = worst_detail.get("episodes_raw",  []) if worst_detail  else []
+        if not episodes_best:
             return
-        os.makedirs(self.generation_plot_dir, exist_ok=True)
 
-        has_val = sel_val is not None and self.ev_validation is not None
+        best_idx             = _pick_best(episodes_best)
+        crash_idx, had_crash = _pick_crash_or_random(episodes_best)
+        median_ep_idx        = _pick_best(episodes_median)
+        worst_ep_idx         = _pick_best(episodes_worst)
+
+        os.makedirs(self.generation_plot_dir, exist_ok=True)
         train_fit = safe_float(detail.get("fitness"), float("nan"))
+        has_val   = validation_detail is not None and self.ev_validation is not None
+
+        n_rows = 2 if has_val else 1
+        fig, axes = plt.subplots(n_rows, 4, figsize=(24, 6 * n_rows))
+        axes = np.asarray(axes).reshape(n_rows, 4)
+
+        _draw(self.sim, episodes_best,   best_idx,     axes[0, 0], "Best",                         show_legend=True)
+        _draw(self.sim, episodes_best,   crash_idx,    axes[0, 1], "Crash" if had_crash else "Random")
+        _draw(self.sim, episodes_median, median_ep_idx,axes[0, 2], "Median policy")
+        _draw(self.sim, episodes_worst,  worst_ep_idx, axes[0, 3], "Worst policy")
+
         if has_val:
-            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-            axes = np.asarray(axes)
-            val_fit = safe_float(validation_detail.get("fitness"), float("nan")) if validation_detail else float("nan")
-            for j, (label, idx) in enumerate(sel_train):
-                ep = episodes_train[idx]
-                draw_episode_on_axis(self.sim, ep, axes[0, j],
-                                     f"Train {label} | ep_fit={safe_float(ep.get('fitness'), float('nan')):.2f} | end={ep.get('end_reason', '?')}",
-                                     show_legend=(j == 0))
-            for j, (label, idx) in enumerate(sel_val):
-                ep = episodes_val[idx]
-                draw_episode_on_axis(self.ev_validation.sim, ep, axes[1, j],
-                                     f"Val {label} | ep_fit={safe_float(ep.get('fitness'), float('nan')):.2f} | end={ep.get('end_reason', '?')}",
-                                     show_legend=(j == 0))
+            episodes_val             = validation_detail.get("episodes_raw", [])
+            val_fit                  = safe_float(validation_detail.get("fitness"), float("nan"))
+            val_best_idx             = _pick_best(episodes_val)
+            val_crash_idx, val_crash = _pick_crash_or_random(episodes_val)
+            val_fits       = [safe_float(ep.get("fitness"), float("-inf")) for ep in episodes_val]
+            val_order      = np.argsort(val_fits)
+            val_median_idx = int(val_order[len(val_order) // 2]) if episodes_val else None
+            val_worst_idx  = int(val_order[0])                   if episodes_val else None
+            _draw(self.ev_validation.sim, episodes_val, val_best_idx,   axes[1, 0], "Val Best",                            show_legend=True)
+            _draw(self.ev_validation.sim, episodes_val, val_crash_idx,  axes[1, 1], "Val Crash" if val_crash else "Val Random")
+            _draw(self.ev_validation.sim, episodes_val, val_median_idx, axes[1, 2], "Val Median ep")
+            _draw(self.ev_validation.sim, episodes_val, val_worst_idx,  axes[1, 3], "Val Worst ep")
             fig.suptitle(f"Gen {generation_number} | train_fit={train_fit:.2f} | val_fit={val_fit:.2f}", fontsize=14)
         else:
-            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-            for ax, (label, idx) in zip(axes, sel_train):
-                ep = episodes_train[idx]
-                draw_episode_on_axis(self.sim, ep, ax,
-                                     f"Train {label} | ep_fit={safe_float(ep.get('fitness'), float('nan')):.2f} | end={ep.get('end_reason', '?')}",
-                                     show_legend=(label == "Best"))
             fig.suptitle(f"Gen {generation_number} | train_fit={train_fit:.2f}", fontsize=14)
 
         fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
@@ -1124,12 +1148,24 @@ def draw_episode_on_axis(sim: EnvironmentSimulator, episode: Dict[str, Any],
     traj = episode.get("trajectory", [])
     if not traj:
         return
+    from matplotlib.collections import LineCollection
     xs = [s["x"] for s in traj]
     ys = [s["y"] for s in traj]
+    iids = [safe_float(s.get("iid_db"), 0.0) for s in traj]
     walls = getattr(sim.arena, "walls", None)
     if walls is not None and len(walls) > 0:
         ax.scatter(walls[:, 0], walls[:, 1], s=1, color="#9e9e9e", alpha=0.25, label="Walls")
-    ax.plot(xs, ys, "-", color="#1565c0", linewidth=2, label="Trajectory")
+    if len(xs) >= 2:
+        points = np.array([xs, ys]).T.reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+        lc = LineCollection(segments, cmap="RdBu_r", norm=plt.Normalize(-12, 12), linewidth=2, zorder=2)
+        lc.set_array(np.array(iids[:-1]))
+        ax.add_collection(lc)
+        if show_legend:
+            cb = plt.colorbar(lc, ax=ax, shrink=0.7)
+            cb.set_label("IID (dB)\nred=wall left, blue=wall right")
+    else:
+        ax.plot(xs, ys, "-", color="#1565c0", linewidth=2)
     ax.scatter(xs[0],  ys[0],  s=60, color="#2e7d32", label="Start")
     ax.scatter(xs[-1], ys[-1], s=60, marker="x", color="#c62828", label="End")
     STRIDE = 5; ALEN = 150.0
@@ -1152,7 +1188,7 @@ def draw_episode_on_axis(sim: EnvironmentSimulator, episode: Dict[str, Any],
         title = f"{title} | end={episode.get('end_reason', '?')}"
     ax.set_title(title); ax.set_aspect("equal", adjustable="box"); ax.grid(True, alpha=0.3)
     if show_legend:
-        ax.legend(loc="best")
+        ax.legend(loc="upper left")
 
 
 def plot_episode(sim: EnvironmentSimulator, episode: Dict[str, Any],
@@ -1236,6 +1272,7 @@ def main() -> None:
         print(f"Cleared '{cfg.output_dir}'.")
 
     os.makedirs(cfg.output_dir, exist_ok=True)
+    CodeLogger.log_code(cfg.output_dir, ['.', 'Library'], label=CONDITION)
     write_overview(cfg, cfg.output_dir)
 
     print("History-NN GA training  (v2 — IID sign wrapper)")

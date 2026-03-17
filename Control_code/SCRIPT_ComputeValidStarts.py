@@ -58,9 +58,10 @@ WALL_SIDE_K_NEAREST   = 10     # number of nearest wall points used to estimate 
 # Head-on starts — robot points directly at a nearby wall.
 # Min margin must be > collision_distance_mm + one-step forward component so
 # the robot has at least one step to react before triggering collision.
-# With drive=100mm and max rotate2=45°: forward component ≈ 71mm, so
-# min safe spawn = 150 (collision threshold) + 71 + buffer ≈ 300mm.
-HEADON_WALL_MARGIN_MM = 300    # min clearance for head-on starts (mm)
+# With drive=100mm and max rotate2=30°: forward component ≈ 87mm, so
+# min safe spawn = 150 (collision threshold) + 87 + buffer.
+# 500mm gives ~250mm buffer — enough for two reaction steps.
+HEADON_WALL_MARGIN_MM = 500    # min clearance for head-on starts (mm)
 HEADON_MAX_DIST_MM    = NEAR_WALL_MAX_MM   # wall must be within this distance in the forward cone
 HEADON_CONE_HALF_DEG  = CONE_HALF_WIDTH_DEG  # same cone half-width as the avoidance filter
 
