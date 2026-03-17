@@ -416,23 +416,48 @@ class EnvironmentSimulator:
     
     def get_sonar_measurement(self, x: float, y: float, orientation_deg: float) -> Dict[str, float]:
         """
-        Get predicted sonar measurement (distance and IID) at position/orientation.
-        
+        Get predicted sonar measurement at position/orientation.
+
         This is the main interface for policy learning.
-        
+
+        Distance is computed geometrically as the minimum profile value over the
+        central 90° of the opening angle (rather than from the emulator, which has
+        poor accuracy at close distances).  IID and echo_present_prob are still
+        predicted by the emulator.
+
         Args:
             x, y: Position in mm
             orientation_deg: Robot orientation in degrees
-            
+
         Returns:
-            Dictionary with 'distance_mm' and 'iid_db'
+            Dictionary with keys:
+            - 'echo_present_prob': Predicted echo presence probability
+            - 'echo_distance_mm': Geometric minimum distance over central 90° (mm)
+            - 'distance_mm': Alias for echo_distance_mm (backward compat)
+            - 'iid_db': Predicted IID in decibels
         """
         # Get distance profile
         profile = self.get_profile_at_position(x, y, orientation_deg)
-        
-        # Use emulator to predict sonar measurements
+
+        # Use emulator for IID and echo_present_prob only
         result = self.emulator.predict_single(profile)
-        
+
+        # Replace emulator distance with geometric minimum over the central 90°
+        # of the profile (or the full profile if opening_angle <= 90°).
+        # Profile spans opening_angle degrees with profile_steps bins.
+        n = len(profile)
+        opening = float(self.opening_angle)
+        central_frac = min(90.0 / opening, 1.0)  # clamp to 1 if opening <= 90°
+        margin = (1.0 - central_frac) / 2.0
+        lo = int(np.round(margin * (n - 1)))
+        hi = int(np.round((1.0 - margin) * (n - 1))) + 1  # exclusive
+        central_profile = profile[lo:hi]
+        finite_vals = central_profile[np.isfinite(central_profile)]
+        geo_dist_mm = float(np.min(finite_vals)) if len(finite_vals) > 0 else 3000.0
+
+        result['echo_distance_mm'] = geo_dist_mm
+        result['distance_mm'] = geo_dist_mm
+
         return result
     
     def simulate_robot_movement(self, start_x: float, start_y: float, start_orientation: float,

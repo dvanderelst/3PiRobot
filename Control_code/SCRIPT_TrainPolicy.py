@@ -38,6 +38,7 @@ import numpy as np
 from tqdm import tqdm
 
 from Library.EnvironmentSimulator import EnvironmentSimulator
+from Library import CodeLogger
 
 
 # ── Pushover helper ─────────────────────────────────────────────────────────────
@@ -61,8 +62,8 @@ def pushover_notify(message: str, title: str = "3PiRobot training") -> None:
 # Set CONDITION to a short label for this run; results go to Policy/<CONDITION>/.
 # If that folder already exists and is non-empty, the script will ask via a
 # dialog whether to overwrite it or abort.
-CONDITION   = "memory05"   # subfolder under Policy
-DESCRIPTION = ""          # free-text note saved with results
+CONDITION   = "memory07"   # subfolder under Policy
+DESCRIPTION = "Progressive steps 15→100 over 20 gens; geometric distance emulator, IID-only NN, 90° profile."
 
 # ── Pushover notifications ───────────────────────────────────────────────────────
 PUSHOVER_EVERY_N  = 10    # send a notification every N generations (0 = disable mid-run)
@@ -71,58 +72,52 @@ PUSHOVER_EVERY_N  = 10    # send a notification every N generations (0 = disable
 
 @dataclass
 class Config:
-    history_len: int = 5
+    history_len: int = 7
     seed: int = 42
     session_name: str = "sessionB01"
     train_session_names: Optional[List[str]] = field(
-        default_factory=lambda: ["sessionB02", "sessionB03", "sessionB04", "sessionB05"]
+        default_factory=lambda: ["sessionB01", "sessionB02", "sessionB03", "sessionB05"]
     )
-    validation_session_name: Optional[str] = "sessionB01"
+    validation_session_name: Optional[str] = "sessionB04"
 
     # Action limits
     max_rotate1_deg: float = 45.0
     max_rotate2_deg: float = 45.0
     fixed_drive_mm: float = 100.0
-    iid_deadband_db: float = 0.25
-
     hidden_sizes: Tuple[int, int] = (16, 8)
 
     # GA
-    population_size: int = 80
-    generations: int = 70
-    elitism_count: int = 20   # keep top-n
-    mutation_rate: float = 0.05   # ~40/802 weights perturbed per offspring; was 0.2
+    population_size: int = 50
+    generations: int = 150
+    elitism_count: int = 10   # keep top-n
+    mutation_rate: float = 0.05   # ~40/890 weights perturbed per offspring; was 0.2
                                    # (160 changes destroyed parent behaviour)
     mutation_sigma: float = 0.2
 
     # Evaluation
-    episodes_per_policy: int = 50
-    max_steps: int = 50
-    spawn_margin_mm: float = 150.0
-    use_empirical_starts: bool = True
-    randomize_empirical_yaw: bool = True
-    empirical_position_fraction: float = 1.0
-    # When a ValidStarts JSON exists for the session it is used instead of the
-    # raw empirical positions.  Valid-starts already carry pre-filtered yaws so
-    # randomize_empirical_yaw is ignored for them.
-    valid_starts_dir: str = "ValidStarts"
+    episodes_per_policy: int = 16
+    max_steps: int = 15
+    # Start positions are loaded from pre-computed JSON files produced by
+    # SCRIPT_ComputeValidStarts.py.  Set starts_suffix to select which file:
+    #   "starts_headon"    — robot faces a nearby wall (hardest)
+    #   "starts_wall_left" / "starts_wall_right" — wall to one side
+    #   "valid_starts"     — full arena, any heading
+    starts_dir: str    = "ValidStarts"
+    starts_suffix: str = "starts_headon"
     validation_episodes_per_generation: int = 16
 
     # Progressive difficulty
     use_progressive_steps: bool = True
-    progressive_steps_start: int = 30
-    progressive_steps_end: int = 120
-    progressive_steps_generations: int = 50
+    progressive_steps_start: int = 15
+    progressive_steps_end: int = 250
+    progressive_steps_generations: int = 30
 
     # Fitness
     w_turn_penalty: float = 2.0
     sinuosity_window: int = 15
     warning_distance_mm: float = 500.0
     collision_distance_mm: float = 150.0
-    w_consistency: float = 0.0         # weight for cross-episode path consistency term
-    consistency_grid_mm: float = 200.0  # spatial bin size (mm)
-    consistency_yaw_bins: int = 8       # angular bins (45° each) for body and look yaw
-    consistency_min_episodes: int = 3   # min distinct episodes to count a cell as consistent
+    collision_fitness_scale: float = 0.5
 
     # IO
     output_dir: str = f"Policy/{CONDITION}"
@@ -183,22 +178,21 @@ class HistoryNNPolicy:
 
     History features stored per step (always in canonical frame):
         [canonical_iid_norm, dist_norm, rot1_canonical_norm, rot2_canonical_norm,
-         drive_norm, blocked]
+         drive_norm, echo_present_prob]
     where canonical_iid = abs(physical_iid) and canonical_rotX = physical_rotX
-    reflected back to the positive-IID frame.
+    reflected back to the positive-IID frame.  echo_present_prob is symmetric
+    (unchanged by flip) and passed directly.
     """
 
     def __init__(
         self,
         max_rotate1_deg: float,
         max_rotate2_deg: float,
-        deadband_db: float,
         history_len: int,
         hidden_sizes: Tuple[int, int],
     ):
         self.max_rotate1_deg = float(max_rotate1_deg)
         self.max_rotate2_deg = float(max_rotate2_deg)
-        self.deadband_db = float(deadband_db)
         self.history_len = int(history_len)
         self.hidden_sizes = tuple(int(v) for v in hidden_sizes)
         self.feature_dim = 6
@@ -208,7 +202,7 @@ class HistoryNNPolicy:
             (h1, self.in_dim), (h1,),   # shared encoder:       W1, b1
             (h2, h1),          (h2,),   # rot1 head hidden:     W2a, b2a
             (1,  h2),          (1,),    # rot1 head output:     W3a, b3a
-            (h2, h1 + 2),      (h2,),   # rot2 head hidden:     W2b, b2b  (+2 = iid_n, dist_n)
+            (h2, h1 + 3),      (h2,),   # rot2 head hidden:     W2b, b2b  (+3 = iid_n, dist_n, echo_n)
             (1,  h2),          (1,),    # rot2 head output:     W3b, b3b
         ]
         self.params: List[np.ndarray] = [np.zeros(s, dtype=np.float32) for s in self.shapes]
@@ -245,11 +239,7 @@ class HistoryNNPolicy:
         and negate the output so the head turns toward the correct physical side.
         Pass the raw physical IID — do NOT pre-flip.
         """
-        phys_last = safe_float(last_iid_db, 0.0)
-        flip = phys_last < 0.0                        # wall was on left last step
-        canonical_last = abs(phys_last)
-        if canonical_last < self.deadband_db:
-            return 0.0
+        flip = safe_float(last_iid_db, 0.0) < 0.0    # wall was on left last step
         h1 = self._shared_h1(hist_vec)
         w2a, b2a, w3a, b3a = self.params[2], self.params[3], self.params[4], self.params[5]
         h2 = np.tanh(w2a @ h1 + b2a.reshape(-1, 1))
@@ -257,24 +247,25 @@ class HistoryNNPolicy:
         rotate1_canonical = float(np.clip(y[0, 0], -1.0, 1.0)) * self.max_rotate1_deg
         return -rotate1_canonical if flip else rotate1_canonical
 
-    def decide_rotate2(self, hist_vec: np.ndarray, current_iid_db: float, current_dist_mm: float) -> float:
+    def decide_rotate2(self, hist_vec: np.ndarray, current_iid_db: float, current_dist_mm: float,
+                       echo_present_prob: float = 1.0) -> float:
         """Head 2: decide body turn after looking (current measurement injected).
 
         SYMMETRY WRAPPER: current_iid_db is the raw physical IID just measured.
         If negative (wall on left), we reflect to canonical positive-IID frame,
         run the network, and negate the output so the body turns the correct
         physical direction.  Pass the raw physical IID — do NOT pre-flip.
+        echo_present_prob is symmetric and injected directly without flip.
         """
         phys = safe_float(current_iid_db, 0.0)
         flip = phys < 0.0                             # wall is on left this step
         canonical_iid = abs(phys)
-        if canonical_iid < self.deadband_db:
-            return 0.0
         h1 = self._shared_h1(hist_vec)
         # Network sees canonical (non-negative) IID — wall always appears on right.
-        iid_n  = float(np.clip(canonical_iid / 12.0, 0.0, 2.0))
-        dist_n = float(np.clip(safe_float(current_dist_mm, 1800.0) / 2000.0, 0.0, 2.0))
-        h1_aug = np.concatenate([h1, np.array([[iid_n], [dist_n]], dtype=np.float32)], axis=0)
+        iid_n   = float(np.clip(canonical_iid / 12.0, 0.0, 2.0))
+        dist_n  = float(np.clip(safe_float(current_dist_mm, 1800.0) / 2000.0, 0.0, 2.0))
+        echo_n  = float(np.clip(safe_float(echo_present_prob, 1.0), 0.0, 1.0))
+        h1_aug = np.concatenate([h1, np.array([[iid_n], [dist_n], [echo_n]], dtype=np.float32)], axis=0)
         w2b, b2b, w3b, b3b = self.params[6], self.params[7], self.params[8], self.params[9]
         h2 = np.tanh(w2b @ h1_aug + b2b.reshape(-1, 1))
         y = np.tanh(w3b @ h2 + b3b.reshape(-1, 1))
@@ -291,134 +282,45 @@ class Evaluator:
     def __init__(self, simulator: EnvironmentSimulator, cfg: Config):
         self.sim = simulator
         self.cfg = cfg
-        self.valid_starts    = self._load_valid_starts()
-        self.sided_starts    = self._load_sided_starts()  # {"left": [...], "right": [...]}
-        self.empirical_starts = self._build_empirical_starts()
+        self.starts = self._load_starts()
         walls = getattr(self.sim.arena, "walls", np.array([], dtype=np.float32))
         self._wall_points = np.asarray(walls, dtype=np.float32) if walls is not None else np.array([], dtype=np.float32)
 
-    def _load_valid_starts(self) -> List[Tuple[float, float, float]]:
-        """
-        Load pre-computed valid (x, y, yaw) starts from ValidStarts JSON if it
-        exists for this session.  These were generated by SCRIPT_ComputeValidStarts
-        and already have position AND heading filtered for wall clearance, so they
-        cover the full arena rather than only the empirical robot track.
-        Returns [] if the file is not found (falls back to empirical starts).
+    def _load_starts(self) -> List[Tuple[float, float, float]]:
+        """Load pre-computed (x, y, yaw) starts from ValidStarts JSON.
+
+        The file is determined by cfg.starts_dir and cfg.starts_suffix:
+            <starts_dir>/<session>_<starts_suffix>.json
+        All start-position logic (distances, headings, wall margins) lives in
+        SCRIPT_ComputeValidStarts.py — this method just consumes the result.
         """
         session = getattr(self.sim.arena, "session_name", None)
         if not session:
             return []
-        json_path = os.path.join(self.cfg.valid_starts_dir, f"{session}_valid_starts.json")
-        if not os.path.isfile(json_path):
+        jp = os.path.join(self.cfg.starts_dir, f"{session}_{self.cfg.starts_suffix}.json")
+        if not os.path.isfile(jp):
+            print(f"  ⚠ Starts file not found: {jp}")
             return []
         try:
-            with open(json_path) as f:
+            with open(jp) as f:
                 data = json.load(f)
             starts = [
                 (float(s["x"]), float(s["y"]), float(s["yaw_deg"]))
                 for s in data.get("starts", [])
             ]
-            print(f"  Loaded {len(starts)} valid starts for {session} from {json_path}")
+            print(f"  Loaded {len(starts)} starts for {session} from {jp}")
             return starts
         except Exception as e:
-            print(f"  ⚠ Could not load valid starts for {session}: {e}")
+            print(f"  ⚠ Could not load starts for {session}: {e}")
             return []
-
-    def _load_sided_starts(self) -> dict:
-        """
-        Load wall-left and wall-right sided starts generated by
-        SCRIPT_ComputeValidStarts.  These guarantee the wall is clearly to one
-        side of the robot at spawn so both IID signs are exercised during
-        training — preventing the policy from converging to a single rotation
-        direction (e.g. always CCW).
-
-        Returns {"left": [...], "right": [...]} — empty lists if files missing.
-        """
-        session = getattr(self.sim.arena, "session_name", None)
-        result  = {"left": [], "right": []}
-        if not session:
-            return result
-        for side, suffix in [("left", "starts_wall_left"), ("right", "starts_wall_right")]:
-            jp = os.path.join(self.cfg.valid_starts_dir, f"{session}_{suffix}.json")
-            if not os.path.isfile(jp):
-                continue
-            try:
-                with open(jp) as f:
-                    data = json.load(f)
-                result[side] = [
-                    (float(s["x"]), float(s["y"]), float(s["yaw_deg"]))
-                    for s in data.get("starts", [])
-                ]
-                print(f"  Loaded {len(result[side])} wall-{side} starts for {session}")
-            except Exception as e:
-                print(f"  ⚠ Could not load wall-{side} starts for {session}: {e}")
-        return result
-
-    def _build_empirical_starts(self) -> List[Tuple[float, float, float]]:
-        dc = getattr(self.sim.arena, "dc", None)
-        if dc is None or not hasattr(dc, "processors") or len(dc.processors) == 0:
-            return []
-        p = dc.processors[0]
-        x   = np.asarray(getattr(p, "rob_x",       []), dtype=np.float64)
-        y   = np.asarray(getattr(p, "rob_y",       []), dtype=np.float64)
-        yaw = np.asarray(getattr(p, "rob_yaw_deg", []), dtype=np.float64)
-        n = min(x.size, y.size, yaw.size)
-        starts: List[Tuple[float, float, float]] = []
-        for i in range(n):
-            xi  = safe_float(x[i],   default=np.nan)
-            yi  = safe_float(y[i],   default=np.nan)
-            yiw = safe_float(yaw[i], default=np.nan)
-            if not (np.isfinite(xi) and np.isfinite(yi) and np.isfinite(yiw)):
-                continue
-            if not self._is_valid_spawn(xi, yi):
-                continue
-            starts.append((xi, yi, yiw % 360.0))
-        return starts
-
-    def _is_valid_spawn(self, x: float, y: float) -> bool:
-        if not self.sim._is_in_bounds(x, y):
-            return False
-        if self.sim._segment_collides_with_walls(x, y, x, y, self.sim.robot_radius_mm * 1.1):
-            return False
-        return True
-
-    def _random_spawn_bounds(self) -> Tuple[float, float, float, float]:
-        m = float(self.cfg.spawn_margin_mm)
-        meta = getattr(self.sim.arena, "meta", {}) or {}
-        b = meta.get("arena_bounds_mm", None)
-        if isinstance(b, dict):
-            return (
-                safe_float(b.get("min_x"), 0.0) + m,
-                safe_float(b.get("max_x"), self.sim.arena.arena_width) - m,
-                safe_float(b.get("min_y"), 0.0) + m,
-                safe_float(b.get("max_y"), self.sim.arena.arena_height) - m,
-            )
-        return (m, float(self.sim.arena.arena_width) - m,
-                m, float(self.sim.arena.arena_height) - m)
 
     def sample_start(self, rng: random.Random) -> Tuple[float, float, float]:
-        # Prefer pre-computed valid starts (full arena coverage, filtered yaws).
-        # Fall back to raw empirical positions, then to a random spawn.
-        if self.valid_starts:
-            x, y, yaw = self.valid_starts[rng.randrange(len(self.valid_starts))]
-            return x, y, yaw
-        use_empirical = (
-            self.cfg.use_empirical_starts
-            and len(self.empirical_starts) > 0
-            and rng.random() < float(np.clip(self.cfg.empirical_position_fraction, 0.0, 1.0))
-        )
-        if use_empirical:
-            x, y, yaw = self.empirical_starts[rng.randrange(len(self.empirical_starts))]
-            if self.cfg.randomize_empirical_yaw:
-                yaw = rng.uniform(0.0, 360.0)
-            return x, y, yaw
-        x_lo, x_hi, y_lo, y_hi = self._random_spawn_bounds()
-        for _ in range(400):
-            x = rng.uniform(x_lo, x_hi)
-            y = rng.uniform(y_lo, y_hi)
-            if self._is_valid_spawn(x, y):
-                return x, y, rng.uniform(0.0, 360.0)
-        return 0.5 * (x_lo + x_hi), 0.5 * (y_lo + y_hi), rng.uniform(0.0, 360.0)
+        if not self.starts:
+            raise RuntimeError(
+                f"No starts loaded for session — run SCRIPT_ComputeValidStarts.py "
+                f"and check starts_dir/starts_suffix in Config."
+            )
+        return self.starts[rng.randrange(len(self.starts))]
 
     def _geometry_clearance_mm(self, x: float, y: float) -> float:
         meta = getattr(self.sim.arena, "meta", {}) or {}
@@ -456,7 +358,7 @@ class Evaluator:
         """
         x, y, yaw = start
         start_x, start_y = x, y
-        blocked_any = False
+        collided = False
         end_reason = "max_steps_reached"
         total_reward = 0.0
         total_drive = 0.0
@@ -466,36 +368,44 @@ class Evaluator:
         trajectory: List[Dict[str, Any]] = []
         hist: collections.deque = collections.deque(maxlen=self.cfg.history_len)
 
+        # Pre-fill history with random plausible feature vectors so the network
+        # cannot use the "empty history = episode start = near wall" cue.
+        for _ in range(self.cfg.history_len):
+            hist.append(np.array([
+                float(np.random.uniform(0.0, 1.0)),    # canonical_iid_norm
+                float(np.random.uniform(0.2, 0.9)),    # dist_norm
+                float(np.random.uniform(-0.5, 0.5)),   # canonical_rot1_norm
+                float(np.random.uniform(-0.5, 0.5)),   # canonical_rot2_norm
+                float(np.random.uniform(0.8, 1.0)),    # prev_drive_norm
+                1.0,                                    # echo_present_prob
+            ], dtype=np.float32))
+
         # last_physical_iid: raw measured IID from previous step.
         # Used by decide_rotate1 to determine flip direction before the current measurement.
-        last_physical_iid = 0.0
-        prev_drive_norm   = 0.0
-        prev_blocked      = 0.0
-        position_history: collections.deque = collections.deque(maxlen=self.cfg.sinuosity_window)
+        # Randomly signed to match the random pre-fill — avoids always starting with flip=False.
+        last_physical_iid = float(np.random.uniform(0.0, 1.0)) * 12.0 * np.random.choice([-1.0, 1.0])
+        prev_drive_norm   = 1.0
+        position_history:  collections.deque = collections.deque(maxlen=self.cfg.sinuosity_window)
+        clearance_history: collections.deque = collections.deque(maxlen=self.cfg.sinuosity_window)
 
         for t in range(self.cfg.max_steps):
-            # Build history vector from canonical history entries.
+            # Build history vector (always full after random pre-fill).
             if self.cfg.history_len == 0:
                 hist_vec = np.zeros(0, dtype=np.float32)
             else:
-                pad_n = self.cfg.history_len - len(hist)
-                if pad_n > 0:
-                    hist_vec = np.concatenate(
-                        [np.zeros((pad_n * 6,), dtype=np.float32)] + list(hist), axis=0,
-                    ).astype(np.float32)
-                else:
-                    hist_vec = np.concatenate(list(hist), axis=0).astype(np.float32)
+                hist_vec = np.concatenate(list(hist), axis=0).astype(np.float32)
 
             # --- Head 1: decide where to look (pass raw physical IID for flip detection) ---
             rotate1 = policy.decide_rotate1(hist_vec, last_physical_iid)
 
             # --- Execute rotate1, then measure at the new look direction ---
             meas    = self.sim.get_sonar_measurement(x, y, yaw + rotate1)
-            physical_iid = safe_float(meas.get("iid_db"),      0.0)
-            dist_mm      = safe_float(meas.get("distance_mm"), 1800.0)
+            physical_iid      = safe_float(meas.get("iid_db"),           0.0)
+            dist_mm           = safe_float(meas.get("distance_mm"),      1800.0)
+            echo_present_prob = safe_float(meas.get("echo_present_prob"), 1.0)
 
             # --- Head 2: decide body turn (pass raw physical IID for flip detection) ---
-            rotate2 = policy.decide_rotate2(hist_vec, physical_iid, dist_mm)
+            rotate2 = policy.decide_rotate2(hist_vec, physical_iid, dist_mm, echo_present_prob)
 
             # --- Compute canonical values for history storage ---
             # canonical frame: abs IID, actions reflected back to positive-IID frame.
@@ -510,7 +420,7 @@ class Evaluator:
 
             hist.append(np.array(
                 [canonical_iid_norm, dist_norm, canonical_rot1_norm, canonical_rot2_norm,
-                 prev_drive_norm, prev_blocked],
+                 prev_drive_norm, echo_present_prob],
                 dtype=np.float32,
             ))
             last_physical_iid = physical_iid   # carry raw IID to next step for rotate1 flip
@@ -525,12 +435,8 @@ class Evaluator:
             exec_drive = safe_float(move.get("executed_drive_mm"), np.hypot(nx - x, ny - y))
             total_drive += exec_drive
 
-            coll        = step.get("collision", {})
-            blocked     = bool(coll.get("drive_blocked", False))
-            blocked_any = blocked_any or blocked
             net_turn_deg = rotate1 + rotate2
             prev_drive_norm = float(np.clip(exec_drive / max(self.cfg.fixed_drive_mm, 1e-6), 0.0, 1.5))
-            prev_blocked    = 1.0 if blocked else 0.0
             clearance_mm    = self._geometry_clearance_mm(nx, ny)
             warn            = max(float(self.cfg.warning_distance_mm), 1e-6)
             proximity_term  = float(np.clip((warn - clearance_mm) / warn, 0.0, 1.0))
@@ -544,8 +450,12 @@ class Evaluator:
             if abs(iid_norm_phys) > 0.15 and abs(net_turn_deg) > 2.0:
                 sign_match_terms.append(1.0 if np.sign(net_turn_deg) == -np.sign(iid_norm_phys) else 0.0)
 
-            # Sinuosity fitness.
+            # Sinuosity fitness with proximity-scaled turn penalty.
+            # When the robot has been near a wall recently (min clearance over the
+            # sinuosity window is small), the turn penalty is reduced so that
+            # evasive turns don't cost fitness.
             position_history.append((nx, ny))
+            clearance_history.append(clearance_mm)
             if len(position_history) >= 2:
                 path_dist = sum(
                     np.hypot(position_history[i][0] - position_history[i-1][0],
@@ -556,7 +466,11 @@ class Evaluator:
                 lx, ly = position_history[-1]
                 straight = np.hypot(lx - fx, ly - fy)
                 sinuosity = min(path_dist / straight if straight > 1e-6 else 1.0, 2.0)
-                reward = 1.0 - self.cfg.w_turn_penalty * (sinuosity - 1.0)
+                warn = max(float(self.cfg.warning_distance_mm), 1e-6)
+                coll = max(float(self.cfg.collision_distance_mm), 0.0)
+                min_clearance = float(min(clearance_history))
+                proximity_factor = float(np.clip((min_clearance - coll) / max(warn - coll, 1e-6), 0.0, 1.0))
+                reward = 1.0 - self.cfg.w_turn_penalty * proximity_factor * (sinuosity - 1.0)
             else:
                 reward = 1.0
 
@@ -568,10 +482,10 @@ class Evaluator:
                 "look_yaw_deg": yaw + rotate1,
                 "iid_db": physical_iid,
                 "distance_mm": dist_mm,
+                "echo_present_prob": echo_present_prob,
                 "rotate1_deg": rotate1,
                 "rotate2_deg": rotate2,
                 "executed_drive_mm": exec_drive,
-                "blocked": blocked,
                 "clearance_mm": clearance_mm,
                 "proximity_term": proximity_term,
                 "reward": float(reward),
@@ -580,15 +494,14 @@ class Evaluator:
             x, y, yaw = nx, ny, nyaw
             if clearance_mm <= float(self.cfg.collision_distance_mm):
                 end_reason = "collision_distance_reached"
-                blocked_any = True
-                break
-            if blocked:
-                end_reason = "collision_blocked"
+                collided = True
                 break
 
         net_displacement    = float(np.hypot(x - start_x, y - start_y))
         sign_match_rate     = float(np.mean(sign_match_terms)) if sign_match_terms else 0.5
         normalized_fitness  = float(total_reward) / float(self.cfg.max_steps)
+        if collided:
+            normalized_fitness *= self.cfg.collision_fitness_scale
 
         return {
             "fitness":                  normalized_fitness,
@@ -596,7 +509,7 @@ class Evaluator:
             "steps":                    len(trajectory),
             "total_executed_drive_mm":  float(total_drive),
             "net_displacement_mm":      net_displacement,
-            "collided":                 bool(blocked_any),
+            "collided":                 collided,
             "end_reason":               end_reason,
             "proximity_mean":           float(np.mean(proximity_terms) if proximity_terms else 0.0),
             "alignment_mean":           float(np.mean(aligned_terms)   if aligned_terms   else 0.0),
@@ -622,7 +535,7 @@ class Evaluator:
         else:
             left_fit  = float("nan")
             right_fit = float("nan")
-        fitness = float(np.mean(fit_array))  # plain mean; sign-consistency bonus handles anti-specialist
+        fitness = float(np.mean(fit_array))
 
         return {
             "fitness":                  fitness,
@@ -646,40 +559,9 @@ _WORKER_CFG: Optional[Config] = None
 _WORKER_EVS: Optional[List[Evaluator]] = None
 
 
-def compute_consistency_score(episodes_raw: list, grid_mm: float,
-                              yaw_bins: int, min_episodes: int) -> float:
-    """Fraction of trajectory steps that fall in cells visited by >= min_episodes distinct episodes.
-
-    A cell is defined by (floor(x/grid_mm), floor(y/grid_mm), body_yaw_bin, look_yaw_bin).
-    Returns a value in [0, 1]; higher means the robot follows more consistent paths.
-    """
-    if not episodes_raw or min_episodes < 2 or len(episodes_raw) < min_episodes:
-        return 0.0
-
-    bin_width = 360.0 / yaw_bins
-    cell_ep_sets: Dict[tuple, set] = {}
-    step_cells: list = []
-
-    for ep_i, ep in enumerate(episodes_raw):
-        for step in ep.get("trajectory", []):
-            cx    = int(np.floor(step["x"]            / grid_mm))
-            cy    = int(np.floor(step["y"]            / grid_mm))
-            cyaw  = int(step["yaw_deg"]      % 360 / bin_width) % yaw_bins
-            clook = int(step["look_yaw_deg"] % 360 / bin_width) % yaw_bins
-            cell  = (cx, cy, cyaw, clook)
-            step_cells.append(cell)
-            if cell not in cell_ep_sets:
-                cell_ep_sets[cell] = set()
-            cell_ep_sets[cell].add(ep_i)
-
-    if not step_cells:
-        return 0.0
-
-    consistent = sum(1 for c in step_cells if len(cell_ep_sets[c]) >= min_episodes)
-    return consistent / len(step_cells)
-
-
 def _init_worker(cfg_dict: Dict[str, Any]) -> None:
+    import torch as _torch
+    _torch.set_num_threads(1)   # prevent fork+MKL deadlock on Linux
     global _WORKER_CFG, _WORKER_EVS
     _WORKER_CFG = config_from_dict(cfg_dict)
     train_sessions = list(_WORKER_CFG.train_session_names) if _WORKER_CFG.train_session_names else [_WORKER_CFG.session_name]
@@ -696,7 +578,7 @@ def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float
         raise RuntimeError("Worker not initialized")
     pol = HistoryNNPolicy(
         _WORKER_CFG.max_rotate1_deg, _WORKER_CFG.max_rotate2_deg,
-        _WORKER_CFG.iid_deadband_db, _WORKER_CFG.history_len, _WORKER_CFG.hidden_sizes,
+        _WORKER_CFG.history_len, _WORKER_CFG.hidden_sizes,
     )
     pol.set_genome(genome)
     n_lefts = n_lefts_by_env or [0] * len(_WORKER_EVS)
@@ -709,23 +591,9 @@ def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float
         return float(np.mean(vals)) if vals else float("nan")
 
     episode_fitness = mean_key("fitness")
-    w = _WORKER_CFG.w_consistency
-    per_env_consistency = [
-        compute_consistency_score(
-            r.get("episodes_raw", []),
-            _WORKER_CFG.consistency_grid_mm,
-            _WORKER_CFG.consistency_yaw_bins,
-            _WORKER_CFG.consistency_min_episodes,
-        )
-        for r in per_env
-    ]
-    consistency_score = float(np.mean(per_env_consistency)) if per_env_consistency else 0.0
-    combined_fitness  = (1.0 - w) * episode_fitness + w * consistency_score
 
     return {
-        "fitness":                 combined_fitness,
-        "episode_fitness":         episode_fitness,
-        "consistency_score":       consistency_score,
+        "fitness":                 episode_fitness,
         "fitness_std":             mean_key("fitness_std"),
         "left_fit":                mean_key("left_fit"),
         "right_fit":               mean_key("right_fit"),
@@ -756,6 +624,9 @@ class SimpleGATrainer:
         self.generation_plot_dir = os.path.join(self.cfg.output_dir, "generation_best")
         self.best_genome: Optional[np.ndarray] = None
         self.best_fitness = -float("inf")
+        self.best_train_collision_rate: float = float("nan")
+        self.best_val_fitness: float = float("nan")
+        self.best_val_coll: float = float("nan")
         # Full-population history — one entry per completed generation.
         self.pop_genomes_history:  List[np.ndarray] = []   # (n_gen, pop_size, genome_size)
         self.pop_fitness_history:  List[np.ndarray] = []   # (n_gen, pop_size)
@@ -765,7 +636,6 @@ class SimpleGATrainer:
             "best_alignment_mean": [], "best_sign_match_rate": [],
             "best_collision_rate": [], "best_proximity_mean": [],
             "best_avg_net_displacement_mm": [],
-            "best_consistency": [],
             "val_best_fitness": [], "val_collision_rate": [],
             "val_avg_net_displacement_mm": [],
         }
@@ -773,7 +643,7 @@ class SimpleGATrainer:
     def _make_policy(self, genome: np.ndarray) -> HistoryNNPolicy:
         p = HistoryNNPolicy(
             self.cfg.max_rotate1_deg, self.cfg.max_rotate2_deg,
-            self.cfg.iid_deadband_db, self.cfg.history_len, self.cfg.hidden_sizes,
+            self.cfg.history_len, self.cfg.hidden_sizes,
         )
         p.set_genome(genome)
         return p
@@ -781,7 +651,7 @@ class SimpleGATrainer:
     def init_population(self) -> List[np.ndarray]:
         gsize = HistoryNNPolicy(
             self.cfg.max_rotate1_deg, self.cfg.max_rotate2_deg,
-            self.cfg.iid_deadband_db, self.cfg.history_len, self.cfg.hidden_sizes,
+            self.cfg.history_len, self.cfg.hidden_sizes,
         ).genome_size()
         start_policy_path = os.path.join(self.cfg.output_dir, "start_policy.json")
         if os.path.exists(start_policy_path):
@@ -819,22 +689,8 @@ class SimpleGATrainer:
         for env_i, ev in enumerate(self.evs_train):
             rng = random.Random(self.cfg.seed + 10000 * (gen + 1) + 1000 * env_i)
             n   = self.cfg.episodes_per_policy
-            sl  = ev.sided_starts.get("left",  [])
-            sr  = ev.sided_starts.get("right", [])
-
-            if sl and sr:
-                # Guarantee 50/50 left/right wall starts so both IID signs are
-                # exercised every generation — prevents the policy converging to
-                # a single rotation direction (CCW/CW only).
-                # Left starts come FIRST; order preserved so evaluate() can split.
-                n_left  = n - n // 2
-                n_right = n // 2
-                starts  = [sl[rng.randrange(len(sl))] for _ in range(n_left)]
-                starts += [sr[rng.randrange(len(sr))] for _ in range(n_right)]
-                n_lefts_all.append(n_left)
-            else:
-                starts = [ev.sample_start(rng) for _ in range(n)]
-                n_lefts_all.append(0)  # plain mean, no anti-specialist split
+            starts = [ev.sample_start(rng) for _ in range(n)]
+            n_lefts_all.append(0)
 
             starts_all.append(starts)
         return starts_all, n_lefts_all
@@ -853,23 +709,9 @@ class SimpleGATrainer:
             return float(np.mean(vals)) if vals else float("nan")
 
         episode_fitness = mean_key("fitness")
-        w = self.cfg.w_consistency
-        per_env_consistency = [
-            compute_consistency_score(
-                r.get("episodes_raw", []),
-                self.cfg.consistency_grid_mm,
-                self.cfg.consistency_yaw_bins,
-                self.cfg.consistency_min_episodes,
-            )
-            for r in per_env
-        ]
-        consistency_score = float(np.mean(per_env_consistency)) if per_env_consistency else 0.0
-        combined_fitness  = (1.0 - w) * episode_fitness + w * consistency_score
 
         return {
-            "fitness":                 combined_fitness,
-            "episode_fitness":         episode_fitness,
-            "consistency_score":       consistency_score,
+            "fitness":                 episode_fitness,
             "fitness_std":             mean_key("fitness_std"),
             "left_fit":                mean_key("left_fit"),
             "right_fit":               mean_key("right_fit"),
@@ -935,14 +777,15 @@ class SimpleGATrainer:
                     fitness[i] = float(res["fitness"])
                     details[i] = res
 
-            f_np     = np.asarray(fitness, dtype=np.float32)
-            best_idx = int(np.argmax(f_np))
-            best_g   = pop[best_idx].copy()
-            best_res = details[best_idx]
-
-            if float(f_np[best_idx]) > self.best_fitness:
-                self.best_fitness = float(f_np[best_idx])
-                self.best_genome  = best_g.copy()
+            f_np       = np.asarray(fitness, dtype=np.float32)
+            order_asc  = np.argsort(f_np)
+            best_idx   = int(order_asc[-1])
+            median_idx = int(order_asc[len(order_asc) // 2])
+            worst_idx  = int(order_asc[0])
+            best_g     = pop[best_idx].copy()
+            best_res   = details[best_idx]
+            median_res = details[median_idx]
+            worst_res  = details[worst_idx]
 
             self.history["best_fitness"].append(float(np.max(f_np)))
             self.history["avg_fitness"].append(float(np.mean(f_np)))
@@ -953,7 +796,6 @@ class SimpleGATrainer:
             self.history["best_collision_rate"].append(float(best_res["collision_rate"]))
             self.history["best_proximity_mean"].append(float(best_res.get("proximity_mean", 0.0)))
             self.history["best_avg_net_displacement_mm"].append(float(best_res["avg_net_displacement_mm"]))
-            self.history["best_consistency"].append(float(best_res.get("consistency_score", float("nan"))))
 
             eps = best_res.get("episodes_raw", [])
             if eps:
@@ -975,16 +817,21 @@ class SimpleGATrainer:
             self.history["val_collision_rate"].append(val_coll)
             self.history["val_avg_net_displacement_mm"].append(val_net_disp)
 
+            if float(f_np[best_idx]) > self.best_fitness:
+                self.best_fitness              = float(f_np[best_idx])
+                self.best_genome               = best_g.copy()
+                self.best_train_collision_rate = float(best_res.get("collision_rate", float("nan")))
+                self.best_val_fitness          = val_fit
+                self.best_val_coll             = val_coll
+
             best_left_fit  = safe_float(best_res.get("left_fit",  float("nan")), float("nan"))
             best_right_fit = safe_float(best_res.get("right_fit", float("nan")), float("nan"))
             side_str = (f"L={best_left_fit:.3f} R={best_right_fit:.3f}"
                         if np.isfinite(best_left_fit) else "no-split")
-            best_consistency = self.history["best_consistency"][-1]
             print(
                 f"Gen {gen+1}: best={self.history['best_fitness'][-1]:.3f} [{side_str}], "
                 f"avg={self.history['avg_fitness'][-1]:.3f}, "
                 f"best_ep={best_ep_fit:.3f}, med_ep={median_ep_fit:.3f}, worst_ep={worst_ep_fit:.3f}, "
-                f"consist={best_consistency:.3f}, "
                 f"align={best_res['alignment_mean']:.3f}, "
                 f"sign_match={best_res['sign_match_rate']:.3f}, "
                 f"coll={best_res['collision_rate']:.3f}, "
@@ -995,9 +842,10 @@ class SimpleGATrainer:
                 np.stack([g.copy() for g in pop]),  # (pop_size, genome_size)
                 f_np.copy(),                         # (pop_size,)
             )
-            self._save_generation_best_plot(gen + 1, best_res, val_res)
+            self._save_generation_best_plot(gen + 1, best_res, median_res, worst_res, val_res)
             self._save_generation_best_genome(gen + 1, best_g, best_res, val_fit, val_coll)
             self._save_live_policy_probe(best_g)
+            self._save_live_best_policy(gen + 1)
 
             # ── Pushover: mid-run notification every PUSHOVER_EVERY_N generations ──
             is_last_gen = (gen == self.cfg.generations - 1)
@@ -1005,7 +853,7 @@ class SimpleGATrainer:
                 pushover_notify(
                     f"Gen {gen+1}/{self.cfg.generations} | {CONDITION}\n"
                     f"best={self.history['best_fitness'][-1]:.3f} [{side_str}]\n"
-                    f"consist={best_consistency:.3f}  coll={best_res['collision_rate']:.3f}\n"
+                    f"coll={best_res['collision_rate']:.3f}\n"
                     f"val_fit={val_fit:.3f}"
                 )
 
@@ -1034,7 +882,6 @@ class SimpleGATrainer:
             f"{self.cfg.generations} gens, pop={self.cfg.population_size}\n"
             f"best_ever={self.best_fitness:.3f}\n"
             f"last gen: best={self.history['best_fitness'][-1]:.3f}  "
-            f"consist={self.history['best_consistency'][-1]:.3f}  "
             f"coll={self.history['best_collision_rate'][-1]:.3f}",
             title=f"3Pi done: {CONDITION}",
         )
@@ -1055,59 +902,75 @@ class SimpleGATrainer:
         os.replace(tmp_path, path)
 
     def _save_generation_best_plot(self, generation_number: int, detail: Dict[str, Any],
+                                    median_detail: Optional[Dict[str, Any]],
+                                    worst_detail: Optional[Dict[str, Any]],
                                     validation_detail: Optional[Dict[str, Any]] = None) -> None:
         if not self.cfg.save_generation_best_plots:
             return
 
-        def _selection(episodes, n_left=0):
+        def _pick_best(episodes):
             if not episodes:
                 return None
-            fitnesses = np.array([safe_float(ep.get("fitness"), float("-inf")) for ep in episodes])
-            if n_left > 0 and n_left < len(episodes):
-                # Show best-left, best-right, worst-overall so both wall sides
-                # are always visible regardless of which side the policy prefers.
-                left_order  = np.argsort(fitnesses[:n_left])
-                right_order = np.argsort(fitnesses[n_left:])
-                worst_idx   = int(np.argmin(fitnesses))
-                best_left   = int(left_order[-1])               # index within left half
-                best_right  = int(right_order[-1]) + n_left     # index in full array
-                return [("BestL", best_left), ("BestR", best_right), ("Worst", worst_idx)]
-            order = np.argsort(fitnesses)
-            return [("Best", int(order[-1])), ("Median", int(order[len(order) // 2])), ("Worst", int(order[0]))]
+            return int(np.argmax([safe_float(ep.get("fitness"), float("-inf")) for ep in episodes]))
 
-        episodes_train = detail.get("episodes_raw", [])
-        n_left_train   = int(detail.get("n_left", 0))
-        sel_train      = _selection(episodes_train, n_left_train)
-        episodes_val   = validation_detail.get("episodes_raw", []) if validation_detail else []
-        sel_val        = _selection(episodes_val)
-        if sel_train is None:
+        def _pick_crash_or_random(episodes):
+            """Return (idx, had_crash). Picks worst-fitness crash; falls back to random."""
+            if not episodes:
+                return None, False
+            crashes = [i for i, ep in enumerate(episodes) if ep.get("collided", False)]
+            if crashes:
+                idx = int(min(crashes, key=lambda i: safe_float(episodes[i].get("fitness"), float("inf"))))
+                return idx, True
+            return int(np.random.randint(len(episodes))), False
+
+        def _draw(sim, episodes, idx, ax, label, show_legend=False):
+            if idx is None or not episodes:
+                ax.set_visible(False)
+                return
+            ep = episodes[idx]
+            draw_episode_on_axis(sim, ep, ax,
+                                 f"{label} | ep_fit={safe_float(ep.get('fitness'), float('nan')):.2f} | end={ep.get('end_reason', '?')}",
+                                 show_legend=show_legend)
+
+        episodes_best   = detail.get("episodes_raw", [])
+        episodes_median = median_detail.get("episodes_raw", []) if median_detail else []
+        episodes_worst  = worst_detail.get("episodes_raw",  []) if worst_detail  else []
+        if not episodes_best:
             return
-        os.makedirs(self.generation_plot_dir, exist_ok=True)
 
-        has_val = sel_val is not None and self.ev_validation is not None
+        best_idx             = _pick_best(episodes_best)
+        crash_idx, had_crash = _pick_crash_or_random(episodes_best)
+        median_ep_idx        = _pick_best(episodes_median)
+        worst_ep_idx         = _pick_best(episodes_worst)
+
+        os.makedirs(self.generation_plot_dir, exist_ok=True)
         train_fit = safe_float(detail.get("fitness"), float("nan"))
+        has_val   = validation_detail is not None and self.ev_validation is not None
+
+        n_rows = 2 if has_val else 1
+        fig, axes = plt.subplots(n_rows, 4, figsize=(24, 6 * n_rows))
+        axes = np.asarray(axes).reshape(n_rows, 4)
+
+        _draw(self.sim, episodes_best,   best_idx,     axes[0, 0], "Best",                         show_legend=True)
+        _draw(self.sim, episodes_best,   crash_idx,    axes[0, 1], "Crash" if had_crash else "Random")
+        _draw(self.sim, episodes_median, median_ep_idx,axes[0, 2], "Median policy")
+        _draw(self.sim, episodes_worst,  worst_ep_idx, axes[0, 3], "Worst policy")
+
         if has_val:
-            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-            axes = np.asarray(axes)
-            val_fit = safe_float(validation_detail.get("fitness"), float("nan")) if validation_detail else float("nan")
-            for j, (label, idx) in enumerate(sel_train):
-                ep = episodes_train[idx]
-                draw_episode_on_axis(self.sim, ep, axes[0, j],
-                                     f"Train {label} | ep_fit={safe_float(ep.get('fitness'), float('nan')):.2f} | end={ep.get('end_reason', '?')}",
-                                     show_legend=(j == 0))
-            for j, (label, idx) in enumerate(sel_val):
-                ep = episodes_val[idx]
-                draw_episode_on_axis(self.ev_validation.sim, ep, axes[1, j],
-                                     f"Val {label} | ep_fit={safe_float(ep.get('fitness'), float('nan')):.2f} | end={ep.get('end_reason', '?')}",
-                                     show_legend=(j == 0))
+            episodes_val             = validation_detail.get("episodes_raw", [])
+            val_fit                  = safe_float(validation_detail.get("fitness"), float("nan"))
+            val_best_idx             = _pick_best(episodes_val)
+            val_crash_idx, val_crash = _pick_crash_or_random(episodes_val)
+            val_fits       = [safe_float(ep.get("fitness"), float("-inf")) for ep in episodes_val]
+            val_order      = np.argsort(val_fits)
+            val_median_idx = int(val_order[len(val_order) // 2]) if episodes_val else None
+            val_worst_idx  = int(val_order[0])                   if episodes_val else None
+            _draw(self.ev_validation.sim, episodes_val, val_best_idx,   axes[1, 0], "Val Best",                            show_legend=True)
+            _draw(self.ev_validation.sim, episodes_val, val_crash_idx,  axes[1, 1], "Val Crash" if val_crash else "Val Random")
+            _draw(self.ev_validation.sim, episodes_val, val_median_idx, axes[1, 2], "Val Median ep")
+            _draw(self.ev_validation.sim, episodes_val, val_worst_idx,  axes[1, 3], "Val Worst ep")
             fig.suptitle(f"Gen {generation_number} | train_fit={train_fit:.2f} | val_fit={val_fit:.2f}", fontsize=14)
         else:
-            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-            for ax, (label, idx) in zip(axes, sel_train):
-                ep = episodes_train[idx]
-                draw_episode_on_axis(self.sim, ep, ax,
-                                     f"Train {label} | ep_fit={safe_float(ep.get('fitness'), float('nan')):.2f} | end={ep.get('end_reason', '?')}",
-                                     show_legend=(label == "Best"))
             fig.suptitle(f"Gen {generation_number} | train_fit={train_fit:.2f}", fontsize=14)
 
         fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
@@ -1158,7 +1021,7 @@ class SimpleGATrainer:
         ax1 = axes[1]
         ax1.plot(g, self.history["best_alignment_mean"],  label="Alignment")
         ax1.plot(g, self.history["best_sign_match_rate"], label="Sign match")
-        ax1.plot(g, self.history["best_collision_rate"],  label="Collision rate")
+        ax1.plot(g, self.history["best_collision_rate"],  label="Best collision rate")
         ax1.plot(g, self.history["best_proximity_mean"],  label="Proximity")
         if np.isfinite(np.asarray(self.history["val_collision_rate"], dtype=np.float64)).any():
             ax1.plot(g, self.history["val_collision_rate"], label="Val collision")
@@ -1182,7 +1045,6 @@ class SimpleGATrainer:
                 "genome_size":          len(genome),
                 "history_len":          self.cfg.history_len,
                 "hidden_sizes":         list(self.cfg.hidden_sizes),
-                "iid_deadband_db":      self.cfg.iid_deadband_db,
                 "max_rotate1_deg":      self.cfg.max_rotate1_deg,
                 "max_rotate2_deg":      self.cfg.max_rotate2_deg,
                 "train_fitness":        float(detail.get("fitness",        float("nan"))),
@@ -1196,6 +1058,33 @@ class SimpleGATrainer:
         os.makedirs(self.generation_plot_dir, exist_ok=True)
         plot_policy_curve(self._make_policy(genome), self.cfg, self.generation_plot_dir,
                           filename="live_policy_probe_best.png")
+
+    def _save_live_best_policy(self, generation_number: int) -> None:
+        """Atomically write the all-time best policy to the output root after each generation."""
+        if self.best_genome is None:
+            return
+        os.makedirs(self.cfg.output_dir, exist_ok=True)
+        path     = os.path.join(self.cfg.output_dir, "best_policy.json")
+        tmp_path = os.path.join(self.cfg.output_dir, "best_policy.tmp.json")
+        with open(tmp_path, "w") as f:
+            json.dump({
+                "policy_type":          "HistoryNNPolicy_v2",
+                "symmetry":             "iid_sign_wrapper",
+                "condition":            CONDITION,
+                "description":          DESCRIPTION,
+                "best_at_generation":   generation_number,
+                "genome":               self.best_genome.tolist(),
+                "genome_size":          len(self.best_genome),
+                "history_len":          self.cfg.history_len,
+                "hidden_sizes":         list(self.cfg.hidden_sizes),
+                "max_rotate1_deg":      self.cfg.max_rotate1_deg,
+                "max_rotate2_deg":      self.cfg.max_rotate2_deg,
+                "train_fitness":        self.best_fitness,
+                "train_collision_rate": self.best_train_collision_rate,
+                "val_fitness":          self.best_val_fitness,
+                "val_collision_rate":   self.best_val_coll,
+            }, f, indent=2)
+        os.replace(tmp_path, path)
 
 
 # ── Plotting helpers ───────────────────────────────────────────────────────────
@@ -1224,13 +1113,15 @@ def plot_policy_curve(policy: HistoryNNPolicy, cfg: Config, output_dir: str,
             iid_val      = iid_sign * 6.0
             iid_norm_val = float(np.clip(abs(iid_val) / 12.0, 0.0, 2.0))  # canonical
             dist_norm_val = float(np.clip(dist / 2000.0, 0.0, 2.0))
-            hist_vec = np.zeros(cfg.history_len * 6, dtype=np.float32)
+            fdim = policy.feature_dim
+            hist_vec = np.zeros(cfg.history_len * fdim, dtype=np.float32)
             for step in range(cfg.history_len):
-                hist_vec[step*6 + 0] = iid_norm_val
-                hist_vec[step*6 + 1] = dist_norm_val
-                hist_vec[step*6 + 4] = 1.0
+                hist_vec[step*fdim + 0] = iid_norm_val   # canonical_iid_norm
+                hist_vec[step*fdim + 1] = dist_norm_val  # dist_norm
+                hist_vec[step*fdim + 4] = 1.0            # prev_drive_norm
+                hist_vec[step*fdim + 5] = 1.0            # echo_present_prob
             rotate1 = policy.decide_rotate1(hist_vec, iid_val)
-            rotate2 = policy.decide_rotate2(hist_vec, iid_val, dist)
+            rotate2 = policy.decide_rotate2(hist_vec, iid_val, dist, echo_present_prob=1.0)
             total   = rotate1 + rotate2
             marker  = "o" if iid_sign > 0 else "s"
             color   = "C0" if iid_sign > 0 else "C1"
@@ -1257,12 +1148,24 @@ def draw_episode_on_axis(sim: EnvironmentSimulator, episode: Dict[str, Any],
     traj = episode.get("trajectory", [])
     if not traj:
         return
+    from matplotlib.collections import LineCollection
     xs = [s["x"] for s in traj]
     ys = [s["y"] for s in traj]
+    iids = [safe_float(s.get("iid_db"), 0.0) for s in traj]
     walls = getattr(sim.arena, "walls", None)
     if walls is not None and len(walls) > 0:
         ax.scatter(walls[:, 0], walls[:, 1], s=1, color="#9e9e9e", alpha=0.25, label="Walls")
-    ax.plot(xs, ys, "-", color="#1565c0", linewidth=2, label="Trajectory")
+    if len(xs) >= 2:
+        points = np.array([xs, ys]).T.reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+        lc = LineCollection(segments, cmap="RdBu_r", norm=plt.Normalize(-12, 12), linewidth=2, zorder=2)
+        lc.set_array(np.array(iids[:-1]))
+        ax.add_collection(lc)
+        if show_legend:
+            cb = plt.colorbar(lc, ax=ax, shrink=0.7)
+            cb.set_label("IID (dB)\nred=wall left, blue=wall right")
+    else:
+        ax.plot(xs, ys, "-", color="#1565c0", linewidth=2)
     ax.scatter(xs[0],  ys[0],  s=60, color="#2e7d32", label="Start")
     ax.scatter(xs[-1], ys[-1], s=60, marker="x", color="#c62828", label="End")
     STRIDE = 5; ALEN = 150.0
@@ -1285,7 +1188,7 @@ def draw_episode_on_axis(sim: EnvironmentSimulator, episode: Dict[str, Any],
         title = f"{title} | end={episode.get('end_reason', '?')}"
     ax.set_title(title); ax.set_aspect("equal", adjustable="box"); ax.grid(True, alpha=0.3)
     if show_legend:
-        ax.legend(loc="best")
+        ax.legend(loc="upper left")
 
 
 def plot_episode(sim: EnvironmentSimulator, episode: Dict[str, Any],
@@ -1300,7 +1203,7 @@ def plot_episode(sim: EnvironmentSimulator, episode: Dict[str, Any],
 def write_overview(cfg: Config, output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
     probe = HistoryNNPolicy(cfg.max_rotate1_deg, cfg.max_rotate2_deg,
-                            cfg.iid_deadband_db, cfg.history_len, cfg.hidden_sizes)
+                            cfg.history_len, cfg.hidden_sizes)
     lines = [
         "# History-NN GA (v2 — IID sign wrapper)",
         "",
@@ -1369,6 +1272,7 @@ def main() -> None:
         print(f"Cleared '{cfg.output_dir}'.")
 
     os.makedirs(cfg.output_dir, exist_ok=True)
+    CodeLogger.log_code(cfg.output_dir, ['.', 'Library'], label=CONDITION)
     write_overview(cfg, cfg.output_dir)
 
     print("History-NN GA training  (v2 — IID sign wrapper)")
@@ -1386,7 +1290,7 @@ def main() -> None:
     best_genome = trainer.train()
 
     best_policy = HistoryNNPolicy(cfg.max_rotate1_deg, cfg.max_rotate2_deg,
-                                   cfg.iid_deadband_db, cfg.history_len, cfg.hidden_sizes)
+                                   cfg.history_len, cfg.hidden_sizes)
     best_policy.set_genome(best_genome)
 
     rng          = random.Random(cfg.seed + 999_999)
@@ -1418,7 +1322,6 @@ def main() -> None:
             "genome_size":          len(best_genome),
             "history_len":          cfg.history_len,
             "hidden_sizes":         list(cfg.hidden_sizes),
-            "iid_deadband_db":      cfg.iid_deadband_db,
             "max_rotate1_deg":      cfg.max_rotate1_deg,
             "max_rotate2_deg":      cfg.max_rotate2_deg,
             "train_fitness":        float(final.get("fitness",        float("nan"))),

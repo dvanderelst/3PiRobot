@@ -15,21 +15,21 @@ import time
 import numpy as np
 from Library import Dialog
 from Library import Client
+from Library import CodeLogger
 from Library import DataStorage
 from Library import LorexTracker
 from Library import PauseControl
 from Library import PushOver
 from Library.PolicyController import PolicyController, load_policy
-from Library.EchoProcessor import EchoProcessor
 from LorexLib.Environment import capture_environment_layout
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-CONDITION       = "memory05"              # sub-folder under Policy/ that holds the JSON
+CONDITION       = "memory06"              # sub-folder under Policy/ that holds the JSON
 ROBOT_ID        = 1
-SESSION         = "policy_memory05_01"     # data session folder name
-MAX_STEPS       = 200
+SESSION         = "policy_memory06b"     # data session folder name
+MAX_STEPS       = 500
 FIXED_DRIVE_MM  = 100.0
 wait_for_confirmation = False
 
@@ -38,14 +38,12 @@ do_rotation     = True
 do_translation  = True
 
 POLICY_DIR          = "Policy"               # root folder containing CONDITION sub-folder
-ECHO_PROCESSOR_DIR  = "EchoProcessor"        # folder containing echoprocessor_artifacts.pth
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 
 policy_path = f"{POLICY_DIR}/{CONDITION}/best_policy.json"
 policy      = load_policy(policy_path)
 ctrl        = PolicyController(policy, fixed_drive_mm=FIXED_DRIVE_MM)
-ep          = EchoProcessor.load(ECHO_PROCESSOR_DIR)
 
 control = PauseControl.PauseControl()
 client  = Client.Client(robot_number=ROBOT_ID)
@@ -54,6 +52,7 @@ writer  = DataStorage.DataWriter(SESSION, autoclear=True, verbose=False)
 writer.add_file("Library/PolicyController.py")
 writer.add_file("SCRIPT_RunPolicy.py")
 snapshot = capture_environment_layout(save_root=f"Data/{SESSION}")
+CodeLogger.log_code(f"Data/{SESSION}", ['.', 'Library'], label=SESSION)
 
 # Warm up sonar (flush stale buffers)
 for _ in range(5):
@@ -72,28 +71,23 @@ for step in range(MAX_STEPS):
     rotate1 = ctrl.compute_rotate1()
     if do_rotation:
         client.step(angle=rotate1)
-        time.sleep(0.15)
+        time.sleep(0.5)
 
     # --- Sonar ping at post-rotate1 orientation ---
     sonar_package = client.read_and_process(do_ping=True, plot=True)
     position      = tracker.get_position(ROBOT_ID)
-
-    sonar_package_iid = sonar_package['corrected_iid']
-    sonar_package_distance = sonar_package['corrected_distance']
 
     if sonar_package is None:
         print(f"Warning: No sonar data at step {step}, skipping.")
         continue
 
     sonar_package["robot_number"] = ROBOT_ID
-    sonar_lr       = np.asarray(sonar_package["sonar_data"], dtype=np.float32)[:, [1, 2]]
-    dist_axis_mm   = np.asarray(sonar_package["corrected_distance_axis"], dtype=np.float32) * 1000.0
-    ep_result      = ep.predict(sonar_lr, dist_axis_mm)
-    iid_db         = float(ep_result["iid_db"][0])
-    dist_mm        = float(ep_result["distance_mm"][0])
+    iid_db            = float(sonar_package['corrected_iid'])
+    dist_mm           = float(sonar_package['corrected_distance']) * 1000.0
+    echo_present_prob = float(sonar_package.get('echo_present_prob', 1.0))
 
     # --- Rotate2: body turn based on current ping ---
-    rotate2 = ctrl.compute_rotate2(iid_db, dist_mm)
+    rotate2 = ctrl.compute_rotate2(iid_db, dist_mm, echo_present_prob)
 
     rob_x       = position["x"]
     rob_y       = position["y"]
@@ -102,8 +96,6 @@ for step in range(MAX_STEPS):
         pos_str = f"({rob_x:.3f}, {rob_y:.3f}, {rob_yaw_deg:.1f}°)"
     else:
         pos_str = "N/A"
-
-    print(f"Sonar package data: IID={sonar_package_iid:+6.2f} dB, Distance={1000 * sonar_package_distance:6.0f} mm")
 
     print(
         f"Step {step:3d}: IID={iid_db:+6.2f} dB  dist={dist_mm:6.0f} mm  "
@@ -114,14 +106,14 @@ for step in range(MAX_STEPS):
     # --- Execute rotate2 and drive ---
     if do_rotation:
         client.step(angle=rotate2)
-        time.sleep(0.15)
+        time.sleep(0.5)
 
     if do_translation:
         client.step(distance=FIXED_DRIVE_MM / 1000.0)   # Client expects metres
         time.sleep(0.15)
 
     # --- Update controller history ---
-    ctrl.update(rotate1, rotate2, iid_db, dist_mm)
+    ctrl.update(rotate1, rotate2, iid_db, dist_mm, echo_present_prob=echo_present_prob)
 
     # --- Save data ---
     writer.save_data(

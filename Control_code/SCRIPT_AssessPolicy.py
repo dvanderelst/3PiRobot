@@ -5,11 +5,11 @@ Policy assessment script: visualise the weights of a saved HistoryNNPolicy.
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 GENERATION     = "last"        # integer generation number, "last", or None for best_policy.json
-POLICY_DIR     = "Policy/memory05"           # where training saved the policy JSON files
+POLICY_DIR     = "Policy/memory05b"           # where training saved the policy JSON files
 ASSESSMENT_DIR = "PolicyAssessment" # where plots are written (created if needed)
 
 # Trajectory assessment
-TRAIN_SESSIONS = ["sessionB02", "sessionB03", "sessionB04", "sessionB05"]
+TRAIN_SESSIONS = ["sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"]
 N_TRIALS       = 4   # episodes per session
 MAX_STEPS      = 150  # steps per episode
 SEED           = 42
@@ -26,9 +26,9 @@ from matplotlib.colors import Normalize
 import numpy as np
 
 
-# ── Feature labels for the 6-element history row ──────────────────────────────
-FEAT_NAMES  = ["iid", "dist", "rot1", "rot2", "drive", "blk"]
-FEAT_COLORS = ["#e07b54", "#5b9bd5", "#70ad47", "#ffc000", "#7030a0", "#808080"]
+# ── Feature labels for the 7-element history row ──────────────────────────────
+FEAT_NAMES  = ["iid", "dist", "rot1", "rot2", "drive", "blk", "echo"]
+FEAT_COLORS = ["#e07b54", "#5b9bd5", "#70ad47", "#ffc000", "#7030a0", "#808080", "#17becf"]
 
 
 # ── I/O helpers ───────────────────────────────────────────────────────────────
@@ -47,13 +47,13 @@ def reconstruct_params(data: dict):
     """
     history_len = int(data["history_len"])
     h1, h2 = data["hidden_sizes"]
-    in_dim = history_len * 6
+    in_dim = history_len * 7
 
     shapes = [
         (h1, in_dim), (h1,),       # shared encoder  W1, b1
         (h2, h1),     (h2,),       # head1 hidden    W2a, b2a
         (1,  h2),     (1,),        # head1 output    W3a, b3a
-        (h2, h1 + 2), (h2,),       # head2 hidden    W2b, b2b  (+2 = iid_n, dist_n injected)
+        (h2, h1 + 3), (h2,),       # head2 hidden    W2b, b2b  (+3 = iid_n, dist_n, echo_n injected)
         (1,  h2),     (1,),        # head2 output    W3b, b3b
     ]
     genome = np.array(data["genome"], dtype=np.float32)
@@ -130,10 +130,10 @@ def plot_weights(params, arch: dict, suptitle: str, output_path: str) -> None:
     bar_chart(ax, b1, row_h1, f"Shared encoder  b1  ({h1},)", ylabel="bias")
 
     # ── Row 1: W1 feature importance & temporal importance ────────────────────
-    W1_r = np.abs(W1).reshape(h1, hl, 6)   # (units, steps, features)
+    W1_r = np.abs(W1).reshape(h1, hl, 7)   # (units, steps, features)
 
     ax = fig.add_subplot(gs[1, :2])
-    feat_imp = W1_r.mean(axis=(0, 1))       # average over units & steps → (6,)
+    feat_imp = W1_r.mean(axis=(0, 1))       # average over units & steps → (7,)
     bars = ax.bar(FEAT_NAMES, feat_imp, color=FEAT_COLORS,
                   edgecolor="black", linewidth=0.5)
     for b, v in zip(bars, feat_imp):
@@ -162,26 +162,27 @@ def plot_weights(params, arch: dict, suptitle: str, output_path: str) -> None:
     bar_chart(ax, W3a.reshape(-1), row_h2, f"Head1 output  W3a  (1×{h2})")
 
     ax = fig.add_subplot(gs[2, 3])
-    eff1 = effective_sensitivity(W3a, W2a, W1).reshape(hl, 6)
+    eff1 = effective_sensitivity(W3a, W2a, W1).reshape(hl, 7)
     heatmap(ax, eff1, step_labels, FEAT_NAMES,
             "Head1 effective sensitivity\n(W3a·W2a·W1, linear approx)")
 
     # ── Row 3: Head 2 — rotate2 (body turn) ──────────────────────────────────
-    col_w2b = row_h1 + ["iid★", "dist★"]   # last 2 columns = injected measurement
+    col_w2b = row_h1 + ["iid★", "dist★", "echo★"]   # last 3 columns = injected measurement
     ax = fig.add_subplot(gs[3, :2])
     heatmap(ax, W2b, row_h2, col_w2b,
-            f"Head2 hidden  W2b  ({h2}×{h1+2})  ★=injected current measurement")
+            f"Head2 hidden  W2b  ({h2}×{h1+3})  ★=injected current measurement")
 
     ax = fig.add_subplot(gs[3, 2])
     bar_chart(ax, W3b.reshape(-1), row_h2, f"Head2 output  W3b  (1×{h2})")
 
     ax = fig.add_subplot(gs[3, 3])
-    # Sensitivity of head2 to the TWO injected features (iid_n, dist_n)
-    eff2_inj = (W3b @ W2b[:, h1:]).reshape(-1)     # (2,)
-    colors = ["#e07b54", "#5b9bd5"]
-    ax.bar(["iid★", "dist★"], eff2_inj, color=colors, edgecolor="black", linewidth=0.5)
+    # Sensitivity of head2 to the THREE injected features (iid_n, dist_n, echo_n)
+    eff2_inj = (W3b @ W2b[:, h1:]).reshape(-1)     # (3,)
+    inj_labels = ["iid★", "dist★", "echo★"]
+    colors = ["#e07b54", "#5b9bd5", "#17becf"]
+    ax.bar(inj_labels, eff2_inj, color=colors, edgecolor="black", linewidth=0.5)
     ax.axhline(0, color="black", linewidth=0.6)
-    for i, (lbl, v) in enumerate(zip(["iid★", "dist★"], eff2_inj)):
+    for i, (lbl, v) in enumerate(zip(inj_labels, eff2_inj)):
         ax.text(i, v, f"{v:.3f}",
                 ha="center", va="bottom" if v >= 0 else "top", fontsize=9)
     ax.set_title("Head2 sensitivity to\ninjected measurement (linear approx)",
@@ -194,7 +195,7 @@ def plot_weights(params, arch: dict, suptitle: str, output_path: str) -> None:
 
 
 def in_dim(arch: dict) -> int:
-    return arch["history_len"] * 6
+    return arch["history_len"] * 7
 
 
 # ── Input–output correlation ──────────────────────────────────────────────────
@@ -206,7 +207,7 @@ def collect_history_windows(results: dict, history_len: int):
     (zero-padded when t < history_len) and produced rotate2.
 
     Returns:
-        X : np.ndarray, shape (N, history_len, 6)  — raw feature values
+        X : np.ndarray, shape (N, history_len, 7)  — raw feature values
         y : np.ndarray, shape (N,)                 — -rotate2_deg
     """
     X_rows, y_rows = [], []
@@ -216,7 +217,7 @@ def collect_history_windows(results: dict, history_len: int):
             for t in range(1, len(traj)):
                 # Canonicalise based on the IID at step t (the step that produced rotate2).
                 flip = traj[t]["iid_db"] < 0
-                window = np.zeros((history_len, 6), dtype=float)
+                window = np.zeros((history_len, 7), dtype=float)
                 for s in range(history_len):
                     src = t - history_len + s
                     if src >= 0:
@@ -229,6 +230,7 @@ def collect_history_windows(results: dict, history_len: int):
                             -st["rotate2_deg"] if flip else st["rotate2_deg"],
                             st["executed_drive_mm"],
                             float(st["blocked"]),
+                            float(st.get("echo_present_prob", 1.0)),
                         ]
                 X_rows.append(window)
                 y_rows.append(traj[t]["rotate2_deg"] if flip else -traj[t]["rotate2_deg"])
@@ -238,7 +240,7 @@ def collect_history_windows(results: dict, history_len: int):
 def plot_input_correlations(results: dict, arch: dict, gen, output_path: str) -> None:
     """Heatmap of Pearson r between sensory inputs (iid, dist) and -rotate2."""
     hl = arch["history_len"]
-    X, y = collect_history_windows(results, hl)     # X: (N, hl, 6)
+    X, y = collect_history_windows(results, hl)     # X: (N, hl, 7)
 
     # Only sensory features: iid=col0, dist=col1
     sensor_indices = [0, 1]
@@ -455,7 +457,6 @@ def make_policy(data: dict):
     policy = HistoryNNPolicy(
         max_rotate1_deg=data["max_rotate1_deg"],
         max_rotate2_deg=data["max_rotate2_deg"],
-        deadband_db=data["iid_deadband_db"],
         history_len=data["history_len"],
         hidden_sizes=tuple(data["hidden_sizes"]),
     )
@@ -488,7 +489,6 @@ def run_episodes(data: dict, sessions: list, n_trials: int,
         cfg.history_len             = data["history_len"]
         cfg.max_rotate1_deg         = data["max_rotate1_deg"]
         cfg.max_rotate2_deg         = data["max_rotate2_deg"]
-        cfg.iid_deadband_db         = data["iid_deadband_db"]
         cfg.quiet_setup             = True
         cfg.use_empirical_starts    = True
         cfg.randomize_empirical_yaw = True
@@ -652,13 +652,13 @@ def main():
     plot_trajectories(results, gen, traj_file)
 
     look_file = os.path.join(assessment_dir, f"plot_look_vs_drive_gen{gen}.png")
-    plot_look_vs_drive(results, data["iid_deadband_db"], gen, look_file)
+    plot_look_vs_drive(results, data.get("iid_deadband_db", 0.0), gen, look_file)
 
     corr_file = os.path.join(assessment_dir, f"plot_input_correlations_gen{gen}.png")
     plot_input_correlations(results, arch, gen, corr_file)
 
     hist_file = os.path.join(assessment_dir, f"plot_rot2_histogram_gen{gen}.png")
-    plot_rot2_histogram(results, data["iid_deadband_db"], gen, hist_file)
+    plot_rot2_histogram(results, data.get("iid_deadband_db", 0.0), gen, hist_file)
 
 
 if __name__ == "__main__":
