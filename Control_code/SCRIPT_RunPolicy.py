@@ -26,9 +26,9 @@ from LorexLib.Environment import capture_environment_layout
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-CONDITION       = "memory06"              # sub-folder under Policy/ that holds the JSON
+CONDITION       = "memory09"              # sub-folder under Policy/ that holds the JSON
 ROBOT_ID        = 1
-SESSION         = "policy_memory06b"     # data session folder name
+SESSION         = "policy_memory09a"     # data session folder name
 MAX_STEPS       = 500
 FIXED_DRIVE_MM  = 100.0
 wait_for_confirmation = False

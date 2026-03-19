@@ -15,8 +15,7 @@ v2 solution: the policy itself enforces bilateral symmetry via an IID sign wrapp
 baked into decide_rotate1 / decide_rotate2.  See HistoryNNPolicy docstring for
 details.  Episode-level mirroring is removed entirely.
 """
-
-import csv
+import collections
 import json
 import os
 import random
@@ -24,10 +23,8 @@ import shutil
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from concurrent.futures import ProcessPoolExecutor
-import collections
 import dataclasses
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
@@ -62,7 +59,7 @@ def pushover_notify(message: str, title: str = "3PiRobot training") -> None:
 # Set CONDITION to a short label for this run; results go to Policy/<CONDITION>/.
 # If that folder already exists and is non-empty, the script will ask via a
 # dialog whether to overwrite it or abort.
-CONDITION   = "memory07"   # subfolder under Policy
+CONDITION   = "memory10"   # subfolder under Policy
 DESCRIPTION = "Progressive steps 15→100 over 20 gens; geometric distance emulator, IID-only NN, 90° profile."
 
 # ── Pushover notifications ───────────────────────────────────────────────────────
@@ -72,7 +69,7 @@ PUSHOVER_EVERY_N  = 10    # send a notification every N generations (0 = disable
 
 @dataclass
 class Config:
-    history_len: int = 7
+    history_len: int = 5
     seed: int = 42
     session_name: str = "sessionB01"
     train_session_names: Optional[List[str]] = field(
@@ -80,14 +77,35 @@ class Config:
     )
     validation_session_name: Optional[str] = "sessionB04"
 
+    # ── Fitness ──────────────────────────────────────────────────────────────────
+    # fitness = mean(step_reward) * collision_discount
+    #
+    # step_reward = max(0, 1.0 - w_turn(clearance) * (sinuosity - 1.0))
+    #
+    # sinuosity   = path_length / straight_line_distance over a rolling window
+    #               capped at 2.0 (1.0 = perfectly straight, 2.0 = very tortuous)
+    #               window=3 is short enough that zigzag turns cannot cancel each other out
+    #
+    # w_turn(clearance) = w_turn_max * clip((clearance - free_turn_distance_mm) / (open_space_distance_mm - free_turn_distance_mm), 0, 1)
+    #               → 0.0 at or below free_turn_distance_mm  (turns completely free — robot can make emergency turns)
+    #               → w_turn_max at open_space_distance_mm   (orbiting/circling heavily penalised)
+    #
+    # collision_discount = collision_fitness_scale if collided else 1.0
+    open_space_distance_mm:  float = 1000.0  # clearance at which sinuosity penalty reaches its maximum (w_turn_max)
+    free_turn_distance_mm:   float = 300.0   # clearance below which turns are completely free (emergency turning zone)
+    w_turn_max:              float = 1.25     # sinuosity penalty weight in open space
+    sinuosity_window:        int   = 15      # short rolling window — prevents zigzag cancellation exploit
+    collision_distance_mm:   float = 150.0  # hard collision threshold → episode ends
+    collision_fitness_scale: float = 0.2    # fitness multiplier applied when episode ends in collision
+
     # Action limits
     max_rotate1_deg: float = 45.0
     max_rotate2_deg: float = 45.0
     fixed_drive_mm: float = 100.0
-    hidden_sizes: Tuple[int, int] = (16, 8)
+    hidden_sizes: Tuple[int, int] = (16, 16)
 
     # GA
-    population_size: int = 50
+    population_size: int = 75
     generations: int = 150
     elitism_count: int = 10   # keep top-n
     mutation_rate: float = 0.05   # ~40/890 weights perturbed per offspring; was 0.2
@@ -96,28 +114,26 @@ class Config:
 
     # Evaluation
     episodes_per_policy: int = 16
-    max_steps: int = 15
+    max_steps: int = 200
     # Start positions are loaded from pre-computed JSON files produced by
     # SCRIPT_ComputeValidStarts.py.  Set starts_suffix to select which file:
     #   "starts_headon"    — robot faces a nearby wall (hardest)
     #   "starts_wall_left" / "starts_wall_right" — wall to one side
     #   "valid_starts"     — full arena, any heading
-    starts_dir: str    = "ValidStarts"
-    starts_suffix: str = "starts_headon"
+    # Set starts_suffix_secondary + starts_mix_ratio to blend two pools.
+    # e.g. 50% headon + 50% valid_starts ensures urgent wall cases are always
+    # represented while also exposing the robot to open-space situations.
+    starts_dir: str                      = "ValidStarts"
+    starts_suffix: str                   = "starts_headon"
+    starts_suffix_secondary: Optional[str] = "valid_starts"  # None to disable mixing
+    starts_mix_ratio: float              = 0.8   # fraction sampled from primary (starts_suffix)
     validation_episodes_per_generation: int = 16
 
     # Progressive difficulty
-    use_progressive_steps: bool = True
+    use_progressive_steps: bool = False
     progressive_steps_start: int = 15
     progressive_steps_end: int = 250
     progressive_steps_generations: int = 30
-
-    # Fitness
-    w_turn_penalty: float = 2.0
-    sinuosity_window: int = 15
-    warning_distance_mm: float = 500.0
-    collision_distance_mm: float = 150.0
-    collision_fitness_scale: float = 0.5
 
     # IO
     output_dir: str = f"Policy/{CONDITION}"
@@ -272,6 +288,31 @@ class HistoryNNPolicy:
         rotate2_canonical = float(np.clip(y[0, 0], -1.0, 1.0)) * self.max_rotate2_deg
         return -rotate2_canonical if flip else rotate2_canonical
 
+    def decide_rotate1_with_h1(self, h1: np.ndarray, last_iid_db: float) -> float:
+        """Head 1 using pre-computed shared h1 (avoids recomputing for decide_rotate2)."""
+        flip = safe_float(last_iid_db, 0.0) < 0.0
+        w2a, b2a, w3a, b3a = self.params[2], self.params[3], self.params[4], self.params[5]
+        h2 = np.tanh(w2a @ h1 + b2a.reshape(-1, 1))
+        y  = np.tanh(w3a @ h2 + b3a.reshape(-1, 1))
+        rotate1_canonical = float(np.clip(y[0, 0], -1.0, 1.0)) * self.max_rotate1_deg
+        return -rotate1_canonical if flip else rotate1_canonical
+
+    def decide_rotate2_with_h1(self, h1: np.ndarray, current_iid_db: float,
+                                current_dist_mm: float, echo_present_prob: float = 1.0) -> float:
+        """Head 2 using pre-computed shared h1 (avoids recomputing from hist_vec)."""
+        phys = safe_float(current_iid_db, 0.0)
+        flip = phys < 0.0
+        canonical_iid = abs(phys)
+        iid_n  = float(np.clip(canonical_iid / 12.0, 0.0, 2.0))
+        dist_n = float(np.clip(safe_float(current_dist_mm, 1800.0) / 2000.0, 0.0, 2.0))
+        echo_n = float(np.clip(safe_float(echo_present_prob, 1.0), 0.0, 1.0))
+        h1_aug = np.concatenate([h1, np.array([[iid_n], [dist_n], [echo_n]], dtype=np.float32)], axis=0)
+        w2b, b2b, w3b, b3b = self.params[6], self.params[7], self.params[8], self.params[9]
+        h2 = np.tanh(w2b @ h1_aug + b2b.reshape(-1, 1))
+        y  = np.tanh(w3b @ h2 + b3b.reshape(-1, 1))
+        rotate2_canonical = float(np.clip(y[0, 0], -1.0, 1.0)) * self.max_rotate2_deg
+        return -rotate2_canonical if flip else rotate2_canonical
+
 
 def config_from_dict(d: Dict[str, Any]) -> Config:
     known = {f.name for f in dataclasses.fields(Config)}
@@ -283,6 +324,7 @@ class Evaluator:
         self.sim = simulator
         self.cfg = cfg
         self.starts = self._load_starts()
+        self.starts_secondary = self._load_secondary_starts()
         walls = getattr(self.sim.arena, "walls", np.array([], dtype=np.float32))
         self._wall_points = np.asarray(walls, dtype=np.float32) if walls is not None else np.array([], dtype=np.float32)
 
@@ -303,15 +345,16 @@ class Evaluator:
     def _load_starts(self) -> List[Tuple[float, float, float]]:
         """Load pre-computed (x, y, yaw) starts from ValidStarts JSON.
 
-        The file is determined by cfg.starts_dir and cfg.starts_suffix:
-            <starts_dir>/<session>_<starts_suffix>.json
-        All start-position logic (distances, headings, wall margins) lives in
-        SCRIPT_ComputeValidStarts.py — this method just consumes the result.
+        Primary pool: cfg.starts_suffix.  Optional secondary pool: cfg.starts_suffix_secondary.
+        sample_start() blends the two pools according to cfg.starts_mix_ratio.
         """
         session = getattr(self.sim.arena, "session_name", None)
         if not session:
             return []
-        jp = os.path.join(self.cfg.starts_dir, f"{session}_{self.cfg.starts_suffix}.json")
+        return self._load_starts_file(session, self.cfg.starts_suffix)
+
+    def _load_starts_file(self, session: str, suffix: str) -> List[Tuple[float, float, float]]:
+        jp = os.path.join(self.cfg.starts_dir, f"{session}_{suffix}.json")
         if not os.path.isfile(jp):
             print(f"  ⚠ Starts file not found: {jp}")
             return []
@@ -325,8 +368,16 @@ class Evaluator:
             print(f"  Loaded {len(starts)} starts for {session} from {jp}")
             return starts
         except Exception as e:
-            print(f"  ⚠ Could not load starts for {session}: {e}")
+            print(f"  ⚠ Could not load starts for {session} ({suffix}): {e}")
             return []
+
+    def _load_secondary_starts(self) -> List[Tuple[float, float, float]]:
+        if not self.cfg.starts_suffix_secondary:
+            return []
+        session = getattr(self.sim.arena, "session_name", None)
+        if not session:
+            return []
+        return self._load_starts_file(session, self.cfg.starts_suffix_secondary)
 
     def sample_start(self, rng: random.Random) -> Tuple[float, float, float]:
         if not self.starts:
@@ -334,6 +385,8 @@ class Evaluator:
                 f"No starts loaded for session — run SCRIPT_ComputeValidStarts.py "
                 f"and check starts_dir/starts_suffix in Config."
             )
+        if self.starts_secondary and rng.random() > self.cfg.starts_mix_ratio:
+            return self.starts_secondary[rng.randrange(len(self.starts_secondary))]
         return self.starts[rng.randrange(len(self.starts))]
 
     def _geometry_clearance_mm(self, x: float, y: float) -> float:
@@ -352,8 +405,8 @@ class Evaluator:
 
         The policy's IID sign wrapper (see HistoryNNPolicy docstring) handles
         bilateral symmetry transparently.  We pass raw physical IID to the policy
-        at every step and store CANONICAL values in the history deque so that the
-        network always sees the positive-IID frame.
+        at every step and store CANONICAL values in the history ring buffer so that
+        the network always sees the positive-IID frame.
 
         Canonical frame convention
         --------------------------
@@ -365,43 +418,42 @@ class Evaluator:
         start_x, start_y = x, y
         collided = False
         end_reason = "max_steps_reached"
-        total_reward = 0.0
         total_drive = 0.0
+        step_rewards: List[float] = []
         proximity_terms: List[float] = []
         aligned_terms: List[float] = []
         sign_match_terms: List[float] = []
         trajectory: List[Dict[str, Any]] = []
-        hist: collections.deque = collections.deque(maxlen=self.cfg.history_len)
-
-        # Pre-fill history with random plausible feature vectors so the network
-        # cannot use the "empty history = episode start = near wall" cue.
-        for _ in range(self.cfg.history_len):
-            hist.append(np.array([
-                float(np.random.uniform(0.0, 1.0)),    # canonical_iid_norm
-                float(np.random.uniform(0.2, 0.9)),    # dist_norm
-                float(np.random.uniform(-0.5, 0.5)),   # canonical_rot1_norm
-                float(np.random.uniform(-0.5, 0.5)),   # canonical_rot2_norm
-                float(np.random.uniform(0.8, 1.0)),    # prev_drive_norm
-                1.0,                                    # echo_present_prob
-            ], dtype=np.float32))
+        position_history: collections.deque = collections.deque(maxlen=self.cfg.sinuosity_window)
+        fdim = policy.feature_dim
+        hl   = self.cfg.history_len
+        # Ring buffer: avoids per-step deque→list conversion and np.concatenate.
+        # hist_buf[row] = one feature vector; hist_flat is the flat view used as hist_vec.
+        # Pre-fill with random plausible values so the network cannot use the
+        # "empty history = episode start = near wall" cue.
+        if hl > 0:
+            hist_buf = np.empty((hl, fdim), dtype=np.float32)
+            hist_buf[:, 0] = np.random.uniform(0.0,  1.0, size=hl)   # canonical_iid_norm
+            hist_buf[:, 1] = np.random.uniform(0.2,  0.9, size=hl)   # dist_norm
+            hist_buf[:, 2] = np.random.uniform(-0.5, 0.5, size=hl)   # canonical_rot1_norm
+            hist_buf[:, 3] = np.random.uniform(-0.5, 0.5, size=hl)   # canonical_rot2_norm
+            hist_buf[:, 4] = np.random.uniform(0.8,  1.0, size=hl)   # prev_drive_norm
+            hist_buf[:, 5] = 1.0                                       # echo_present_prob
+            hist_flat = hist_buf.reshape(-1)   # flat view into hist_buf; live-updated in place
+        else:
+            hist_buf = None
+            hist_flat = np.zeros(0, dtype=np.float32)
 
         # last_physical_iid: raw measured IID from previous step.
         # Used by decide_rotate1 to determine flip direction before the current measurement.
         # Randomly signed to match the random pre-fill — avoids always starting with flip=False.
         last_physical_iid = float(np.random.uniform(0.0, 1.0)) * 12.0 * np.random.choice([-1.0, 1.0])
         prev_drive_norm   = 1.0
-        position_history:  collections.deque = collections.deque(maxlen=self.cfg.sinuosity_window)
-        clearance_history: collections.deque = collections.deque(maxlen=self.cfg.sinuosity_window)
 
         for t in range(self.cfg.max_steps):
-            # Build history vector (always full after random pre-fill).
-            if self.cfg.history_len == 0:
-                hist_vec = np.zeros(0, dtype=np.float32)
-            else:
-                hist_vec = np.concatenate(list(hist), axis=0).astype(np.float32)
-
-            # --- Head 1: decide where to look (pass raw physical IID for flip detection) ---
-            rotate1 = policy.decide_rotate1(hist_vec, last_physical_iid)
+            # hist_flat is a live view of hist_buf — already the correct flattened vector.
+            h1      = policy._shared_h1(hist_flat)
+            rotate1 = policy.decide_rotate1_with_h1(h1, last_physical_iid)
 
             # --- Execute rotate1, then measure at the new look direction ---
             meas    = self.sim.get_sonar_measurement(x, y, yaw + rotate1)
@@ -409,8 +461,8 @@ class Evaluator:
             dist_mm           = safe_float(meas.get("distance_mm"),      1800.0)
             echo_present_prob = safe_float(meas.get("echo_present_prob"), 1.0)
 
-            # --- Head 2: decide body turn (pass raw physical IID for flip detection) ---
-            rotate2 = policy.decide_rotate2(hist_vec, physical_iid, dist_mm, echo_present_prob)
+            # --- Head 2: decide body turn (h1 reused from above — no second encoder pass) ---
+            rotate2 = policy.decide_rotate2_with_h1(h1, physical_iid, dist_mm, echo_present_prob)
 
             # --- Compute canonical values for history storage ---
             # canonical frame: abs IID, actions reflected back to positive-IID frame.
@@ -423,11 +475,10 @@ class Evaluator:
             canonical_rot1_norm  = float(np.clip(canonical_rot1 / self.cfg.max_rotate1_deg, -1.0, 1.0))
             canonical_rot2_norm  = float(np.clip(canonical_rot2 / self.cfg.max_rotate2_deg, -1.0, 1.0))
 
-            hist.append(np.array(
-                [canonical_iid_norm, dist_norm, canonical_rot1_norm, canonical_rot2_norm,
-                 prev_drive_norm, echo_present_prob],
-                dtype=np.float32,
-            ))
+            if hl > 0:
+                hist_buf[:-1] = hist_buf[1:]
+                hist_buf[-1]  = (canonical_iid_norm, dist_norm, canonical_rot1_norm,
+                                 canonical_rot2_norm, prev_drive_norm, echo_present_prob)
             last_physical_iid = physical_iid   # carry raw IID to next step for rotate1 flip
 
             # --- Execute rotate2 + drive ---
@@ -443,8 +494,8 @@ class Evaluator:
             net_turn_deg = rotate1 + rotate2
             prev_drive_norm = float(np.clip(exec_drive / max(self.cfg.fixed_drive_mm, 1e-6), 0.0, 1.5))
             clearance_mm    = self._geometry_clearance_mm(nx, ny)
-            warn            = max(float(self.cfg.warning_distance_mm), 1e-6)
-            proximity_term  = float(np.clip((warn - clearance_mm) / warn, 0.0, 1.0))
+            open_space_mm   = max(float(self.cfg.open_space_distance_mm), 1e-6)
+            proximity_term  = float(np.clip((open_space_mm - clearance_mm) / open_space_mm, 0.0, 1.0))
             proximity_terms.append(proximity_term)
 
             # Diagnostic metrics (not part of fitness).
@@ -455,31 +506,25 @@ class Evaluator:
             if abs(iid_norm_phys) > 0.15 and abs(net_turn_deg) > 2.0:
                 sign_match_terms.append(1.0 if np.sign(net_turn_deg) == -np.sign(iid_norm_phys) else 0.0)
 
-            # Sinuosity fitness with proximity-scaled turn penalty.
-            # When the robot has been near a wall recently (min clearance over the
-            # sinuosity window is small), the turn penalty is reduced so that
-            # evasive turns don't cost fitness.
+            # Per-step fitness: sinuosity penalised proportionally to wall clearance.
+            # Below free_turn_distance_mm: w_turn = 0 (emergency turns completely free); ramps to w_turn_max at open_space_distance_mm.
             position_history.append((nx, ny))
-            clearance_history.append(clearance_mm)
             if len(position_history) >= 2:
-                path_dist = sum(
+                path_dist  = sum(
                     np.hypot(position_history[i][0] - position_history[i-1][0],
                              position_history[i][1] - position_history[i-1][1])
                     for i in range(1, len(position_history))
                 )
-                fx, fy = position_history[0]
-                lx, ly = position_history[-1]
-                straight = np.hypot(lx - fx, ly - fy)
-                sinuosity = min(path_dist / straight if straight > 1e-6 else 1.0, 2.0)
-                warn = max(float(self.cfg.warning_distance_mm), 1e-6)
-                coll = max(float(self.cfg.collision_distance_mm), 0.0)
-                min_clearance = float(min(clearance_history))
-                proximity_factor = float(np.clip((min_clearance - coll) / max(warn - coll, 1e-6), 0.0, 1.0))
-                reward = 1.0 - self.cfg.w_turn_penalty * proximity_factor * (sinuosity - 1.0)
+                fx, fy     = position_history[0]
+                lx, ly     = position_history[-1]
+                straight   = float(np.hypot(lx - fx, ly - fy))
+                sinuosity  = min(path_dist / straight if straight > 1e-6 else 2.0, 2.0)
             else:
-                reward = 1.0
-
-            total_reward += reward
+                sinuosity  = 1.0
+            free_mm     = float(self.cfg.free_turn_distance_mm)
+            w_turn      = self.cfg.w_turn_max * float(np.clip((clearance_mm - free_mm) / max(open_space_mm - free_mm, 1e-6), 0.0, 1.0))
+            step_reward = max(0.0, 1.0 - w_turn * (sinuosity - 1.0))
+            step_rewards.append(step_reward)
 
             trajectory.append({
                 "step": t,
@@ -493,7 +538,8 @@ class Evaluator:
                 "executed_drive_mm": exec_drive,
                 "clearance_mm": clearance_mm,
                 "proximity_term": proximity_term,
-                "reward": float(reward),
+                "sinuosity": sinuosity,
+                "step_reward": step_reward,
             })
 
             x, y, yaw = nx, ny, nyaw
@@ -502,15 +548,14 @@ class Evaluator:
                 collided = True
                 break
 
-        net_displacement    = float(np.hypot(x - start_x, y - start_y))
-        sign_match_rate     = float(np.mean(sign_match_terms)) if sign_match_terms else 0.5
-        normalized_fitness  = float(total_reward) / float(self.cfg.max_steps)
-        if collided:
-            normalized_fitness *= self.cfg.collision_fitness_scale
+        net_displacement   = float(np.hypot(x - start_x, y - start_y))
+        sign_match_rate    = float(np.mean(sign_match_terms)) if sign_match_terms else 0.5
+        collision_discount = self.cfg.collision_fitness_scale if collided else 1.0
+        normalized_fitness = float(np.mean(step_rewards)) * collision_discount if step_rewards else 0.0
 
         return {
             "fitness":                  normalized_fitness,
-            "fitness_raw":              float(total_reward),
+            "collision_discount":       collision_discount,
             "steps":                    len(trajectory),
             "total_executed_drive_mm":  float(total_drive),
             "net_displacement_mm":      net_displacement,
@@ -565,8 +610,6 @@ _WORKER_EVS: Optional[List[Evaluator]] = None
 
 
 def _init_worker(cfg_dict: Dict[str, Any]) -> None:
-    import torch as _torch
-    _torch.set_num_threads(1)   # prevent fork+MKL deadlock on Linux
     global _WORKER_CFG, _WORKER_EVS
     _WORKER_CFG = config_from_dict(cfg_dict)
     train_sessions = list(_WORKER_CFG.train_session_names) if _WORKER_CFG.train_session_names else [_WORKER_CFG.session_name]
@@ -575,6 +618,8 @@ def _init_worker(cfg_dict: Dict[str, Any]) -> None:
         train_sessions = [_WORKER_CFG.session_name]
     _WORKER_EVS = [Evaluator(build_simulator(sn, quiet_setup=_WORKER_CFG.quiet_setup), _WORKER_CFG)
                    for sn in train_sessions]
+    import torch as _torch          # torch already loaded via Emulator above; set thread count last
+    _torch.set_num_threads(1)
 
 
 def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float, float, float]]],
@@ -599,6 +644,7 @@ def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float
         return float(np.mean(vals)) if vals else float("nan")
 
     episode_fitness = mean_key("fitness")
+    vis_idx = random.randrange(len(per_env)) if per_env else 0
 
     return {
         "fitness":                 episode_fitness,
@@ -612,7 +658,8 @@ def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float
         "sign_match_rate":         mean_key("sign_match_rate"),
         "avg_drive_mm":            mean_key("avg_drive_mm"),
         "avg_net_displacement_mm": mean_key("avg_net_displacement_mm"),
-        "episodes_raw":            per_env[0].get("episodes_raw", []) if per_env else [],
+        "episodes_raw":            per_env[vis_idx].get("episodes_raw", []) if per_env else [],
+        "vis_env_idx":             vis_idx,
         "per_env_fitness":         [safe_float(r.get("fitness", float("nan")), float("nan")) for r in per_env],
     }
 
@@ -717,6 +764,7 @@ class SimpleGATrainer:
             return float(np.mean(vals)) if vals else float("nan")
 
         episode_fitness = mean_key("fitness")
+        vis_idx = random.randrange(len(per_env)) if per_env else 0
 
         return {
             "fitness":                 episode_fitness,
@@ -730,7 +778,8 @@ class SimpleGATrainer:
             "sign_match_rate":         mean_key("sign_match_rate"),
             "avg_drive_mm":            mean_key("avg_drive_mm"),
             "avg_net_displacement_mm": mean_key("avg_net_displacement_mm"),
-            "episodes_raw":            per_env[0].get("episodes_raw", []),
+            "episodes_raw":            per_env[vis_idx].get("episodes_raw", []),
+            "vis_env_idx":             vis_idx,
             "per_env_fitness":         [safe_float(r.get("fitness", float("nan")), float("nan")) for r in per_env],
         }
 
@@ -749,6 +798,8 @@ class SimpleGATrainer:
         # ── Create parallel pool once (reused across all generations) ───────────
         _pool: Optional[ProcessPoolExecutor] = None
         if self.cfg.parallel_eval and len(pop) > 1:
+            os.environ.setdefault("OMP_NUM_THREADS", "1")
+            os.environ.setdefault("MKL_NUM_THREADS", "1")
             _workers  = self.cfg.num_workers or max(1, min(os.cpu_count() or 1, 8))
             _cfg_dict = asdict(self.cfg)
             try:
@@ -977,10 +1028,20 @@ class SimpleGATrainer:
         fig, axes = plt.subplots(n_rows, 4, figsize=(24, 6 * n_rows))
         axes = np.asarray(axes).reshape(n_rows, 4)
 
-        _draw(self.sim, episodes_best,   best_idx,     axes[0, 0], "Best",                         show_legend=True)
-        _draw(self.sim, episodes_best,   crash_idx,    axes[0, 1], "Crash" if had_crash else "Random")
-        _draw(self.sim, episodes_median, median_ep_idx,axes[0, 2], "Median policy")
-        _draw(self.sim, episodes_worst,  worst_ep_idx, axes[0, 3], "Worst policy")
+        def _env_sim(d: Optional[Dict[str, Any]]) -> Any:
+            idx = d.get("vis_env_idx", 0) if d else 0
+            idx = min(idx, len(self.evs_train) - 1)
+            ev  = self.evs_train[idx]
+            return ev.sim, getattr(ev.sim.arena, "session_name", f"env{idx}")
+
+        sim_best,   sn_best   = _env_sim(detail)
+        sim_median, sn_median = _env_sim(median_detail)
+        sim_worst,  sn_worst  = _env_sim(worst_detail)
+
+        _draw(sim_best,   episodes_best,   best_idx,      axes[0, 0], f"Best [{sn_best}]",                         show_legend=True)
+        _draw(sim_best,   episodes_best,   crash_idx,     axes[0, 1], f"{'Crash' if had_crash else 'Random'} [{sn_best}]")
+        _draw(sim_median, episodes_median, median_ep_idx, axes[0, 2], f"Median [{sn_median}]")
+        _draw(sim_worst,  episodes_worst,  worst_ep_idx,  axes[0, 3], f"Worst [{sn_worst}]")
 
         if has_val:
             episodes_val             = validation_detail.get("episodes_raw", [])
@@ -1189,7 +1250,7 @@ def draw_episode_on_axis(sim: EnvironmentSimulator, episode: Dict[str, Any],
         ax.add_collection(lc)
         if show_legend:
             cb = plt.colorbar(lc, ax=ax, shrink=0.7)
-            cb.set_label("IID (dB)\nred=wall left, blue=wall right")
+            cb.set_label("IID (dB)\nred=wall right, blue=wall left")
     else:
         ax.plot(xs, ys, "-", color="#1565c0", linewidth=2)
     ax.scatter(xs[0],  ys[0],  s=60, color="#2e7d32", label="Start")

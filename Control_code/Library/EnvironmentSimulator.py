@@ -274,7 +274,14 @@ class EnvironmentSimulator:
         self.robot_radius_mm = float(robot_radius_mm)
         self.boundary_margin_mm = float(boundary_margin_mm) if boundary_margin_mm is not None else float(robot_radius_mm)
         self.collision_step_mm = max(1.0, float(collision_step_mm))
-        
+
+        # Pre-compute the central-90° profile slice indices (constant; reused in every sonar call).
+        n_p = self.profile_steps
+        _central_frac = min(90.0 / float(self.opening_angle), 1.0)
+        _margin = (1.0 - _central_frac) / 2.0
+        self._central_lo = int(np.round(_margin * (n_p - 1)))
+        self._central_hi = int(np.round((1.0 - _margin) * (n_p - 1))) + 1  # exclusive
+
         print(f"Simulator initialized with {session_name}")
         print(f"Profile config: {self.opening_angle}° opening, {self.profile_steps} steps")
         print(f"Arena size: {self.arena.arena_width:.0f}mm × {self.arena.arena_height:.0f}mm")
@@ -424,13 +431,7 @@ class EnvironmentSimulator:
         # Replace emulator distance with geometric minimum over the central 90°
         # of the profile (or the full profile if opening_angle <= 90°).
         # Profile spans opening_angle degrees with profile_steps bins.
-        n = len(profile)
-        opening = float(self.opening_angle)
-        central_frac = min(90.0 / opening, 1.0)  # clamp to 1 if opening <= 90°
-        margin = (1.0 - central_frac) / 2.0
-        lo = int(np.round(margin * (n - 1)))
-        hi = int(np.round((1.0 - margin) * (n - 1))) + 1  # exclusive
-        central_profile = profile[lo:hi]
+        central_profile = profile[self._central_lo:self._central_hi]
         finite_vals = central_profile[np.isfinite(central_profile)]
         geo_dist_mm = float(np.min(finite_vals)) if len(finite_vals) > 0 else 3000.0
 
@@ -467,12 +468,7 @@ class EnvironmentSimulator:
         emulator_results = self.emulator.predict(profiles)
 
         # Geometric distance: min over central 90° bins (same logic as get_sonar_measurement)
-        n = self.profile_steps
-        central_frac = min(90.0 / float(self.opening_angle), 1.0)
-        margin = (1.0 - central_frac) / 2.0
-        lo = int(np.round(margin * (n - 1)))
-        hi = int(np.round((1.0 - margin) * (n - 1))) + 1  # exclusive
-        central = profiles[:, lo:hi]  # (N, central_bins)
+        central = profiles[:, self._central_lo:self._central_hi]  # (N, central_bins)
 
         results: List[Dict[str, float]] = []
         for k in range(len(positions)):
