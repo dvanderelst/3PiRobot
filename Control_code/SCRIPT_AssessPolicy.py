@@ -5,7 +5,7 @@ Policy assessment script: visualise the weights of a saved HistoryNNPolicy.
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 GENERATION     = "last"        # integer generation number, "last", or None for best_policy.json
-POLICY_DIR     = "Policy/memory05b"           # where training saved the policy JSON files
+POLICY_DIR     = "Policy/memory09"           # where training saved the policy JSON files
 ASSESSMENT_DIR = "PolicyAssessment" # where plots are written (created if needed)
 
 # Trajectory assessment
@@ -26,9 +26,9 @@ from matplotlib.colors import Normalize
 import numpy as np
 
 
-# ── Feature labels for the 7-element history row ──────────────────────────────
-FEAT_NAMES  = ["iid", "dist", "rot1", "rot2", "drive", "blk", "echo"]
-FEAT_COLORS = ["#e07b54", "#5b9bd5", "#70ad47", "#ffc000", "#7030a0", "#808080", "#17becf"]
+# ── Feature labels for the 6-element history row ──────────────────────────────
+FEAT_NAMES  = ["iid", "dist", "rot1", "rot2", "drive", "echo"]
+FEAT_COLORS = ["#e07b54", "#5b9bd5", "#70ad47", "#ffc000", "#7030a0", "#17becf"]
 
 
 # ── I/O helpers ───────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ def reconstruct_params(data: dict):
     """
     history_len = int(data["history_len"])
     h1, h2 = data["hidden_sizes"]
-    in_dim = history_len * 7
+    in_dim = history_len * 6
 
     shapes = [
         (h1, in_dim), (h1,),       # shared encoder  W1, b1
@@ -130,7 +130,7 @@ def plot_weights(params, arch: dict, suptitle: str, output_path: str) -> None:
     bar_chart(ax, b1, row_h1, f"Shared encoder  b1  ({h1},)", ylabel="bias")
 
     # ── Row 1: W1 feature importance & temporal importance ────────────────────
-    W1_r = np.abs(W1).reshape(h1, hl, 7)   # (units, steps, features)
+    W1_r = np.abs(W1).reshape(h1, hl, 6)   # (units, steps, features)
 
     ax = fig.add_subplot(gs[1, :2])
     feat_imp = W1_r.mean(axis=(0, 1))       # average over units & steps → (7,)
@@ -162,7 +162,7 @@ def plot_weights(params, arch: dict, suptitle: str, output_path: str) -> None:
     bar_chart(ax, W3a.reshape(-1), row_h2, f"Head1 output  W3a  (1×{h2})")
 
     ax = fig.add_subplot(gs[2, 3])
-    eff1 = effective_sensitivity(W3a, W2a, W1).reshape(hl, 7)
+    eff1 = effective_sensitivity(W3a, W2a, W1).reshape(hl, 6)
     heatmap(ax, eff1, step_labels, FEAT_NAMES,
             "Head1 effective sensitivity\n(W3a·W2a·W1, linear approx)")
 
@@ -195,7 +195,7 @@ def plot_weights(params, arch: dict, suptitle: str, output_path: str) -> None:
 
 
 def in_dim(arch: dict) -> int:
-    return arch["history_len"] * 7
+    return arch["history_len"] * 6
 
 
 # ── Input–output correlation ──────────────────────────────────────────────────
@@ -207,7 +207,7 @@ def collect_history_windows(results: dict, history_len: int):
     (zero-padded when t < history_len) and produced rotate2.
 
     Returns:
-        X : np.ndarray, shape (N, history_len, 7)  — raw feature values
+        X : np.ndarray, shape (N, history_len, 6)  — raw feature values
         y : np.ndarray, shape (N,)                 — -rotate2_deg
     """
     X_rows, y_rows = [], []
@@ -217,7 +217,7 @@ def collect_history_windows(results: dict, history_len: int):
             for t in range(1, len(traj)):
                 # Canonicalise based on the IID at step t (the step that produced rotate2).
                 flip = traj[t]["iid_db"] < 0
-                window = np.zeros((history_len, 7), dtype=float)
+                window = np.zeros((history_len, 6), dtype=float)
                 for s in range(history_len):
                     src = t - history_len + s
                     if src >= 0:
@@ -229,7 +229,6 @@ def collect_history_windows(results: dict, history_len: int):
                             -st["rotate1_deg"] if flip else st["rotate1_deg"],
                             -st["rotate2_deg"] if flip else st["rotate2_deg"],
                             st["executed_drive_mm"],
-                            float(st["blocked"]),
                             float(st.get("echo_present_prob", 1.0)),
                         ]
                 X_rows.append(window)
@@ -240,7 +239,7 @@ def collect_history_windows(results: dict, history_len: int):
 def plot_input_correlations(results: dict, arch: dict, gen, output_path: str) -> None:
     """Heatmap of Pearson r between sensory inputs (iid, dist) and -rotate2."""
     hl = arch["history_len"]
-    X, y = collect_history_windows(results, hl)     # X: (N, hl, 7)
+    X, y = collect_history_windows(results, hl)     # X: (N, hl, 6)
 
     # Only sensory features: iid=col0, dist=col1
     sensor_indices = [0, 1]
@@ -494,18 +493,8 @@ def run_episodes(data: dict, sessions: list, n_trials: int,
         cfg.randomize_empirical_yaw = True
 
         ev = Evaluator(sim, cfg)
-        sl = ev.sided_starts.get("left",  [])
-        sr = ev.sided_starts.get("right", [])
-
-        if sl and sr:
-            n_left  = n_trials - n_trials // 2
-            n_right = n_trials // 2
-            starts  = [sl[rng.randrange(len(sl))] for _ in range(n_left)]
-            starts += [sr[rng.randrange(len(sr))] for _ in range(n_right)]
-        else:
-            # Fallback: general starts, no side guarantee
-            n_left  = 0
-            starts  = [ev.sample_start(rng) for _ in range(n_trials)]
+        n_left = 0
+        starts = [ev.sample_start(rng) for _ in range(n_trials)]
 
         eps = [ev.episode(policy, s) for s in starts]
         results[session] = {"sim": sim, "episodes": eps, "n_left": n_left}
