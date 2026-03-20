@@ -14,9 +14,10 @@ Supervision targets:
 # ============================================
 # CONFIGURATION
 # ============================================
-sessions = ["sessionB01", "sessionB02", "sessionB03"]
-profile_opening_angle = 90
+sessions = ["sessionB01", "sessionB02", "sessionB03", "sessionB04","sessionB05"]
+profile_opening_angle = 120
 profile_steps = 61
+force_recompute_profiles = True   # set True to ignore cache and recompute cached profiles
 
 output_dir = "Emulator"
 
@@ -29,7 +30,7 @@ patience = 12
 learning_rate = 1e-3
 l2_reg = 1e-4
 # CNN architecture
-conv_channels = [16, 32, 32]   # channels per conv layer
+conv_channels = [16, 32]   # channels per conv layer
 conv_kernel    = 7              # kernel size (same for all layers)
 fc_hidden      = 64             # FC hidden size after conv
 
@@ -286,6 +287,50 @@ def plot_training(history):
     save_plot("training_curves"); plt.close()
 
 
+def plot_distance_regression(min_profile_dist, sonar_dist_mm):
+    """Scatter plot and robust linear regression of min(profile) vs corrected_distance.
+
+    Uses Theil-Sen estimator (median of pairwise slopes) — robust to outliers.
+    Diagnostic only — results are not wired into the training pipeline.
+    """
+    from scipy.stats import theilslopes
+    m = np.isfinite(min_profile_dist) & np.isfinite(sonar_dist_mm)
+    x, y = min_profile_dist[m], sonar_dist_mm[m]
+    res = theilslopes(y, x)
+    slope, intercept = res.slope, res.intercept
+    y_hat = slope * x + intercept
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    mae = float(np.mean(np.abs(y - y_hat)))
+    bias = float(np.mean(y_hat - y))
+
+    print(
+        f"\nDistance regression (min_profile → corrected_distance, Theil-Sen):\n"
+        f"  slope={slope:.4f}  intercept={intercept:.1f} mm\n"
+        f"  R²={r2:.4f}  MAE={mae:.1f} mm  bias(fit-true)={bias:+.1f} mm"
+    )
+
+    lo = float(min(x.min(), y.min()))
+    hi = float(max(x.max(), y.max()))
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.scatter(x, y, s=6, alpha=0.3, label="samples")
+    ax.plot([lo, hi], [lo, hi], "k--", linewidth=1, label="identity (y=x)")
+    fit_x = np.array([x.min(), x.max()])
+    ax.plot(fit_x, slope * fit_x + intercept, "r-", linewidth=1.5,
+            label=f"Theil-Sen: y={slope:.3f}x+{intercept:.0f}  R²={r2:.3f}")
+    ax.set_xlabel("min(profile) — geometric distance (mm)")
+    ax.set_ylabel("corrected_distance — sonar (mm)")
+    ax.set_title("Geometric vs sonar distance — echo-present only (diagnostic)")
+    ax.legend(); ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    save_plot("distance_regression")
+    plt.close(fig)
+
+    return {"slope": float(slope), "intercept": float(intercept),
+            "r2": r2, "mae_mm": mae, "bias_mm": bias, "n": int(m.sum())}
+
+
 def plot_scatter(y_true, y_pred, ep_true, ep_pred_prob, min_dist):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -331,7 +376,8 @@ def main():
 
     print("Loading data...")
     dc = DataProcessor.DataCollection(sessions)
-    profiles, _ = dc.load_profiles(opening_angle=profile_opening_angle, steps=profile_steps)
+    profiles, _ = dc.load_profiles(opening_angle=profile_opening_angle, steps=profile_steps,
+                                    force_recompute=force_recompute_profiles)
 
     finite = np.isfinite(profiles).all(axis=1)
     profiles  = profiles[finite].astype(np.float32)
@@ -346,6 +392,14 @@ def main():
     targets     = targets[valid_target]
     distance_mm = distance_mm[valid_target]
     print(f"Kept {len(profiles)} samples after target filtering.")
+
+    # Diagnostic: check for systematic offset between geometric and sonar distance.
+    # Restrict to echo-present samples only — no-echo returns (sonar at max range)
+    # are not measuring real distance and would contaminate the regression.
+    echo_mask = distance_mm < no_echo_min_distance_mm
+    dist_regression = plot_distance_regression(
+        np.min(profiles, axis=1)[echo_mask], distance_mm[echo_mask]
+    )
 
     echo_present = (distance_mm < no_echo_min_distance_mm).astype(np.float32)
     n_echo = int(np.sum(echo_present))
@@ -480,6 +534,7 @@ def main():
         "num_val": len(ds_val),
         "num_test": len(ds_test),
         "metrics": metrics,
+        "distance_regression_diagnostic": dist_regression,
         "calibration": calibration,
         "norm_stats": {
             "x_mean": norm["x_mean"].tolist(),

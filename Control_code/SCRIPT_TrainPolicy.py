@@ -59,7 +59,7 @@ def pushover_notify(message: str, title: str = "3PiRobot training") -> None:
 # Set CONDITION to a short label for this run; results go to Policy/<CONDITION>/.
 # If that folder already exists and is non-empty, the script will ask via a
 # dialog whether to overwrite it or abort.
-CONDITION   = "memory10"   # subfolder under Policy
+CONDITION   = "memory12"   # subfolder under Policy
 DESCRIPTION = "Progressive steps 15→100 over 20 gens; geometric distance emulator, IID-only NN, 90° profile."
 
 # ── Pushover notifications ───────────────────────────────────────────────────────
@@ -69,32 +69,27 @@ PUSHOVER_EVERY_N  = 10    # send a notification every N generations (0 = disable
 
 @dataclass
 class Config:
-    history_len: int = 5
+    history_len: int = 7
     seed: int = 42
     session_name: str = "sessionB01"
     train_session_names: Optional[List[str]] = field(
-        default_factory=lambda: ["sessionB01", "sessionB02", "sessionB03", "sessionB05"]
+        default_factory=lambda: ["sessionB01", "sessionB02", "sessionB03", "sessionB04"]
     )
-    validation_session_name: Optional[str] = "sessionB04"
+    validation_session_name: Optional[str] = "sessionB05"
 
     # ── Fitness ──────────────────────────────────────────────────────────────────
     # fitness = mean(step_reward) * collision_discount
     #
-    # step_reward = max(0, 1.0 - w_turn(clearance) * (sinuosity - 1.0))
+    # step_reward = max(0, 1.0 - w_turn_max * (sinuosity - 1.0))
     #
     # sinuosity   = path_length / straight_line_distance over a rolling window
     #               capped at 2.0 (1.0 = perfectly straight, 2.0 = very tortuous)
     #               window=3 is short enough that zigzag turns cannot cancel each other out
     #
-    # w_turn(clearance) = w_turn_max * clip((clearance - free_turn_distance_mm) / (open_space_distance_mm - free_turn_distance_mm), 0, 1)
-    #               → 0.0 at or below free_turn_distance_mm  (turns completely free — robot can make emergency turns)
-    #               → w_turn_max at open_space_distance_mm   (orbiting/circling heavily penalised)
-    #
     # collision_discount = collision_fitness_scale if collided else 1.0
-    open_space_distance_mm:  float = 1000.0  # clearance at which sinuosity penalty reaches its maximum (w_turn_max)
-    free_turn_distance_mm:   float = 300.0   # clearance below which turns are completely free (emergency turning zone)
-    w_turn_max:              float = 1.25     # sinuosity penalty weight in open space
-    sinuosity_window:        int   = 15      # short rolling window — prevents zigzag cancellation exploit
+    open_space_distance_mm:  float = 1000.0  # clearance scale for proximity_term diagnostic
+    w_turn_max:              float = 5.0     # sinuosity penalty weight
+    sinuosity_window:        int   = 6      # short rolling window — prevents zigzag cancellation exploit
     collision_distance_mm:   float = 150.0  # hard collision threshold → episode ends
     collision_fitness_scale: float = 0.2    # fitness multiplier applied when episode ends in collision
 
@@ -102,7 +97,7 @@ class Config:
     max_rotate1_deg: float = 45.0
     max_rotate2_deg: float = 45.0
     fixed_drive_mm: float = 100.0
-    hidden_sizes: Tuple[int, int] = (16, 16)
+    hidden_sizes: Tuple[int, int] = (16, 8)
 
     # GA
     population_size: int = 75
@@ -111,6 +106,8 @@ class Config:
     mutation_rate: float = 0.05   # ~40/890 weights perturbed per offspring; was 0.2
                                    # (160 changes destroyed parent behaviour)
     mutation_sigma: float = 0.2
+    crossover_prob: float = 0.5   # probability an offspring is produced by uniform crossover
+                                   # between two rank-weighted elites (vs. single-parent mutation)
 
     # Evaluation
     episodes_per_policy: int = 16
@@ -325,6 +322,13 @@ class Evaluator:
         self.cfg = cfg
         self.starts = self._load_starts()
         self.starts_secondary = self._load_secondary_starts()
+        if not self.starts:
+            session = getattr(self.sim.arena, "session_name", "?")
+            raise RuntimeError(
+                f"No starts loaded for session '{session}' "
+                f"(suffix='{cfg.starts_suffix}', dir='{cfg.starts_dir}'). "
+                f"Run SCRIPT_ComputeValidStarts.py first."
+            )
         walls = getattr(self.sim.arena, "walls", np.array([], dtype=np.float32))
         self._wall_points = np.asarray(walls, dtype=np.float32) if walls is not None else np.array([], dtype=np.float32)
 
@@ -380,11 +384,6 @@ class Evaluator:
         return self._load_starts_file(session, self.cfg.starts_suffix_secondary)
 
     def sample_start(self, rng: random.Random) -> Tuple[float, float, float]:
-        if not self.starts:
-            raise RuntimeError(
-                f"No starts loaded for session — run SCRIPT_ComputeValidStarts.py "
-                f"and check starts_dir/starts_suffix in Config."
-            )
         if self.starts_secondary and rng.random() > self.cfg.starts_mix_ratio:
             return self.starts_secondary[rng.randrange(len(self.starts_secondary))]
         return self.starts[rng.randrange(len(self.starts))]
@@ -506,8 +505,7 @@ class Evaluator:
             if abs(iid_norm_phys) > 0.15 and abs(net_turn_deg) > 2.0:
                 sign_match_terms.append(1.0 if np.sign(net_turn_deg) == -np.sign(iid_norm_phys) else 0.0)
 
-            # Per-step fitness: sinuosity penalised proportionally to wall clearance.
-            # Below free_turn_distance_mm: w_turn = 0 (emergency turns completely free); ramps to w_turn_max at open_space_distance_mm.
+            # Per-step fitness: sinuosity penalised at constant weight (w_turn_max), regardless of wall clearance.
             position_history.append((nx, ny))
             if len(position_history) >= 2:
                 path_dist  = sum(
@@ -521,8 +519,7 @@ class Evaluator:
                 sinuosity  = min(path_dist / straight if straight > 1e-6 else 2.0, 2.0)
             else:
                 sinuosity  = 1.0
-            free_mm     = float(self.cfg.free_turn_distance_mm)
-            w_turn      = self.cfg.w_turn_max * float(np.clip((clearance_mm - free_mm) / max(open_space_mm - free_mm, 1e-6), 0.0, 1.0))
+            w_turn      = self.cfg.w_turn_max
             step_reward = max(0.0, 1.0 - w_turn * (sinuosity - 1.0))
             step_rewards.append(step_reward)
 
@@ -568,31 +565,15 @@ class Evaluator:
         }
 
     def evaluate(self, policy: HistoryNNPolicy,
-                 starts: List[Tuple[float, float, float]],
-                 n_left: int = 0) -> Dict[str, Any]:
-        """
-        Run all episodes and return aggregated metrics.
-
-        n_left > 0: the first n_left starts are wall-left episodes,
-        the remainder are wall-right.  Fitness is a plain mean across all episodes.
-        """
+                 starts: List[Tuple[float, float, float]]) -> Dict[str, Any]:
+        """Run all episodes and return aggregated metrics."""
         eps       = [self.episode(policy, s) for s in starts]
         fit_array = np.array([e["fitness"] for e in eps], dtype=np.float32)
-
-        if n_left > 0 and n_left < len(eps):
-            left_fit  = float(np.mean(fit_array[:n_left]))
-            right_fit = float(np.mean(fit_array[n_left:]))
-        else:
-            left_fit  = float("nan")
-            right_fit = float("nan")
-        fitness = float(np.mean(fit_array))
+        fitness   = float(np.mean(fit_array))
 
         return {
             "fitness":                  fitness,
             "fitness_std":              float(np.std(fit_array)),
-            "left_fit":                 left_fit,
-            "right_fit":                right_fit,
-            "n_left":                   n_left,
             "collision_rate":           float(np.mean([1.0 if e["collided"] else 0.0 for e in eps])),
             "proximity_mean":           float(np.mean([e.get("proximity_mean", 0.0)  for e in eps])),
             "alignment_mean":           float(np.mean([e["alignment_mean"]            for e in eps])),
@@ -609,6 +590,29 @@ _WORKER_CFG: Optional[Config] = None
 _WORKER_EVS: Optional[List[Evaluator]] = None
 
 
+def _aggregate_env_results(per_env: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate per-environment evaluation dicts into a single summary dict."""
+    def mean_key(k: str) -> float:
+        vals = [safe_float(r.get(k, float("nan")), float("nan")) for r in per_env]
+        vals = [v for v in vals if np.isfinite(v)]
+        return float(np.mean(vals)) if vals else float("nan")
+
+    vis_idx = random.randrange(len(per_env)) if per_env else 0
+    return {
+        "fitness":                 mean_key("fitness"),
+        "fitness_std":             mean_key("fitness_std"),
+        "collision_rate":          mean_key("collision_rate"),
+        "proximity_mean":          mean_key("proximity_mean"),
+        "alignment_mean":          mean_key("alignment_mean"),
+        "sign_match_rate":         mean_key("sign_match_rate"),
+        "avg_drive_mm":            mean_key("avg_drive_mm"),
+        "avg_net_displacement_mm": mean_key("avg_net_displacement_mm"),
+        "episodes_raw":            per_env[vis_idx].get("episodes_raw", []) if per_env else [],
+        "vis_env_idx":             vis_idx,
+        "per_env_fitness":         [safe_float(r.get("fitness", float("nan")), float("nan")) for r in per_env],
+    }
+
+
 def _init_worker(cfg_dict: Dict[str, Any]) -> None:
     global _WORKER_CFG, _WORKER_EVS
     _WORKER_CFG = config_from_dict(cfg_dict)
@@ -623,7 +627,6 @@ def _init_worker(cfg_dict: Dict[str, Any]) -> None:
 
 
 def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float, float, float]]],
-                        n_lefts_by_env: Optional[List[int]] = None,
                         max_steps: Optional[int] = None) -> Dict[str, Any]:
     if _WORKER_CFG is None or _WORKER_EVS is None:
         raise RuntimeError("Worker not initialized")
@@ -634,34 +637,8 @@ def _eval_genome_worker(genome: np.ndarray, starts_by_env: List[List[Tuple[float
         _WORKER_CFG.history_len, _WORKER_CFG.hidden_sizes,
     )
     pol.set_genome(genome)
-    n_lefts = n_lefts_by_env or [0] * len(_WORKER_EVS)
-    per_env = [ev.evaluate(pol, starts, n_left)
-               for ev, starts, n_left in zip(_WORKER_EVS, starts_by_env, n_lefts)]
-
-    def mean_key(k: str) -> float:
-        vals = [safe_float(r.get(k, float("nan")), float("nan")) for r in per_env]
-        vals = [v for v in vals if np.isfinite(v)]
-        return float(np.mean(vals)) if vals else float("nan")
-
-    episode_fitness = mean_key("fitness")
-    vis_idx = random.randrange(len(per_env)) if per_env else 0
-
-    return {
-        "fitness":                 episode_fitness,
-        "fitness_std":             mean_key("fitness_std"),
-        "left_fit":                mean_key("left_fit"),
-        "right_fit":               mean_key("right_fit"),
-        "n_left":                  per_env[0].get("n_left", 0) if per_env else 0,
-        "collision_rate":          mean_key("collision_rate"),
-        "proximity_mean":          mean_key("proximity_mean"),
-        "alignment_mean":          mean_key("alignment_mean"),
-        "sign_match_rate":         mean_key("sign_match_rate"),
-        "avg_drive_mm":            mean_key("avg_drive_mm"),
-        "avg_net_displacement_mm": mean_key("avg_net_displacement_mm"),
-        "episodes_raw":            per_env[vis_idx].get("episodes_raw", []) if per_env else [],
-        "vis_env_idx":             vis_idx,
-        "per_env_fitness":         [safe_float(r.get("fitness", float("nan")), float("nan")) for r in per_env],
-    }
+    per_env = [ev.evaluate(pol, starts) for ev, starts in zip(_WORKER_EVS, starts_by_env)]
+    return _aggregate_env_results(per_env)
 
 
 # ── GA Trainer ─────────────────────────────────────────────────────────────────
@@ -672,10 +649,8 @@ class SimpleGATrainer:
         if not evaluators_train:
             raise ValueError("Need at least one training evaluator")
         self.evs_train       = evaluators_train
-        self.ev              = evaluators_train[0]
         self.ev_validation   = evaluator_validation
         self.cfg             = cfg
-        self.sim             = self.ev.sim
         self.generation_plot_dir = os.path.join(self.cfg.output_dir, "generation_best")
         self.best_genome: Optional[np.ndarray] = None
         self.best_fitness = -float("inf")
@@ -687,7 +662,6 @@ class SimpleGATrainer:
         self.pop_fitness_history:  List[np.ndarray] = []   # (n_gen, pop_size)
         self.history: Dict[str, List[float]] = {
             "best_fitness": [], "avg_fitness": [],
-            "best_left_fit": [], "best_right_fit": [],
             "best_alignment_mean": [], "best_sign_match_rate": [],
             "best_collision_rate": [], "best_proximity_mean": [],
             "best_avg_net_displacement_mm": [],
@@ -731,57 +705,24 @@ class SimpleGATrainer:
         noise = np.random.normal(0.0, self.cfg.mutation_sigma, size=g.shape).astype(np.float32)
         return np.clip(g + mask * noise, -3.0, 3.0).astype(np.float32)
 
-    def _generation_starts(
-        self, gen: int
-    ) -> Tuple[List[List[Tuple[float, float, float]]], List[int]]:
-        """Return (starts_by_env, n_lefts_by_env).
+    def crossover(self, p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
+        """Uniform crossover: each gene independently drawn from either parent."""
+        mask = np.random.rand(*p1.shape) < 0.5
+        return np.where(mask, p1, p2).astype(np.float32)
 
-        Left starts come first within each env's list so that evaluate() can
-        split on n_left.  Do NOT shuffle — order must be preserved.
-        """
+    def _generation_starts(self, gen: int) -> List[List[Tuple[float, float, float]]]:
+        """Return starts_by_env: one start list per training environment."""
         starts_all: List[List[Tuple[float, float, float]]] = []
-        n_lefts_all: List[int] = []
         for env_i, ev in enumerate(self.evs_train):
             rng = random.Random(self.cfg.seed + 10000 * (gen + 1) + 1000 * env_i)
-            n   = self.cfg.episodes_per_policy
-            starts = [ev.sample_start(rng) for _ in range(n)]
-            n_lefts_all.append(0)
-
-            starts_all.append(starts)
-        return starts_all, n_lefts_all
+            starts_all.append([ev.sample_start(rng) for _ in range(self.cfg.episodes_per_policy)])
+        return starts_all
 
     def _evaluate_on_train_envs(self, genome: np.ndarray,
-                                 starts_by_env: List[List[Tuple[float, float, float]]],
-                                 n_lefts_by_env: Optional[List[int]] = None) -> Dict[str, Any]:
+                                 starts_by_env: List[List[Tuple[float, float, float]]]) -> Dict[str, Any]:
         pol     = self._make_policy(genome)
-        n_lefts = n_lefts_by_env or [0] * len(self.evs_train)
-        per_env = [ev.evaluate(pol, starts, n_left)
-                   for ev, starts, n_left in zip(self.evs_train, starts_by_env, n_lefts)]
-
-        def mean_key(k: str) -> float:
-            vals = [safe_float(r.get(k, float("nan")), float("nan")) for r in per_env]
-            vals = [v for v in vals if np.isfinite(v)]
-            return float(np.mean(vals)) if vals else float("nan")
-
-        episode_fitness = mean_key("fitness")
-        vis_idx = random.randrange(len(per_env)) if per_env else 0
-
-        return {
-            "fitness":                 episode_fitness,
-            "fitness_std":             mean_key("fitness_std"),
-            "left_fit":                mean_key("left_fit"),
-            "right_fit":               mean_key("right_fit"),
-            "n_left":                  per_env[0].get("n_left", 0) if per_env else 0,
-            "collision_rate":          mean_key("collision_rate"),
-            "proximity_mean":          mean_key("proximity_mean"),
-            "alignment_mean":          mean_key("alignment_mean"),
-            "sign_match_rate":         mean_key("sign_match_rate"),
-            "avg_drive_mm":            mean_key("avg_drive_mm"),
-            "avg_net_displacement_mm": mean_key("avg_net_displacement_mm"),
-            "episodes_raw":            per_env[vis_idx].get("episodes_raw", []),
-            "vis_env_idx":             vis_idx,
-            "per_env_fitness":         [safe_float(r.get("fitness", float("nan")), float("nan")) for r in per_env],
-        }
+        per_env = [ev.evaluate(pol, starts) for ev, starts in zip(self.evs_train, starts_by_env)]
+        return _aggregate_env_results(per_env)
 
     def train(self) -> np.ndarray:
         pop = self.init_population()
@@ -812,25 +753,27 @@ class SimpleGATrainer:
 
         try:
           for gen in range(self.cfg.generations):
+            cur_max_steps = self.cfg.max_steps
             if self.cfg.use_progressive_steps and self.cfg.progressive_steps_generations > 0:
                 progress = min(gen / self.cfg.progressive_steps_generations, 1.0)
-                self.cfg.max_steps = int(
+                cur_max_steps = int(
                     self.cfg.progressive_steps_start
                     + progress * (self.cfg.progressive_steps_end - self.cfg.progressive_steps_start)
                 )
-                print(f"Generation {gen+1}: max_steps = {self.cfg.max_steps} (progressive)")
+                # Keep cfg in sync so the serial evaluation path (episode → self.cfg.max_steps)
+                # uses the same value as the parallel path (passed explicitly to workers).
+                self.cfg.max_steps = cur_max_steps
+                print(f"Generation {gen+1}: max_steps = {cur_max_steps} (progressive)")
 
-            starts_by_env, n_lefts_by_env = self._generation_starts(gen)
+            starts_by_env = self._generation_starts(gen)
             fitness: List[float]          = [0.0] * len(pop)
             details: List[Dict[str, Any]] = [None] * len(pop)  # type: ignore
 
             if _pool is not None:
                 try:
-                    cur_max_steps = self.cfg.max_steps
                     results = _pool.map(
                         _eval_genome_worker, pop,
                         [starts_by_env] * len(pop),
-                        [n_lefts_by_env] * len(pop),
                         [cur_max_steps] * len(pop),
                     )
                     for i, res in enumerate(tqdm(results, total=len(pop),
@@ -846,7 +789,7 @@ class SimpleGATrainer:
                 for i, g in enumerate(tqdm(pop, desc=f"Gen {gen+1}/{self.cfg.generations}")):
                     if details[i] is not None:
                         continue
-                    res        = self._evaluate_on_train_envs(g, starts_by_env, n_lefts_by_env)
+                    res        = self._evaluate_on_train_envs(g, starts_by_env)
                     fitness[i] = float(res["fitness"])
                     details[i] = res
 
@@ -862,8 +805,6 @@ class SimpleGATrainer:
 
             self.history["best_fitness"].append(float(np.max(f_np)))
             self.history["avg_fitness"].append(float(np.mean(f_np)))
-            self.history["best_left_fit"].append(safe_float(best_res.get("left_fit",  float("nan")), float("nan")))
-            self.history["best_right_fit"].append(safe_float(best_res.get("right_fit", float("nan")), float("nan")))
             self.history["best_alignment_mean"].append(float(best_res["alignment_mean"]))
             self.history["best_sign_match_rate"].append(float(best_res["sign_match_rate"]))
             self.history["best_collision_rate"].append(float(best_res["collision_rate"]))
@@ -897,12 +838,8 @@ class SimpleGATrainer:
                 self.best_val_fitness          = val_fit
                 self.best_val_coll             = val_coll
 
-            best_left_fit  = safe_float(best_res.get("left_fit",  float("nan")), float("nan"))
-            best_right_fit = safe_float(best_res.get("right_fit", float("nan")), float("nan"))
-            side_str = (f"L={best_left_fit:.3f} R={best_right_fit:.3f}"
-                        if np.isfinite(best_left_fit) else "no-split")
             print(
-                f"Gen {gen+1}: best={self.history['best_fitness'][-1]:.3f} [{side_str}], "
+                f"Gen {gen+1}: best={self.history['best_fitness'][-1]:.3f}, "
                 f"avg={self.history['avg_fitness'][-1]:.3f}, "
                 f"best_ep={best_ep_fit:.3f}, med_ep={median_ep_fit:.3f}, worst_ep={worst_ep_fit:.3f}, "
                 f"align={best_res['alignment_mean']:.3f}, "
@@ -925,25 +862,29 @@ class SimpleGATrainer:
             if PUSHOVER_EVERY_N > 0 and ((gen + 1) % PUSHOVER_EVERY_N == 0) and not is_last_gen:
                 pushover_notify(
                     f"Gen {gen+1}/{self.cfg.generations} | {CONDITION}\n"
-                    f"best={self.history['best_fitness'][-1]:.3f} [{side_str}]\n"
+                    f"best={self.history['best_fitness'][-1]:.3f}\n"
                     f"coll={best_res['collision_rate']:.3f}\n"
                     f"val_fit={val_fit:.3f}"
                 )
 
             if gen < self.cfg.generations - 1:
-                order   = np.argsort(f_np)[::-1]
+                order   = order_asc[::-1]
                 elite_n = min(self.cfg.elitism_count, len(pop))
                 elites  = [pop[int(i)].copy() for i in order[:elite_n]]
-                # Copy elites unchanged, then fill remaining slots by mutating
-                # a rank-weighted randomly chosen elite.  Better elites are more
-                # likely to be parents; avoids destructive crossover between
-                # unrelated weight configurations (competing-conventions problem).
+                # Elites carried unchanged; offspring produced by crossover+mutation
+                # or single-parent mutation (controlled by crossover_prob).
+                # Rank-weighted selection: better elites are more likely parents.
                 nxt = elites[:]
                 rank_weights = np.arange(elite_n, 0, -1, dtype=np.float64)
                 rank_weights /= rank_weights.sum()
                 while len(nxt) < self.cfg.population_size:
-                    parent = elites[np.random.choice(elite_n, p=rank_weights)]
-                    nxt.append(self.mutate(parent).astype(np.float32))
+                    p1 = elites[np.random.choice(elite_n, p=rank_weights)]
+                    if self.cfg.crossover_prob > 0.0 and np.random.rand() < self.cfg.crossover_prob:
+                        p2 = elites[np.random.choice(elite_n, p=rank_weights)]
+                        child = self.crossover(p1, p2)
+                    else:
+                        child = p1.copy()
+                    nxt.append(self.mutate(child).astype(np.float32))
                 pop = nxt
 
         finally:
@@ -1095,12 +1036,6 @@ class SimpleGATrainer:
 
         ax0.plot(g, self.history["best_fitness"], label="Best fitness", color="black", lw=2, marker="o", ms=3)
         ax0.plot(g, self.history["avg_fitness"],  label="Avg fitness",  color="gray",  lw=1, linestyle="--", marker="o", ms=3)
-        lf = np.asarray(self.history["best_left_fit"],  dtype=np.float64)
-        rf = np.asarray(self.history["best_right_fit"], dtype=np.float64)
-        if np.isfinite(lf).any():
-            ax0.plot(g, lf, label="Best L-wall fit", color="#2e7d32", lw=1.5, linestyle="-.", marker="o", ms=3)
-        if np.isfinite(rf).any():
-            ax0.plot(g, rf, label="Best R-wall fit", color="#c62828", lw=1.5, linestyle="-.", marker="o", ms=3)
         if np.isfinite(np.asarray(self.history["val_best_fitness"], dtype=np.float64)).any():
             ax0.plot(g, self.history["val_best_fitness"], label="Val fitness", color="steelblue", lw=1.5, marker="o", ms=3)
         ax0.set_xlabel("Generation"); ax0.set_ylabel("Fitness")
@@ -1413,8 +1348,8 @@ def main() -> None:
             "max_rotate2_deg":      cfg.max_rotate2_deg,
             "train_fitness":        float(final.get("fitness",        float("nan"))),
             "train_collision_rate": float(final.get("collision_rate", float("nan"))),
-            "val_fitness":          float("nan"),
-            "val_collision_rate":   float("nan"),
+            "val_fitness":          trainer.best_val_fitness,
+            "val_collision_rate":   trainer.best_val_coll,
         }, f, indent=2)
     print(f"Best policy saved to {best_path}")
 

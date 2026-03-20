@@ -2,6 +2,7 @@ import time
 import random
 from Library import Dialog
 from Library import Client
+from Library import CodeLogger
 from Library import ControlParameters
 from Library import LorexTracker
 from Library import DataStorage
@@ -11,7 +12,7 @@ from LorexLib.Environment import capture_environment_layout
 
 
 robot_number = 1
-session = 'sessionB04'
+session = 'sessionB05'
 wait_for_confirmation = False
 do_rotation = True
 do_translation = True
@@ -28,6 +29,7 @@ writer = DataStorage.DataWriter(session, autoclear=True, verbose=False)
 writer.add_file('Library/Settings.py')
 writer.add_file('Library/ControlParameters.py')
 snapshot = capture_environment_layout(save_root=f'Data/{session}')
+CodeLogger.log_code(f'Data/{session}', ['.', 'Library'], label=session)
 parameters = ControlParameters.Parameters()
 parameters.plot(save_path=writer.files_folder())
 parameters.plot()

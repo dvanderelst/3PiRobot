@@ -361,9 +361,9 @@ class DataCollection:
         """
         self.session_paths = session_paths
         
-        # Set default cache directory to './cache' if not specified
+        # Set default cache directory to './Cache' if not specified
         if cache_dir is None:
-            self.cache_dir = './cache'
+            self.cache_dir = './Cache'
             print(f"💾 Using default cache directory: {self.cache_dir}")
         elif cache_dir is False:
             self.cache_dir = None  # Disable caching
@@ -868,7 +868,7 @@ class DataProcessor:
         
         # Cache configuration
         if cache_dir is None:
-            self.cache_dir = './cache'
+            self.cache_dir = './Cache'
         elif cache_dir is False:
             self.cache_dir = None  # Disable caching
         else:

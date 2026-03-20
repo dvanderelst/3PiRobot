@@ -6,6 +6,7 @@ predict what sonar measurements (distance and IID) it would receive using
 the trained emulator.
 """
 
+import json
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -251,22 +252,41 @@ class EnvironmentSimulator:
         robot_radius_mm: float = 85.0,
         boundary_margin_mm: Optional[float] = None,
         collision_step_mm: float = 20.0,
+        emulator_dir: str = "Emulator",
     ):
         """
         Initialize simulator with arena layout and emulator.
-        
+
         Args:
             session_name: Session to use for arena layout
             robot_radius_mm: Collision clearance radius around robot center
             boundary_margin_mm: Min distance from arena border (defaults to robot radius)
             collision_step_mm: Step size for drive-segment collision checking
+            emulator_dir: Directory containing emulator artifacts
         """
         # Load arena layout
         self.arena = ArenaLayout(session_name)
-        
+
         # Load emulator
-        self.emulator = Emulator.load(device="cpu")  # Use CPU for stability
+        self.emulator = Emulator.load(emulator_dir=emulator_dir, device="cpu")  # Use CPU for stability
         
+        # Load distance regression params (sonar = slope * min_profile + intercept).
+        # Allows the simulator to return sonar-equivalent distances instead of raw
+        # geometric minima, closing the sim-to-real gap identified in SCRIPT_TrainEmulator.py.
+        # Falls back to identity (no correction) if the key is absent.
+        self._dist_slope = 1.0
+        self._dist_intercept = 0.0
+        try:
+            params_path = f"{emulator_dir}/training_params.json"
+            with open(params_path) as f:
+                _params = json.load(f)
+            _reg = _params.get("distance_regression_diagnostic", {})
+            self._dist_slope     = float(_reg.get("slope",     1.0))
+            self._dist_intercept = float(_reg.get("intercept", 0.0))
+            print(f"Distance correction loaded: dist_mm = {self._dist_slope:.4f} * geo + {self._dist_intercept:.1f} mm")
+        except Exception as e:
+            print(f"⚠ Could not load distance regression params ({e}); using identity.")
+
         # Get profile parameters from emulator (ensures consistency)
         self.profile_params = self.emulator.get_profile_params()
         self.opening_angle = self.profile_params['profile_opening_angle']
@@ -433,10 +453,13 @@ class EnvironmentSimulator:
         # Profile spans opening_angle degrees with profile_steps bins.
         central_profile = profile[self._central_lo:self._central_hi]
         finite_vals = central_profile[np.isfinite(central_profile)]
+        # 3000 mm = "nothing in range": all profile bins are NaN/inf, meaning no
+        # wall within the geometric model's range.  This is the correct open-space value.
         geo_dist_mm = float(np.min(finite_vals)) if len(finite_vals) > 0 else 3000.0
+        dist_mm = max(0.0, self._dist_slope * geo_dist_mm + self._dist_intercept)
 
-        result['echo_distance_mm'] = geo_dist_mm
-        result['distance_mm'] = geo_dist_mm
+        result['echo_distance_mm'] = dist_mm
+        result['distance_mm'] = dist_mm
 
         return result
     
@@ -474,11 +497,12 @@ class EnvironmentSimulator:
         for k in range(len(positions)):
             fv = central[k]
             fv = fv[np.isfinite(fv)]
-            geo_dist = float(np.min(fv)) if len(fv) > 0 else 3000.0
+            geo_dist = float(np.min(fv)) if len(fv) > 0 else 3000.0  # 3000 mm = nothing in range
+            dist_mm = max(0.0, self._dist_slope * geo_dist + self._dist_intercept)
             results.append({
                 'echo_present_prob': float(emulator_results['echo_present_prob'][k]),
-                'echo_distance_mm':  geo_dist,
-                'distance_mm':       geo_dist,
+                'echo_distance_mm':  dist_mm,
+                'distance_mm':       dist_mm,
                 'iid_db':            float(emulator_results['iid_db'][k]),
             })
         return results
