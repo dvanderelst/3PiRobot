@@ -1,0 +1,56 @@
+[DON'T EDIT WITHOUT EXPLICIT USER CONSENT]
+
+
+I want to model a bat that learns how to use its sonar system.
+I have collected data using a robot with a sonar system in various arenas.
+This was done using the SCRIPT_DataAcquisition.py script
+The sonar system is mounted fixed on the robot's body.
+
+To train the robotic bat to use its sonar system, this is the rationale
+1 - We train an emulator to predict, based on a local view of the arena (called profiles), what the IID and distance detected by the sonar would be
+2 - For the IID, we use a convolutional neural network taking the profile as input
+3 - For the distance, we use the shortest distance in the profile as a proxy. However, since there is a systematic difference between the distance reported by the sonar and the shortest distance, we fit a linear regression to correct for it. Hence, the distance the emulator returns is a corrected scaling and offset version of the smallest distance in the profile.
+
+Using this emulator, I want to train a policy controlling the robotic bat.
+The policy will be a neural network that produces two rotations, rotation 1 and rotation 2, based on a set of inputs. See below.
+
+Importantly, we want to simulate the ability of bats to measure in a different direction (using head rotations) than the direction into which they are flying. Therefore, the policy will produce 2 rotation values to be used as follows. At each step
+
+
+- Present the policy with n previous values of
+ - the sonar distance as returned by the emulator for n previous steps + 1 zero value
+ - the sonar iid as returned by the emulator for n previous steps + 1 zero value
+ - the n previous rotation 1 value + 1 zero value
+ - the n previous rotation 2 values
+
+- Have the network produce [rotation 1]
+- The robot rotates by [rotation1] degrees
+- In this orientation, it performs a sonar measurement. This means that the local view of the environment for this orientation is extracted as a profile
+- The profile is passed to the emulator to get an emulated sonar IID
+- The profile is also used to get an emulated sonar distance
+
+- Present the policy with n previous values of
+ - the sonar distance as returned by the emulator for n previous steps + new distance value
+ - the sonar iid as returned by the emulator for n previous steps + new iid value
+ - the n previous rotation 1 value + new rotation 1 value
+ - the n previous rotation 2 values
+- Have the network produce [rotation 2]
+- The robot rotates by [rotation2] degrees
+- The robot's new heading is now (original heading + rotation1 + rotation2). That is, the net body rotation per step is the sum of both rotations.
+- Then it drives straight for a fixed distance, i.e., 100 mm
+
+
+We will train the policy using a GA:
+- The policy should be assessed on two criteria. (1) The paths generated should be smooth. (2) Crashing should be rare.
+
+Fitness function:
+- Compute the centroid (x_c, y_c) of all positions visited during an episode.
+- Divide 360° into angular bins of width W degrees (a parameter, e.g. 10°).
+- For each bin, find all path points whose angle from the centroid falls in that bin and record the maximum distance from the centroid. If no points fall in a bin, its distance is 0.
+- The raw fitness is the mean of these maximum distances across all bins. This rewards paths that extend far from the centroid in every direction. A robot hugging the walls all around scores high; one zigzagging in a corner or going straight and back scores low.
+- If the episode ends in a collision, the raw fitness is multiplied by a discount factor (< 1), strongly penalising crashes.
+
+
+
+The policy is an MLP. An RNN was considered but rejected: although it has fewer parameters, each parameter has compounding effects across time steps, making the GA fitness landscape more rugged. The MLP with explicit history has a smoother, more GA-friendly landscape and maps cleanly onto the input structure described above.
+
