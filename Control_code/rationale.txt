@@ -24,8 +24,7 @@ Parameters:
     lateral environment, including walls that influence IID even if outside the sonar's
     forward beam. Current setting: 220°.
   - resolution: fine enough to resolve meaningful spatial variation in wall distance,
-    but coarse enough to keep the input compact. A few degrees per bin is appropriate
-    (e.g. 220° / 36 bins ≈ 6°/bin).
+    but coarse enough to keep the input compact. Current setting: 220° / 20 bins = 11°/bin.
   - profile_method: 'min_bin' or 'ray_center' — a configurable setting. Both are
     available in DataCollection.load_profiles(). Current setting: 'min_bin'.
 
@@ -38,7 +37,7 @@ Targets:
     IID > 0 means wall on the right; IID < 0 means wall on the left.
   - corrected_distance from the sonar_package (in mm).
 
-The full 220° profile (36 bins) is used as input to both heads. A broad profile is
+The full 220° profile (20 bins) is used as input to both heads. A broad profile is
 necessary because IID encodes the lateral asymmetry of the environment, which requires
 context beyond the narrow forward beam. The distance head uses the same input; the CNN
 learns which parts of the profile are relevant for each output.
