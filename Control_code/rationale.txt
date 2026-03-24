@@ -6,10 +6,113 @@ I have collected data using a robot with a sonar system in various arenas.
 This was done using the SCRIPT_DataAcquisition.py script
 The sonar system is mounted fixed on the robot's body.
 
-To train the robotic bat to use its sonar system, this is the rationale
-1 - We train an emulator to predict, based on a local view of the arena (called profiles), what the IID and distance detected by the sonar would be
-2 - For the IID, we use a convolutional neural network taking the profile as input
-3 - For the distance, we use the shortest distance in the profile as a proxy. However, since there is a systematic difference between the distance reported by the sonar and the shortest distance, we fit a linear regression to correct for it. Hence, the distance the emulator returns is a corrected scaling and offset version of the smallest distance in the profile.
+
+=== EMULATOR ===
+
+The emulator predicts, from a geometric profile of the local arena, the sonar readings
+(IID and distance) the robot would receive at that position and heading. It is a single
+1D CNN with two regression heads: one for IID and one for distance. Both are trained on
+echo-present samples only; echo presence is not predicted explicitly.
+
+--- Profile (input) ---
+
+A profile is a 1D array of wall distances sampled at evenly-spaced azimuth angles centred
+on the robot's current heading. The same profile is the input to both CNN heads.
+
+Parameters:
+  - opening_angle: should be broad enough to give the CNN full context about the
+    lateral environment, including walls that influence IID even if outside the sonar's
+    forward beam. Current setting: 220°.
+  - resolution: fine enough to resolve meaningful spatial variation in wall distance,
+    but coarse enough to keep the input compact. A few degrees per bin is appropriate
+    (e.g. 220° / 36 bins ≈ 6°/bin).
+  - profile_method: 'min_bin' or 'ray_center' — a configurable setting. Both are
+    available in DataCollection.load_profiles(). Current setting: 'min_bin'.
+
+Distances in the profile are in mm.
+
+--- IID and distance (shared CNN, two heads) ---
+
+Targets:
+  - corrected_iid from the sonar_package (a single float per step, in dB).
+    IID > 0 means wall on the right; IID < 0 means wall on the left.
+  - corrected_distance from the sonar_package (in mm).
+
+The full 220° profile (36 bins) is used as input to both heads. A broad profile is
+necessary because IID encodes the lateral asymmetry of the environment, which requires
+context beyond the narrow forward beam. The distance head uses the same input; the CNN
+learns which parts of the profile are relevant for each output.
+
+Profile normalisation: each profile is divided by max_dist_mm (a fixed global scale),
+then z-scored using training-set per-bin mean and std. This preserves absolute distance
+information across profiles.
+
+Do NOT normalise each profile by its own mean (per-profile normalisation). This is
+acoustically incorrect: IID magnitude depends on absolute distance, not just the shape
+of the profile. A trivial counterexample: a profile at a sufficiently large distance
+produces IID ≈ 0 regardless of its shape, because the sonar echoes are too weak to
+carry lateral information. Per-profile normalisation would make all such distant profiles
+look identical to nearby ones, destroying the distance cue the CNN needs.
+
+Model architecture:
+    Conv1D(in=1, out=32, kernel=5, padding=2) → ReLU
+    Conv1D(in=32, out=64, kernel=5, padding=2) → ReLU
+    AdaptiveAvgPool1d(8) → flatten → FC(512→64) → ReLU   [shared backbone]
+    → FC(64→32) → ReLU → FC(32→1)   [IID head: predicted IID in dB]
+    → FC(64→32) → ReLU → FC(32→1)   [distance head: predicted distance in mm]
+
+Loss: IID_MSE + dist_loss_weight × distance_MSE, both on echo-present samples only.
+Both targets are z-scored independently (using echo-present training statistics) before
+computing MSE, so the two losses are in comparable units.
+
+--- Echo presence ---
+
+Echo presence is NOT predicted by the emulator. Samples with corrected_distance ≥
+max_dist_mm are excluded from training (their distance and IID values are sentinel
+values set by AcousticProcessing, not real measurements). At inference the networks
+simply extrapolate: a flat, far-away profile naturally produces a large predicted
+distance and near-zero predicted IID, which is the correct behaviour.
+
+--- Symmetrised inference ---
+
+By physical definition, mirroring a profile horizontally (left↔right) must negate the
+IID and leave the distance unchanged. A CNN trained on finite data may not learn these
+(anti)symmetries exactly. To enforce them at inference time, each profile is passed
+through the network twice — once as-is and once flipped — and the outputs are combined:
+
+    iid_db   = (iid_normal  − iid_flipped)  / 2   [antisymmetric under flip]
+    distance = (dist_normal + dist_flipped) / 2   [symmetric under flip]
+
+This guarantees the physical constraints are satisfied regardless of any residual
+asymmetry in the trained weights, at the cost of doubling inference time.
+
+--- Data and train/validation split ---
+
+Data source: sessions B01–B05, loaded via DataCollection. Each data point pairs a
+profile (computed from the arena geometry at the robot's logged position and heading)
+with the corrected_iid and corrected_distance from the sonar_package recorded at that step.
+
+Train/validation split is quadrant-based to test spatial generalisation: the emulator
+is trained on data from most spatial regions and validated on held-out regions it has
+not seen, simulating positions the policy will visit that were not covered during data
+collection.
+
+The split is specified as a dict mapping session name to a list of quadrant indices
+(0–3) to withhold for validation. All remaining data from all sessions goes to training.
+Example:
+    validation_quadrants = {
+        "sessionB01": [3],
+        "sessionB03": [3],
+    }
+This withholds ~12.5% of data per listed session while keeping all other sessions'
+data (including all quadrants of unlisted sessions) in training.
+
+Evaluation: report Pearson r and RMSE for IID and distance separately on
+  (1) training data (echo-present),
+  (2) held-out validation quadrants (echo-present).
+
+
+=== POLICY: ARCHITECTURE AND STEP SEQUENCE ===
 
 Using this emulator, I want to train a policy controlling the robotic bat.
 The policy will be a neural network that produces two rotations, rotation 1 and rotation 2, based on a set of inputs. See below.
@@ -40,17 +143,97 @@ Importantly, we want to simulate the ability of bats to measure in a different d
 - Then it drives straight for a fixed distance, i.e., 100 mm
 
 
+=== POLICY: IID BILATERAL SYMMETRY ===
+
+The policy network is trained exclusively in a canonical "wall-on-right" frame: IID values
+presented to the network are always non-negative. When the physical IID is negative (wall on
+left), the IID sign is flipped before feeding the network and the output rotation is negated,
+so the robot still turns the correct physical direction. History is always stored in this
+canonical frame (absolute IID, rotations reflected accordingly).
+
+This symmetry wrapper is applied identically during training (in the simulator) and during
+deployment (on the real robot). Without it, the GA can find a degenerate solution that always
+turns in one direction regardless of sonar input.
+
+
+=== POLICY: HISTORY INITIALISATION ===
+
+The policy uses a history buffer of n steps. At episode start this buffer contains no real
+sonar data. Two naive approaches both cause problems:
+- Zero-fill: the network can detect "all zeros = episode start" and behave differently at
+  the start of an episode than mid-episode, which will not generalise well.
+- Random noise fill: the network learns that early history is untrustworthy and may learn
+  to discount it, which wastes the history mechanism.
+
+The adopted solution is honest zero-fill: both training and deployment initialise the history
+buffer to zeros. This is the truthful representation of episode start — the robot genuinely
+has no prior information — and is fully consistent between training and deployment. If the
+policy learns a distinct start-of-episode behaviour, that is legitimate: it is in a genuinely
+different situation at the start.
+
+[OPEN QUESTION: is zero-fill actually the best strategy? The alternative — random pre-fill in
+training — prevents the network from exploiting the start-condition cue, at the cost of giving
+it dishonest history. Whether the policy benefits from, or is harmed by, knowing it is at the
+start of an episode is an empirical question worth revisiting.]
+
+
+=== POLICY: TRAINING WITH A GA ===
+
 We will train the policy using a GA:
 - The policy should be assessed on two criteria. (1) The paths generated should be smooth. (2) Crashing should be rare.
 
 Fitness function:
 - Compute the centroid (x_c, y_c) of all positions visited during an episode.
 - Divide 360° into angular bins of width W degrees (a parameter, e.g. 10°).
-- For each bin, find all path points whose angle from the centroid falls in that bin and record the maximum distance from the centroid. If no points fall in a bin, its distance is 0.
-- The raw fitness is the mean of these maximum distances across all bins. This rewards paths that extend far from the centroid in every direction. A robot hugging the walls all around scores high; one zigzagging in a corner or going straight and back scores low.
+- For each bin, find all path points whose angle from the centroid falls in that bin and record the mean distance from the centroid. If no points fall in a bin, its distance is 0.
+- The raw fitness is the mean of these per-bin mean distances across all bins. This rewards paths that are consistently far from the centroid in every direction. Using the mean (not max) per bin prevents a degenerate strategy where the robot shoots briefly to the walls in each direction and returns to the centre — the robot must spend sustained time far from the centroid to score well.
 - If the episode ends in a collision, the raw fitness is multiplied by a discount factor (< 1), strongly penalising crashes.
-
-
+- To enforce smooth paths (criterion 1), a jitter penalty is applied multiplicatively:
+    jerk_t = |(rotate1_t + rotate2_t) - (rotate1_{t-1} + rotate2_{t-1})|
+    jitter_factor = 1 - w_smooth * mean(jerk_t) / max_possible_jerk
+    fitness = coverage * jitter_factor * collision_discount
+  where max_possible_jerk = 2 * (max_rotate1 + max_rotate2) (the maximum possible heading reversal per step).
+  w_smooth controls the strength of the penalty (0 = disabled, 1 = full weight). A smooth arc has low
+  mean jerk; left-right oscillation has high mean jerk. Consistent wall-following turns are not penalised —
+  only reversals are.
 
 The policy is an MLP. An RNN was considered but rejected: although it has fewer parameters, each parameter has compounding effects across time steps, making the GA fitness landscape more rugged. The MLP with explicit history has a smoother, more GA-friendly landscape and maps cleanly onto the input structure described above.
 
+
+=== DEPLOYMENT ON THE REAL ROBOT ===
+
+After training a policy, we apply it on the real robot by writing a script similar to
+SCRIPT_DataAcquisition.py. The same sonar data collection and processing pipeline is used,
+yielding a sonar_package per step; corrected_iid and corrected_distance from that package
+are fed into the trained policy.
+
+Physical rotation sequence (each step):
+  1. Decide rotate1 using the policy (with IID symmetry wrapper applied to last step's IID).
+  2. Physically rotate the robot's body by rotate1 degrees.
+  3. Take a sonar measurement (corrected_iid, corrected_distance).
+  4. Decide rotate2 using the policy (with IID symmetry wrapper applied to current IID).
+  5. Physically rotate the robot's body by rotate2 degrees.
+  6. Drive forward 100 mm.
+  7. Append canonical (flipped) values to the history buffer.
+
+Note: because the sonar is body-fixed, rotate1 is a genuine physical rotation — it is not a
+virtual "look direction" as in the emulator-based simulator.
+
+IID symmetry wrapper (identical to training):
+  If corrected_iid < 0 (wall on left): pass abs(corrected_iid) to the network and negate the
+  output rotation to obtain the physical rotation. Store abs(corrected_iid) and the canonical
+  (negated) rotation in the history buffer.
+
+History initialisation on the real robot:
+  Initialise the history buffer to zeros, consistent with how training episodes are initialised.
+
+Stopping condition:
+  The robot runs for a fixed number of steps (max_steps, a configurable parameter). The script
+  can also be interrupted manually. On collision detection the step is logged and the run ends.
+
+Data logging (per step, appended to a session data file as in SCRIPT_DataAcquisition.py):
+  - sonar_package (full, as returned by client.read_and_process)
+  - position from tracker (x, y, yaw_deg)
+  - rotate1, rotate2, net rotation (rotate1 + rotate2)
+  - drive distance
+  Additional fields can be added as needed.

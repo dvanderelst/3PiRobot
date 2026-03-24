@@ -6,7 +6,6 @@ predict what sonar measurements (distance and IID) it would receive using
 the trained emulator.
 """
 
-import json
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -268,39 +267,17 @@ class EnvironmentSimulator:
         self.arena = ArenaLayout(session_name)
 
         # Load emulator
-        self.emulator = Emulator.load(emulator_dir=emulator_dir, device="cpu")  # Use CPU for stability
-        
-        # Load distance regression params (sonar = slope * min_profile + intercept).
-        # Allows the simulator to return sonar-equivalent distances instead of raw
-        # geometric minima, closing the sim-to-real gap identified in SCRIPT_TrainEmulator.py.
-        # Falls back to identity (no correction) if the key is absent.
-        self._dist_slope = 1.0
-        self._dist_intercept = 0.0
-        try:
-            params_path = f"{emulator_dir}/training_params.json"
-            with open(params_path) as f:
-                _params = json.load(f)
-            _reg = _params.get("distance_regression_diagnostic", {})
-            self._dist_slope     = float(_reg.get("slope",     1.0))
-            self._dist_intercept = float(_reg.get("intercept", 0.0))
-            print(f"Distance correction loaded: dist_mm = {self._dist_slope:.4f} * geo + {self._dist_intercept:.1f} mm")
-        except Exception as e:
-            print(f"⚠ Could not load distance regression params ({e}); using identity.")
+        self.emulator = Emulator.load(emulator_dir=emulator_dir, device="cpu")
 
-        # Get profile parameters from emulator (ensures consistency)
+        # Profile parameters — read from the emulator artifact so they are always
+        # consistent with what the model was trained on.
         self.profile_params = self.emulator.get_profile_params()
-        self.opening_angle = self.profile_params['profile_opening_angle']
-        self.profile_steps = self.profile_params['profile_steps']
-        self.robot_radius_mm = float(robot_radius_mm)
-        self.boundary_margin_mm = float(boundary_margin_mm) if boundary_margin_mm is not None else float(robot_radius_mm)
-        self.collision_step_mm = max(1.0, float(collision_step_mm))
+        self.opening_angle  = self.profile_params['profile_opening_angle']
+        self.profile_steps  = self.profile_params['profile_steps']
 
-        # Pre-compute the central-90° profile slice indices (constant; reused in every sonar call).
-        n_p = self.profile_steps
-        _central_frac = min(90.0 / float(self.opening_angle), 1.0)
-        _margin = (1.0 - _central_frac) / 2.0
-        self._central_lo = int(np.round(_margin * (n_p - 1)))
-        self._central_hi = int(np.round((1.0 - _margin) * (n_p - 1))) + 1  # exclusive
+        self.robot_radius_mm    = float(robot_radius_mm)
+        self.boundary_margin_mm = float(boundary_margin_mm) if boundary_margin_mm is not None else float(robot_radius_mm)
+        self.collision_step_mm  = max(1.0, float(collision_step_mm))
 
         print(f"Simulator initialized with {session_name}")
         print(f"Profile config: {self.opening_angle}° opening, {self.profile_steps} steps")
@@ -424,12 +401,7 @@ class EnvironmentSimulator:
         """
         Get predicted sonar measurement at position/orientation.
 
-        This is the main interface for policy learning.
-
-        Distance is computed geometrically as the minimum profile value over the
-        central 90° of the opening angle (rather than from the emulator, which has
-        poor accuracy at close distances).  IID and echo_present_prob are still
-        predicted by the emulator.
+        Both IID and distance are predicted by the emulator CNN.
 
         Args:
             x, y: Position in mm
@@ -437,31 +409,11 @@ class EnvironmentSimulator:
 
         Returns:
             Dictionary with keys:
-            - 'echo_present_prob': Predicted echo presence probability
-            - 'echo_distance_mm': Geometric minimum distance over central 90° (mm)
-            - 'distance_mm': Alias for echo_distance_mm (backward compat)
-            - 'iid_db': Predicted IID in decibels
+            - 'iid_db':      Predicted IID in decibels
+            - 'distance_mm': Predicted sonar distance in mm
         """
-        # Get distance profile
         profile = self.get_profile_at_position(x, y, orientation_deg)
-
-        # Use emulator for IID and echo_present_prob only
-        result = self.emulator.predict_single(profile)
-
-        # Replace emulator distance with geometric minimum over the central 90°
-        # of the profile (or the full profile if opening_angle <= 90°).
-        # Profile spans opening_angle degrees with profile_steps bins.
-        central_profile = profile[self._central_lo:self._central_hi]
-        finite_vals = central_profile[np.isfinite(central_profile)]
-        # 3000 mm = "nothing in range": all profile bins are NaN/inf, meaning no
-        # wall within the geometric model's range.  This is the correct open-space value.
-        geo_dist_mm = float(np.min(finite_vals)) if len(finite_vals) > 0 else 3000.0
-        dist_mm = max(0.0, self._dist_slope * geo_dist_mm + self._dist_intercept)
-
-        result['echo_distance_mm'] = dist_mm
-        result['distance_mm'] = dist_mm
-
-        return result
+        return self.emulator.predict_single(profile)
     
     def get_sonar_measurements_batch(
         self,
@@ -490,22 +442,13 @@ class EnvironmentSimulator:
         # Single batched CNN inference for all positions
         emulator_results = self.emulator.predict(profiles)
 
-        # Geometric distance: min over central 90° bins (same logic as get_sonar_measurement)
-        central = profiles[:, self._central_lo:self._central_hi]  # (N, central_bins)
-
-        results: List[Dict[str, float]] = []
-        for k in range(len(positions)):
-            fv = central[k]
-            fv = fv[np.isfinite(fv)]
-            geo_dist = float(np.min(fv)) if len(fv) > 0 else 3000.0  # 3000 mm = nothing in range
-            dist_mm = max(0.0, self._dist_slope * geo_dist + self._dist_intercept)
-            results.append({
-                'echo_present_prob': float(emulator_results['echo_present_prob'][k]),
-                'echo_distance_mm':  dist_mm,
-                'distance_mm':       dist_mm,
-                'iid_db':            float(emulator_results['iid_db'][k]),
-            })
-        return results
+        return [
+            {
+                "iid_db":      float(emulator_results["iid_db"][k]),
+                "distance_mm": float(emulator_results["distance_mm"][k]),
+            }
+            for k in range(len(positions))
+        ]
 
     def simulate_robot_movement(self, start_x: float, start_y: float, start_orientation: float,
                                actions: List[Dict[str, float]],
