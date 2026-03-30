@@ -39,7 +39,7 @@ The full 220° profile (20 bins) is used as input to both heads. A broad profile
 ```
 Conv1D(in=1,  out=32, kernel=5, padding=2) → ReLU   ┐
 Conv1D(in=32, out=64, kernel=5, padding=2) → ReLU   ┘ shared backbone
-AdaptiveAvgPool1d(8) → flatten → FC(512→64) → ReLU
+AdaptiveAvgPool1d(8) → flatten → FC(64×8=512 → 64) → ReLU
 
 → FC(64→32) → ReLU → FC(32→1)   [IID head: predicted IID in dB]
 → FC(64→32) → ReLU → FC(32→1)   [distance head: predicted distance in mm]
@@ -97,7 +97,7 @@ This models a bat's ability to measure in a different direction (via head rotati
    - sonar distance (emulator output for the *n* previous steps + 1 zero)
    - sonar IID (emulator output for the *n* previous steps + 1 zero)
    - rotation 1 (the *n* previous values + 1 zero)
-   - rotation 2 (the *n* previous values)
+   - rotation 2 (the *n* previous values — no zero appended, because rotation 2 from the previous step is already available)
 2. Network produces **rotation 1**.
 3. Robot rotates by rotation 1 degrees.
 4. In this orientation, a sonar measurement is taken: the local profile is extracted and passed to the emulator to obtain IID and distance.
