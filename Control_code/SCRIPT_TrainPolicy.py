@@ -88,7 +88,7 @@ class Config:
     # Fitness
     angular_bin_deg: float = 10.0       # width of angular bins for coverage metric
     collision_discount: float = 0.1     # fitness multiplier on collision
-    w_smooth: float = 0.75               # jitter penalty weight (0 = disabled, 1 = full)
+    w_smooth: float = 0.25               # jitter penalty weight (0 = disabled, 1 = full)
 
     # GA
     population_size: int = 100
