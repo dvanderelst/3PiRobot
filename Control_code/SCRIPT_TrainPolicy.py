@@ -49,7 +49,7 @@ from Library import CodeLogger
 
 
 # ── Condition ────────────────────────────────────────────────────────────────────
-CONDITION = "run3"   # output goes to Policy2/<CONDITION>/
+CONDITION = "run4"   # output goes to Policy2/<CONDITION>/
 
 # ── Pushover ─────────────────────────────────────────────────────────────────────
 try:
@@ -75,7 +75,7 @@ def pushover_notify(msg: str, title: str = "3PiRobot") -> None:
 @dataclass
 class Config:
     # Policy architecture
-    history_len: int = 7
+    history_len: int = 3
     hidden_sizes: Tuple[int, int] = (32, 16)
     max_rotate1_deg: float = 45.0
     max_rotate2_deg: float = 45.0
@@ -122,6 +122,7 @@ class Config:
     parallel_eval: bool = True
     num_workers: Optional[int] = None
     save_all_generation_policies: bool = False
+    n_best_policies: int = 50       # hall-of-fame size; 0 to disable
 
 
 N_TRAJECTORY_EPISODES = 6   # number of example episodes to plot per trajectory snapshot
@@ -496,6 +497,60 @@ def save_plot(hist: Dict[str, list], output_dir: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
+# Hall of fame
+# ══════════════════════════════════════════════════════════════════════════════════
+
+# Each entry: (fitness, generation, genome)
+HofEntry = Tuple[float, int, np.ndarray]
+
+
+def hof_try_insert(
+    hof: List[HofEntry],
+    fitness: float,
+    generation: int,
+    genome: np.ndarray,
+    n_best: int,
+) -> bool:
+    """
+    Attempt to insert genome into the hall of fame.
+    Skips exact duplicates (np.array_equal). Returns True if the HOF changed.
+    """
+    if n_best <= 0:
+        return False
+    for _, _, g in hof:
+        if np.array_equal(g, genome):
+            return False
+    if len(hof) < n_best or fitness > hof[-1][0]:
+        hof.append((fitness, generation, genome.copy()))
+        hof.sort(key=lambda e: e[0], reverse=True)
+        if len(hof) > n_best:
+            hof.pop()
+        return True
+    return False
+
+
+def save_hof(hof: List[HofEntry], cfg: Config, hof_dir: str) -> None:
+    """Rewrite all HOF files (rank001.json … rankNNN.json) to hof_dir."""
+    for rank, (fitness, generation, genome) in enumerate(hof, 1):
+        pol = MLPPolicy(cfg)
+        pol.set_genome(genome)
+        data = {
+            "rank":            rank,
+            "history_len":     pol.cfg.history_len,
+            "hidden_sizes":    list(pol.cfg.hidden_sizes),
+            "max_rotate1_deg": pol.cfg.max_rotate1_deg,
+            "max_rotate2_deg": pol.cfg.max_rotate2_deg,
+            "fixed_drive_mm":  pol.cfg.fixed_drive_mm,
+            "genome_size":     pol.genome_size(),
+            "genome":          pol.get_genome().tolist(),
+            "fitness":         float(fitness),
+            "generation":      int(generation),
+        }
+        with open(os.path.join(hof_dir, f"rank{rank:03d}.json"), "w") as f:
+            json.dump(data, f, indent=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
 # Trajectory plotting
 # ══════════════════════════════════════════════════════════════════════════════════
 
@@ -650,6 +705,11 @@ def main() -> None:
             sys.exit(0)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
+    hof_dir = os.path.join(cfg.output_dir, "top_policies")
+    if cfg.n_best_policies > 0:
+        os.makedirs(hof_dir, exist_ok=True)
+    hof: List[HofEntry] = []
+
     with open(os.path.join(cfg.output_dir, "config.json"), "w") as f:
         json.dump(asdict(cfg), f, indent=2)
     CodeLogger.log_code(cfg.output_dir, [".", "Library"], label="policy2")
@@ -727,6 +787,18 @@ def main() -> None:
                 pol.set_genome(best_genome)
                 save_policy(pol, best_fitness, gen,
                             os.path.join(cfg.output_dir, "best_policy.json"))
+
+            # ── Hall of fame ──────────────────────────────────────────────────
+            if cfg.n_best_policies > 0:
+                hof_changed = False
+                for genome, fitness in sorted(
+                    zip(population, fitnesses.tolist()),
+                    key=lambda x: x[1], reverse=True,
+                ):
+                    if hof_try_insert(hof, fitness, gen, genome, cfg.n_best_policies):
+                        hof_changed = True
+                if hof_changed:
+                    save_hof(hof, cfg, hof_dir)
 
             # ── Optionally save every generation's best ───────────────────────
             if cfg.save_all_generation_policies:
