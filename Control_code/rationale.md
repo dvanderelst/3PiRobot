@@ -1,5 +1,9 @@
 > **Do not edit without explicit user consent.**
 
+> **Implementation:** the canonical implementation of this rationale lives in three files:
+> `SCRIPT_TrainEmulator.py` (emulator training), `SCRIPT_TrainPolicy.py` (policy training),
+> and `SCRIPT_RunPolicy.py` (deployment). Consistency checks should cover all three.
+
 # Project Overview
 
 Modelling a bat that learns to use its sonar system. Data was collected with a robot equipped with a body-fixed sonar system in various arenas, using `SCRIPT_DataAcquisition.py`.
@@ -151,7 +155,7 @@ The policy is trained with a genetic algorithm (GA), assessed on two criteria: (
 6. A **jitter penalty** is applied multiplicatively to enforce smooth paths:
 
 ```
-jerk_t         = |(rotate1_t + rotate2_t) − (rotate1_{t−1} + rotate2_{t−1})|
+jerk_t         = |(rotate1_t + rotate2_t) − (rotate1_{t−1} + rotate2_{t−1})|   # physical turns
 jitter_factor  = 1 − w_smooth × mean(jerk_t) / max_possible_jerk
 fitness        = coverage × jitter_factor × collision_discount
 ```
@@ -161,6 +165,31 @@ where `max_possible_jerk = 2 × (max_rotate1 + max_rotate2)` (the maximum possib
 ### Architecture choice
 
 The policy is an **MLP** (not an RNN). An RNN was considered but rejected: although it has fewer parameters, each parameter has compounding effects across time steps, making the GA fitness landscape more rugged. The MLP with explicit history has a smoother, more GA-friendly landscape and maps cleanly onto the input structure described above.
+
+---
+
+## Policy: Variation of History Length
+
+To understand how much the policy benefits from memory, we train separate policies for several values of `history_len` (e.g. 1, 3, 5, 10). The goal is best performance at each history size, not a fair comparison between equally-sized networks, so the network is allowed to scale naturally with history.
+
+### Network scaling with history
+
+The input dimension is `4 * history_len + 3`, so it already grows with history length. The hidden layer sizes are kept fixed (e.g. `(32, 16)`) across all runs. The expressivity bottleneck for short-history policies is the lack of temporal information, not network capacity, so scaling hidden sizes with history is not expected to help.
+
+### history_len = 1 as the minimal reactive baseline
+
+`history_len = 1` is the natural "no-memory" baseline. Tracing through `build_input`:
+
+- **Phase 1 (look):** input is `[prev_dist, 0, prev_iid, 0, prev_r1, 0, prev_r2]` — the previous step's measurement fills the history slots; the current slots are zero because the measurement has not yet been taken. The network uses the previous measurement to decide where to look.
+- **Phase 2 (move):** input is `[prev_dist, dist_current, prev_iid, iid_current, prev_r1, r1_current, prev_r2]` — both the previous and the new measurement are available. The network uses both to decide how to move.
+
+This is the minimal policy that makes sensible use of the two-phase step structure.
+
+`history_len = 0` is **not** a useful baseline: with no history, the Phase 1 input is always `[0, 0, 0]`, so the network has no information and rotate1 collapses to a fixed constant (whatever the GA converges to). Phase 2 still receives the current measurement, but rotate1 is effectively a predetermined look angle rather than an adaptive decision.
+
+### Multi-run training
+
+`SCRIPT_TrainPolicy.py` loops over a list of history lengths and runs the full GA for each, saving results to separate output directories (`Policy/<condition>/history_1/`, `Policy/<condition>/history_3/`, etc.). All other settings (GA parameters, fitness function, architecture hidden sizes) are identical across runs.
 
 ---
 
@@ -190,7 +219,7 @@ Initialise the history buffer to zeros, consistent with how training episodes ar
 
 ### Stopping condition
 
-The robot runs for a fixed number of steps (`max_steps`, a configurable parameter). The script can also be interrupted manually. On collision detection the step is logged and the run ends.
+The robot runs for a fixed number of steps (`max_steps`, a configurable parameter). The script can also be interrupted manually.
 
 ### Data logging (per step)
 

@@ -3,7 +3,7 @@
 SCRIPT_TrainPolicy2.py
 
 GA-based policy training, implemented directly from rationale.txt.
-Clean reimplementation — single MLP called twice per step, no symmetry tricks.
+Clean reimplementation — single MLP called twice per step, with IID bilateral symmetry wrapper.
 
 Step sequence per step t:
   1. Build input with zero in current slot → MLP → rotate1
@@ -49,7 +49,8 @@ from Library import CodeLogger
 
 
 # ── Condition ────────────────────────────────────────────────────────────────────
-CONDITION = "run4"   # output goes to Policy2/<CONDITION>/
+CONDITION = "run6"          # base name; output goes to Policy/<CONDITION>/history_N/
+HISTORY_LENGTHS = [1, 3, 5, 10]  # train one run per history length, in order
 
 # ── Pushover ─────────────────────────────────────────────────────────────────────
 try:
@@ -75,7 +76,7 @@ def pushover_notify(msg: str, title: str = "3PiRobot") -> None:
 @dataclass
 class Config:
     # Policy architecture
-    history_len: int = 3
+    history_len: int = 5
     hidden_sizes: Tuple[int, int] = (32, 16)
     max_rotate1_deg: float = 45.0
     max_rotate2_deg: float = 45.0
@@ -113,7 +114,7 @@ class Config:
     validation_episodes: int = 16
 
     # IO
-    output_dir: str = f"Policy/{CONDITION}"
+    output_dir: str = ""                # set by main() from CONDITION + history_len; do not set here
     pushover_every_n: int = 10          # 0 to disable
     plot_trajectories_every_n: int = 1  # 0 to disable; plots N_TRAJECTORY_EPISODES example paths
     head_arrow_every_n_steps: int = 10  # draw a head-direction arrow every N steps (0 to disable)
@@ -331,7 +332,7 @@ def run_episode(
 
         # ── Step 2: sonar measurement at look direction ───────────────────────
         meas = simulator.get_sonar_measurement(x, y, look_yaw)
-        dist_mm      = float(meas.get("distance_mm", cfg.max_dist_mm))
+        dist_mm      = min(float(meas.get("distance_mm", cfg.max_dist_mm)), cfg.max_dist_mm)
         physical_iid = float(meas.get("iid_db", 0.0))
 
         # ── Step 3: decide body turn (canonical frame) ────────────────────────
@@ -353,7 +354,7 @@ def run_episode(
         blocked = bool(result["collision"]["drive_blocked"])
 
         positions.append((x, y))
-        net_turns.append(rotate1_canonical + rotate2_canonical)
+        net_turns.append(rotate1 + rotate2)
         # Store canonical values so history is always in the positive-IID frame.
         history.append((dist_mm, canonical_iid, rotate1_canonical, rotate2_canonical))
         last_physical_iid = physical_iid
@@ -464,6 +465,8 @@ def save_policy(policy: MLPPolicy, fitness: float, generation: int, path: str) -
         "max_rotate1_deg": policy.cfg.max_rotate1_deg,
         "max_rotate2_deg": policy.cfg.max_rotate2_deg,
         "fixed_drive_mm":  policy.cfg.fixed_drive_mm,
+        "max_dist_mm":     policy.cfg.max_dist_mm,
+        "max_iid_db":      policy.cfg.max_iid_db,
         "genome_size":     policy.genome_size(),
         "genome":          policy.get_genome().tolist(),
         "fitness":         float(fitness),
@@ -494,6 +497,19 @@ def save_plot(hist: Dict[str, list], output_dir: str) -> None:
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "training_curve.png"), dpi=120)
     plt.close(fig)
+
+
+def save_history(hist: Dict[str, list], output_dir: str) -> None:
+    """Save the full training history to JSON for later analysis and plotting."""
+    # Replace nan/inf with None for JSON compatibility
+    def _clean(v):
+        if isinstance(v, float) and not np.isfinite(v):
+            return None
+        return v
+
+    clean = {k: [_clean(v) for v in vals] for k, vals in hist.items()}
+    with open(os.path.join(output_dir, "training_history.json"), "w") as f:
+        json.dump(clean, f, indent=2)
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -541,6 +557,8 @@ def save_hof(hof: List[HofEntry], cfg: Config, hof_dir: str) -> None:
             "max_rotate1_deg": pol.cfg.max_rotate1_deg,
             "max_rotate2_deg": pol.cfg.max_rotate2_deg,
             "fixed_drive_mm":  pol.cfg.fixed_drive_mm,
+            "max_dist_mm":     pol.cfg.max_dist_mm,
+            "max_iid_db":      pol.cfg.max_iid_db,
             "genome_size":     pol.genome_size(),
             "genome":          pol.get_genome().tolist(),
             "fitness":         float(fitness),
@@ -585,7 +603,7 @@ def record_trajectories(
             look_yaw = original_yaw + rotate1
             look_yaws.append(look_yaw)
             meas = simulator.get_sonar_measurement(x, y, look_yaw)
-            dist_mm      = float(meas.get("distance_mm", cfg.max_dist_mm))
+            dist_mm      = min(float(meas.get("distance_mm", cfg.max_dist_mm)), cfg.max_dist_mm)
             physical_iid = float(meas.get("iid_db", 0.0))
             flip2         = physical_iid < 0.0
             canonical_iid = abs(physical_iid)
@@ -692,8 +710,7 @@ def build_simulator(session_name: str, quiet: bool = True) -> EnvironmentSimulat
     return EnvironmentSimulator(session_name)
 
 
-def main() -> None:
-    cfg = Config()
+def train(cfg: Config) -> None:
     rng = np.random.default_rng(cfg.seed)
 
     # Guard against accidental overwrite
@@ -702,7 +719,8 @@ def main() -> None:
     ):
         response = input(f"Output dir '{cfg.output_dir}' already has data. Overwrite? [y/N]: ")
         if response.strip().lower() != "y":
-            sys.exit(0)
+            print(f"Skipping history_len={cfg.history_len}.")
+            return
 
     os.makedirs(cfg.output_dir, exist_ok=True)
     hof_dir = os.path.join(cfg.output_dir, "top_policies")
@@ -748,7 +766,16 @@ def main() -> None:
         if starts:
             plot_sims_by_session[sn] = (sim, starts)
 
-    hist: Dict[str, list] = {"best": [], "mean": [], "val": [], "collision_rate": []}
+    hist: Dict[str, list] = {
+        "best":                [],   # best fitness in population
+        "mean":                [],   # mean fitness across population
+        "std":                 [],   # std of fitness across population
+        "min":                 [],   # min fitness in population
+        "val":                 [],   # mean validation fitness (best genome)
+        "val_std":             [],   # std of validation fitness episodes (best genome)
+        "collision_rate":      [],   # collision rate of the best genome
+        "mean_collision_rate": [],   # mean collision rate across the whole population
+    }
     best_genome, best_fitness = None, -np.inf
 
     executor = None
@@ -777,7 +804,10 @@ def main() -> None:
             best_idx   = int(np.argmax(fitnesses))
             gen_best   = float(fitnesses[best_idx])
             gen_mean   = float(np.mean(fitnesses))
+            gen_std    = float(np.std(fitnesses))
+            gen_min    = float(np.min(fitnesses))
             gen_coll   = float(coll_rates[best_idx])   # collision rate of the best genome
+            gen_mean_coll = float(np.mean(coll_rates)) # mean collision rate across population
 
             # ── Save overall best ─────────────────────────────────────────────
             if gen_best > best_fitness:
@@ -809,6 +839,7 @@ def main() -> None:
 
             # ── Validation ────────────────────────────────────────────────────
             val_fit = float("nan")
+            val_std = float("nan")
             if val_sim and val_starts and best_genome is not None:
                 val_pol = MLPPolicy(cfg)
                 val_pol.set_genome(best_genome)
@@ -816,7 +847,9 @@ def main() -> None:
                     run_episode(val_pol, val_sim, val_starts, cfg, rng)
                     for _ in range(cfg.validation_episodes)
                 ]
-                val_fit = float(np.mean([r[0] for r in val_results]))
+                val_fits = [r[0] for r in val_results]
+                val_fit = float(np.mean(val_fits))
+                val_std = float(np.std(val_fits))
 
             # ── Trajectory plot ───────────────────────────────────────────────
             if (cfg.plot_trajectories_every_n > 0
@@ -835,8 +868,12 @@ def main() -> None:
 
             hist["best"].append(gen_best)
             hist["mean"].append(gen_mean)
+            hist["std"].append(gen_std)
+            hist["min"].append(gen_min)
             hist["val"].append(val_fit)
+            hist["val_std"].append(val_std)
             hist["collision_rate"].append(gen_coll)
+            hist["mean_collision_rate"].append(gen_mean_coll)
 
             tqdm.write(
                 f"Gen {gen:4d} | best={gen_best:7.1f}  mean={gen_mean:7.1f}"
@@ -853,6 +890,7 @@ def main() -> None:
                 )
 
             save_plot(hist, cfg.output_dir)
+            save_history(hist, cfg.output_dir)
 
     finally:
         if executor:
@@ -861,6 +899,18 @@ def main() -> None:
     print(f"\nDone. Best fitness: {best_fitness:.1f}")
     print(f"Results saved to:  {cfg.output_dir}")
     pushover_notify(f"Done. Best fitness: {best_fitness:.1f}")
+
+
+def main() -> None:
+    for history_len in HISTORY_LENGTHS:
+        cfg = Config(
+            history_len=history_len,
+            output_dir=f"Policy/{CONDITION}_h{history_len:02d}",
+        )
+        print(f"\n{'='*60}")
+        print(f"Training history_len={history_len}  →  {cfg.output_dir}")
+        print(f"{'='*60}")
+        train(cfg)
 
 
 if __name__ == "__main__":

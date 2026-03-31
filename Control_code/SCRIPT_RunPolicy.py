@@ -32,7 +32,7 @@ from Library import LorexTracker
 from Library import PauseControl
 from Library import PushOver
 from LorexLib.Environment import capture_environment_layout
-from SCRIPT_TrainPolicy2 import Config, MLPPolicy, build_input
+from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -67,6 +67,8 @@ def load_policy(path: str):
         max_rotate1_deg = data["max_rotate1_deg"],
         max_rotate2_deg = data["max_rotate2_deg"],
         fixed_drive_mm  = data["fixed_drive_mm"],
+        max_dist_mm     = data["max_dist_mm"],
+        max_iid_db      = data["max_iid_db"],
     )
     policy = MLPPolicy(cfg)
     policy.set_genome(np.array(data["genome"], dtype=np.float32))

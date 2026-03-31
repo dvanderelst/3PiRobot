@@ -40,7 +40,7 @@ from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input, load_starts
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
 
-RUN_DIR              = "Policy/run4"
+RUN_DIR              = "Policy/run5"
 N_POLICIES           = 5    # how many top HOF policies to assess (None = all)
 EPISODES_PER_SESSION = 3     # per policy per session
 SEED                 = 42
@@ -117,7 +117,7 @@ def run_episode_record(
         look_yaw = original_yaw + rotate1
 
         meas         = simulator.get_sonar_measurement(x, y, look_yaw)
-        dist_mm      = float(meas.get("distance_mm", cfg.max_dist_mm))
+        dist_mm      = min(float(meas.get("distance_mm", cfg.max_dist_mm)), cfg.max_dist_mm)
         physical_iid = float(meas.get("iid_db", 0.0))
 
         flip2         = physical_iid < 0.0
