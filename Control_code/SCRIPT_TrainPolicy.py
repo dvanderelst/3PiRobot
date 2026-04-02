@@ -29,6 +29,7 @@ Fitness (per episode):
 
 import collections
 import dataclasses
+import glob
 import json
 import os
 import sys
@@ -49,8 +50,8 @@ from Library import CodeLogger
 
 
 # ── Condition ────────────────────────────────────────────────────────────────────
-CONDITION = "run6"          # base name; output goes to Policy/<CONDITION>/history_N/
-HISTORY_LENGTHS = [1, 3, 5, 10]  # train one run per history length, in order
+CONDITION = "run"          # base name; output goes to Policy/<CONDITION>_hNN/
+HISTORY_LENGTHS = [0,1,3,5]  # train one run per history length, in order
 
 # ── Pushover ─────────────────────────────────────────────────────────────────────
 try:
@@ -76,11 +77,13 @@ def pushover_notify(msg: str, title: str = "3PiRobot") -> None:
 @dataclass
 class Config:
     # Policy architecture
-    history_len: int = 5
+    history_len: int = 5  # overridden by main() from HISTORY_LENGTHS
+    include_r1_in_input: bool = True  # if False, r1 slot removed from input vector (required when force_aligned=True)
+    force_aligned: bool = False       # if True, rotate1 always 0 (head fixed to body) — baseline only
     hidden_sizes: Tuple[int, int] = (32, 16)
     max_rotate1_deg: float = 45.0
     max_rotate2_deg: float = 45.0
-    fixed_drive_mm: float = 100.0
+    fixed_drive_mm: float = 200.0
 
     # Input normalisation constants
     max_dist_mm: float = 2000.0     # distances divided by this before entering network
@@ -89,11 +92,11 @@ class Config:
     # Fitness
     angular_bin_deg: float = 10.0       # width of angular bins for coverage metric
     collision_discount: float = 0.1     # fitness multiplier on collision
-    w_smooth: float = 0.25               # jitter penalty weight (0 = disabled, 1 = full)
+    w_smooth: float = 0.15               # jitter penalty weight (0 = disabled, 1 = full)
 
     # GA
     population_size: int = 100
-    generations: int = 200
+    generations: int = 100
     elitism_count: int = 10
     mutation_rate: float = 0.05          # fraction of weights perturbed per offspring
     mutation_sigma: float = 0.3
@@ -102,7 +105,7 @@ class Config:
 
     # Evaluation
     episodes_per_policy: int = 32
-    max_steps: int = 150
+    max_steps: int = 250
     starts_dir: str = "ValidStarts"
     starts_suffixes: List[str] = field(
         default_factory=lambda: ["starts_wall_left", "starts_wall_right", "starts_headon"]
@@ -121,9 +124,16 @@ class Config:
     head_arrow_length_mm: float = 150.0 # length of head-direction arrows in mm
     quiet_setup: bool = True
     parallel_eval: bool = True
-    num_workers: Optional[int] = None
+    num_workers: Optional[int] = 8#None
     save_all_generation_policies: bool = False
     n_best_policies: int = 50       # hall-of-fame size; 0 to disable
+
+    def __post_init__(self):
+        if self.force_aligned and self.include_r1_in_input:
+            raise ValueError(
+                "force_aligned=True requires include_r1_in_input=False "
+                "(rotate1 is always 0, so the r1 slot must be removed from the input)"
+            )
 
 
 N_TRAJECTORY_EPISODES = 6   # number of example episodes to plot per trajectory snapshot
@@ -135,15 +145,17 @@ N_TRAJECTORY_EPISODES = 6   # number of example episodes to plot per trajectory 
 
 class MLPPolicy:
     """
-    Single MLP called twice per step — once to produce rotate1, once for rotate2.
+    Single MLP called once (baseline, force_aligned=True) or twice (history policies) per step.
+    When called twice: first to produce rotate1 (look direction), then rotate2 (body turn).
+    When force_aligned: rotate1 is always 0 and only the rotate2 call is made.
 
-    Input size: 4 * history_len + 3
+    Input size: 4 * history_len + 3  (or +2 if include_r1_in_input=False)
     Architecture: in_dim → h1 (tanh) → h2 (tanh) → 1 (tanh), scaled to ±max_rotate_deg.
     """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.in_dim = 4 * cfg.history_len + 3
+        self.in_dim = 4 * cfg.history_len + (3 if cfg.include_r1_in_input else 2)
         h1, h2 = cfg.hidden_sizes
         self.shapes: List[Tuple[int, ...]] = [
             (h1, self.in_dim), (h1,),   # layer 1
@@ -203,10 +215,13 @@ def build_input(
 
     dists = [h[0] / md  for h in history] + [dist_current / md]
     iids  = [h[1] / mi  for h in history] + [iid_current  / mi]
-    r1s   = [h[2] / mr1 for h in history] + [r1_current   / mr1]
     r2s   = [h[3] / mr2 for h in history]
 
-    return np.array(dists + iids + r1s + r2s, dtype=np.float32)
+    if cfg.include_r1_in_input:
+        r1s = [h[2] / mr1 for h in history] + [r1_current / mr1]
+        return np.array(dists + iids + r1s + r2s, dtype=np.float32)
+    else:
+        return np.array(dists + iids + r2s, dtype=np.float32)
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -252,7 +267,8 @@ def compute_fitness(
     jitter_factor = 1.0
     if cfg.w_smooth > 0.0 and len(net_turns) >= 2:
         jerks = np.abs(np.diff(net_turns))
-        max_jerk = 2.0 * (cfg.max_rotate1_deg + cfg.max_rotate2_deg)
+        max_r1   = 0.0 if cfg.force_aligned else cfg.max_rotate1_deg
+        max_jerk = 2.0 * (max_r1 + cfg.max_rotate2_deg)
         mean_jerk_norm = float(np.mean(jerks)) / max(max_jerk, 1e-6)
         jitter_factor = max(0.0, 1.0 - cfg.w_smooth * mean_jerk_norm)
 
@@ -324,10 +340,14 @@ def run_episode(
         original_yaw = yaw
 
         # ── Step 1: decide look direction (canonical frame) ───────────────────
-        inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
-        rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
-        flip1 = last_physical_iid < 0.0
-        rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
+        if cfg.force_aligned:
+            rotate1_canonical = 0.0
+            rotate1           = 0.0
+        else:
+            inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
+            rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
+            flip1 = last_physical_iid < 0.0
+            rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
         look_yaw = original_yaw + rotate1
 
         # ── Step 2: sonar measurement at look direction ───────────────────────
@@ -568,6 +588,24 @@ def save_hof(hof: List[HofEntry], cfg: Config, hof_dir: str) -> None:
             json.dump(data, f, indent=2)
 
 
+def _fresh_population(cfg: Config, rng: np.random.Generator) -> List[np.ndarray]:
+    genome_size = MLPPolicy(cfg).genome_size()
+    return [(rng.standard_normal(genome_size) * 0.1).astype(np.float32)
+            for _ in range(cfg.population_size)]
+
+
+def _load_hof_entries(hof_dir: str) -> List[HofEntry]:
+    """Reconstruct HOF list from saved rank*.json files."""
+    hof = []
+    for path in sorted(glob.glob(os.path.join(hof_dir, "rank*.json"))):
+        with open(path) as f:
+            d = json.load(f)
+        hof.append((float(d["fitness"]), int(d["generation"]),
+                    np.array(d["genome"], dtype=np.float32)))
+    hof.sort(key=lambda e: e[0], reverse=True)
+    return hof
+
+
 # ══════════════════════════════════════════════════════════════════════════════════
 # Trajectory plotting
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -596,10 +634,14 @@ def record_trajectories(
 
         for _ in range(cfg.max_steps):
             original_yaw = yaw
-            inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
-            rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
-            flip1 = last_physical_iid < 0.0
-            rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
+            if cfg.force_aligned:
+                rotate1_canonical = 0.0
+                rotate1           = 0.0
+            else:
+                inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
+                rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
+                flip1 = last_physical_iid < 0.0
+                rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
             look_yaw = original_yaw + rotate1
             look_yaws.append(look_yaw)
             meas = simulator.get_sonar_measurement(x, y, look_yaw)
@@ -713,35 +755,86 @@ def build_simulator(session_name: str, quiet: bool = True) -> EnvironmentSimulat
 def train(cfg: Config) -> None:
     rng = np.random.default_rng(cfg.seed)
 
-    # Guard against accidental overwrite
-    if os.path.exists(cfg.output_dir) and any(
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    hof_dir         = os.path.join(cfg.output_dir, "top_policies")
+    checkpoint_path = os.path.join(cfg.output_dir, "checkpoint.npz")
+
+    # ── Resume or fresh start ─────────────────────────────────────────────────
+    start_gen    = 0
+    hof: List[HofEntry] = []
+    hist: Dict[str, list] = {
+        "best": [], "mean": [], "std": [], "min": [],
+        "val": [], "val_std": [], "collision_rate": [], "mean_collision_rate": [],
+    }
+    best_genome, best_fitness = None, -np.inf
+
+    if os.path.exists(checkpoint_path):
+        ck        = np.load(checkpoint_path)
+        saved_gen = int(ck["generation"])
+
+        saved_cfg_path = os.path.join(cfg.output_dir, "config.json")
+        if os.path.exists(saved_cfg_path):
+            with open(saved_cfg_path) as f:
+                saved = json.load(f)
+            cur = asdict(cfg)
+            mismatches = [
+                f"  {k}: saved={saved.get(k)!r}  current={cur[k]!r}"
+                for k in cur
+                if k != "output_dir" and cur[k] != saved.get(k)
+            ]
+            if mismatches:
+                print(f"Config mismatch — cannot resume '{cfg.output_dir}':")
+                for m in mismatches:
+                    print(m)
+                print("Fix the config or choose a different output_dir.")
+                return
+
+        response = input(
+            f"Checkpoint found in '{cfg.output_dir}' (gen {saved_gen}). Resume? [Y/n]: "
+        )
+        if response.strip().lower() != "n":
+            population = [ck["population"][i] for i in range(ck["population"].shape[0])]
+            start_gen  = saved_gen + 1
+            bp_path = os.path.join(cfg.output_dir, "best_policy.json")
+            if os.path.exists(bp_path):
+                with open(bp_path) as f:
+                    bp = json.load(f)
+                best_genome  = np.array(bp["genome"], dtype=np.float32)
+                best_fitness = float(bp["fitness"])
+            hist_path = os.path.join(cfg.output_dir, "training_history.json")
+            if os.path.exists(hist_path):
+                with open(hist_path) as f:
+                    raw = json.load(f)
+                hist = {k: [v if v is not None else float("nan") for v in vals]
+                        for k, vals in raw.items()}
+            if os.path.isdir(hof_dir):
+                hof = _load_hof_entries(hof_dir)
+            print(f"Resuming from generation {start_gen}  (best so far: {best_fitness:.1f})")
+        else:
+            population = _fresh_population(cfg, rng)
+    elif os.path.exists(cfg.output_dir) and any(
         f.endswith(".json") for f in os.listdir(cfg.output_dir)
     ):
         response = input(f"Output dir '{cfg.output_dir}' already has data. Overwrite? [y/N]: ")
         if response.strip().lower() != "y":
             print(f"Skipping history_len={cfg.history_len}.")
             return
+        population = _fresh_population(cfg, rng)
+    else:
+        population = _fresh_population(cfg, rng)
 
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    hof_dir = os.path.join(cfg.output_dir, "top_policies")
     if cfg.n_best_policies > 0:
         os.makedirs(hof_dir, exist_ok=True)
-    hof: List[HofEntry] = []
 
-    with open(os.path.join(cfg.output_dir, "config.json"), "w") as f:
-        json.dump(asdict(cfg), f, indent=2)
-    CodeLogger.log_code(cfg.output_dir, [".", "Library"], label="policy2")
+    if start_gen == 0:
+        with open(os.path.join(cfg.output_dir, "config.json"), "w") as f:
+            json.dump(asdict(cfg), f, indent=2)
+        CodeLogger.log_code(cfg.output_dir, [".", "Library"], label="policy")
 
-    template    = MLPPolicy(cfg)
-    genome_size = template.genome_size()
+    template = MLPPolicy(cfg)
     print(f"Input dim:   {template.in_dim}")
-    print(f"Genome size: {genome_size}")
+    print(f"Genome size: {template.genome_size()}")
     print(f"Output dir:  {cfg.output_dir}")
-
-    population: List[np.ndarray] = [
-        (rng.standard_normal(genome_size) * 0.1).astype(np.float32)
-        for _ in range(cfg.population_size)
-    ]
 
     # Non-parallel setup (only used when parallel_eval=False)
     train_sims, train_starts = None, None
@@ -766,18 +859,6 @@ def train(cfg: Config) -> None:
         if starts:
             plot_sims_by_session[sn] = (sim, starts)
 
-    hist: Dict[str, list] = {
-        "best":                [],   # best fitness in population
-        "mean":                [],   # mean fitness across population
-        "std":                 [],   # std of fitness across population
-        "min":                 [],   # min fitness in population
-        "val":                 [],   # mean validation fitness (best genome)
-        "val_std":             [],   # std of validation fitness episodes (best genome)
-        "collision_rate":      [],   # collision rate of the best genome
-        "mean_collision_rate": [],   # mean collision rate across the whole population
-    }
-    best_genome, best_fitness = None, -np.inf
-
     executor = None
     if cfg.parallel_eval:
         n_workers = cfg.num_workers or os.cpu_count()
@@ -788,7 +869,7 @@ def train(cfg: Config) -> None:
         )
 
     try:
-        for gen in tqdm(range(cfg.generations), desc="GA"):
+        for gen in tqdm(range(start_gen, cfg.generations), desc="GA"):
 
             # ── Evaluate population ───────────────────────────────────────────
             if cfg.parallel_eval:
@@ -883,10 +964,15 @@ def train(cfg: Config) -> None:
             # ── Evolve ────────────────────────────────────────────────────────
             population = next_generation(population, fitnesses, cfg, rng)
 
+            # ── Checkpoint ────────────────────────────────────────────────────
+            np.savez(checkpoint_path,
+                     population=np.stack(population),
+                     generation=np.array(gen))
+
             # ── Pushover ──────────────────────────────────────────────────────
             if cfg.pushover_every_n > 0 and (gen + 1) % cfg.pushover_every_n == 0:
                 pushover_notify(
-                    f"Gen {gen+1}/{cfg.generations}  best={gen_best:.0f}  val={val_fit:.0f}"
+                    f"h{cfg.history_len:02d} Gen {gen+1}/{cfg.generations}  best={gen_best:.0f}  val={val_fit:.0f}"
                 )
 
             save_plot(hist, cfg.output_dir)
@@ -898,17 +984,29 @@ def train(cfg: Config) -> None:
 
     print(f"\nDone. Best fitness: {best_fitness:.1f}")
     print(f"Results saved to:  {cfg.output_dir}")
-    pushover_notify(f"Done. Best fitness: {best_fitness:.1f}")
+    pushover_notify(f"Done h{cfg.history_len:02d}. Best fitness: {best_fitness:.1f}")
 
 
 def main() -> None:
+    # history_len=0 → baseline (head fixed to body, responds only to current dist+iid)
+    # history_len>0 → standard config with that history length
     for history_len in HISTORY_LENGTHS:
-        cfg = Config(
-            history_len=history_len,
-            output_dir=f"Policy/{CONDITION}_h{history_len:02d}",
-        )
+        if history_len == 0:
+            cfg = Config(
+                history_len=0,
+                include_r1_in_input=False,
+                force_aligned=True,
+                output_dir=f"Policy/{CONDITION}_h00_baseline",
+            )
+            label = "baseline"
+        else:
+            cfg = Config(
+                history_len=history_len,
+                output_dir=f"Policy/{CONDITION}_h{history_len:02d}",
+            )
+            label = f"history_len={history_len}"
         print(f"\n{'='*60}")
-        print(f"Training history_len={history_len}  →  {cfg.output_dir}")
+        print(f"Training {label}  →  {cfg.output_dir}")
         print(f"{'='*60}")
         train(cfg)
 

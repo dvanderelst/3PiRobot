@@ -81,7 +81,7 @@ N_FAN_EXAMPLES = 12
 def compute_valid_starts(
     arena: ArenaLayout,
     wall_margin_mm: float       = WALL_MARGIN_MM,
-    min_forward_clearance_mm: float = None,  # defaults to 2 × wall_margin_mm
+    min_forward_clearance_mm: float = None,  # defaults to 3 × wall_margin_mm
     grid_step_mm: float         = GRID_STEP_MM,
     heading_step_deg: int       = HEADING_STEP_DEG,
     cone_half_width_deg: float  = CONE_HALF_WIDTH_DEG,
@@ -105,7 +105,7 @@ def compute_valid_starts(
     are returned as separate entries.
     """
     if min_forward_clearance_mm is None:
-        min_forward_clearance_mm = 2.0 * wall_margin_mm
+        min_forward_clearance_mm = 3.0 * wall_margin_mm
 
     walls = arena.walls  # (N, 2) mm
 

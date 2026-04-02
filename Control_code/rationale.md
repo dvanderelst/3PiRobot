@@ -116,7 +116,7 @@ This models a bat's ability to measure in a different direction (via head rotati
 6. Network produces **rotation 2**.
 7. Robot rotates by rotation 2 degrees.
 8. The robot's new heading is `original heading + rotation1 + rotation2` (the net body rotation per step is the sum of both rotations).
-9. Robot drives straight for a fixed distance (100 mm).
+9. Robot drives straight for a fixed distance. This distance should be calibrated to match the intercall distance observed in bats.
 
 ---
 
@@ -166,30 +166,40 @@ where `max_possible_jerk = 2 × (max_rotate1 + max_rotate2)` (the maximum possib
 
 The policy is an **MLP** (not an RNN). An RNN was considered but rejected: although it has fewer parameters, each parameter has compounding effects across time steps, making the GA fitness landscape more rugged. The MLP with explicit history has a smoother, more GA-friendly landscape and maps cleanly onto the input structure described above.
 
+The network has a **single output neuron** used for both rotation 1 and rotation 2. A two-output variant was considered but rejected: because the inputs to the two calls are systematically different (zeros vs. actual measurements in the current slot), the same function can produce meaningfully different values for r1 and r2 without needing separate output weights. Keeping one output neuron reduces genome size, which directly benefits GA search.
+
 ---
 
 ## Policy: Variation of History Length
 
 To understand how much the policy benefits from memory, we train separate policies for several values of `history_len` (e.g. 1, 3, 5, 10). The goal is best performance at each history size, not a fair comparison between equally-sized networks, so the network is allowed to scale naturally with history.
 
+Memory and head–body separation are treated as a coupled pair: the baseline has neither, and all history policies (`history_len > 0`) have both. This coupling is principled — a decoupled head is only useful if the robot can remember where it looked and what it found across steps. Without memory, a free head simply collapses to a GA-optimised fixed look angle, which adds no adaptive value.
+
 ### Network scaling with history
 
-The input dimension is `4 * history_len + 3`, so it already grows with history length. The hidden layer sizes are kept fixed (e.g. `(32, 16)`) across all runs. The expressivity bottleneck for short-history policies is the lack of temporal information, not network capacity, so scaling hidden sizes with history is not expected to help.
+The input dimension is `4 * history_len + 3` (or `4 * history_len + 2` when `include_r1_in_input=False`), so it grows with history length. The hidden layer sizes are kept fixed across all runs. The expressivity bottleneck for short-history policies is the lack of temporal information, not network capacity, so scaling hidden sizes with history is not expected to help.
 
-### history_len = 1 as the minimal reactive baseline
+### Baseline: history_len=0, include_r1_in_input=False, force_aligned=True
 
-`history_len = 1` is the natural "no-memory" baseline. Tracing through `build_input`:
+The baseline agent has no memory and no head–body separation. With `force_aligned=True`, rotate1 is always 0: the head is fixed to the body and the sonar always measures straight ahead. The single network call (Phase 2) receives only `[dist_current, iid_current]` and produces the total body rotation for that step.
 
-- **Phase 1 (look):** input is `[prev_dist, 0, prev_iid, 0, prev_r1, 0, prev_r2]` — the previous step's measurement fills the history slots; the current slots are zero because the measurement has not yet been taken. The network uses the previous measurement to decide where to look.
-- **Phase 2 (move):** input is `[prev_dist, dist_current, prev_iid, iid_current, prev_r1, r1_current, prev_r2]` — both the previous and the new measurement are available. The network uses both to decide how to move.
+The baseline therefore learns only how to scale its body rotation as a function of the current sonar reading — nothing more. It is the correct lower bound for comparison with memory-augmented policies.
 
-This is the minimal policy that makes sensible use of the two-phase step structure.
+`r1_current` is excluded from the Phase 2 input (`include_r1_in_input=False`) for consistency with the rest of the framework, though it has no effect here since rotate1 is always 0.
 
-`history_len = 0` is **not** a useful baseline: with no history, the Phase 1 input is always `[0, 0, 0]`, so the network has no information and rotate1 collapses to a fixed constant (whatever the GA converges to). Phase 2 still receives the current measurement, but rotate1 is effectively a predetermined look angle rather than an adaptive decision.
+### history_len = 1
+
+`history_len = 1` is **not** a reactive baseline — it has one step of memory. Tracing through `build_input`:
+
+- **Phase 1 (look):** input is `[prev_dist, 0, prev_iid, 0, prev_r1, 0, prev_r2]` — the network uses the previous step's measurement to decide where to look.
+- **Phase 2 (move):** input is `[prev_dist, dist_current, prev_iid, iid_current, prev_r1, r1_current, prev_r2]` — both the previous and current measurements are available.
+
+This is the minimal policy that makes meaningful use of the two-phase structure with memory.
 
 ### Multi-run training
 
-`SCRIPT_TrainPolicy.py` loops over a list of history lengths and runs the full GA for each, saving results to separate output directories (`Policy/<condition>/history_1/`, `Policy/<condition>/history_3/`, etc.). All other settings (GA parameters, fitness function, architecture hidden sizes) are identical across runs.
+`SCRIPT_TrainPolicy.py` loops over `HISTORY_LENGTHS`. A value of 0 trains the baseline (`Policy/<condition>_h00_baseline`); any other value trains the standard config for that history length (`Policy/<condition>_h01`, `Policy/<condition>_h02`, etc.). All other settings (GA parameters, fitness function, architecture hidden sizes) are identical across runs.
 
 ---
 
@@ -204,7 +214,7 @@ After training, the policy is applied on the real robot using a script similar t
 3. Take a sonar measurement (`corrected_iid`, `corrected_distance`).
 4. Decide rotate2 using the policy (with IID symmetry wrapper applied to current IID).
 5. Physically rotate the robot's body by rotate2 degrees.
-6. Drive forward 100 mm.
+6. Drive forward a fixed distance calibrated to match bat intercall distances.
 7. Append canonical (flipped) values to the history buffer.
 
 > Because the sonar is body-fixed, rotate1 is a genuine physical rotation — it is not a virtual "look direction" as in the emulator-based simulator.
