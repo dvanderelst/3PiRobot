@@ -40,7 +40,7 @@ from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
 
-CONDITION    = "run_h05"                        # sub-folder under Policy/
+CONDITION    = "run_h05"                        # sub-folder under TrainedPolicies/
 POLICY_FILE  = "best_policy.json"           # filename inside that folder
 SESSION      = "session_h05_open2"
 ROBOT_ID     = 1
@@ -52,7 +52,8 @@ do_translation = True
 
 wait_for_confirmation = False
 
-POLICY_DIR = "Policy"
+POLICY_DIR   = "TrainedPolicies"
+DATA_FOLDER  = "PolicyRuns"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -105,7 +106,10 @@ print(f"  history_len={cfg.history_len}  hidden={cfg.hidden_sizes}")
 print(f"  max_rotate1={cfg.max_rotate1_deg}°  max_rotate2={cfg.max_rotate2_deg}°")
 print(f"  fixed_drive={cfg.fixed_drive_mm} mm")
 
-session_folder = os.path.join("Data", SESSION)
+from Library import Settings as _settings
+_settings.data_folder = DATA_FOLDER
+
+session_folder = os.path.join(DATA_FOLDER, SESSION)
 if os.path.exists(session_folder) and os.listdir(session_folder):
     response = input(f"Session folder '{session_folder}' already exists and is non-empty. Overwrite? [y/N]: ")
     if response.strip().lower() != "y":
@@ -117,8 +121,8 @@ client  = Client.Client(robot_number=ROBOT_ID)
 tracker = LorexTracker.LorexTracker()
 writer  = DataStorage.DataWriter(SESSION, autoclear=True, verbose=False)
 writer.add_file("SCRIPT_RunPolicy.py")
-snapshot = capture_environment_layout(save_root=f"Data/{SESSION}")
-CodeLogger.log_code(f"Data/{SESSION}", [".", "Library"], label=SESSION)
+snapshot = capture_environment_layout(save_root=f"{DATA_FOLDER}/{SESSION}")
+CodeLogger.log_code(f"{DATA_FOLDER}/{SESSION}", [".", "Library"], label=SESSION)
 
 # Warm up sonar
 for _ in range(5):
@@ -132,7 +136,7 @@ history           = collections.deque(
 last_physical_iid = 0.0   # no prior measurement on first step
 
 # Crash log — written on first crash, one line per event
-crash_log_path = f"Data/{SESSION}/crashes.tsv"
+crash_log_path = f"{DATA_FOLDER}/{SESSION}/crashes.tsv"
 last_position  = None     # position at end of previous step
 
 # ══════════════════════════════════════════════════════════════════════════════

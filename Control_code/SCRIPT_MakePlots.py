@@ -3,7 +3,7 @@
 SCRIPT_MakePlots.py
 
 Publication-ready plots assembled from data produced by other scripts.
-All outputs go to Plots/.
+All outputs go to PaperPlots/.
 
 Sections
 --------
@@ -19,7 +19,7 @@ if not os.environ.get("DISPLAY") and os.name != "nt":
 import matplotlib.pyplot as plt
 import numpy as np
 
-PLOTS_DIR = "Plots"
+PLOTS_DIR = "PaperPlots"
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
 
@@ -28,10 +28,10 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 # ══════════════════════════════════════════════════════════════════════════════
 
 TRAINING_RUN_DIRS = [
-    ("Policy/run_h00_baseline", "Baseline"),
-    ("Policy/run_h01", "Hist 1"),
-    ("Policy/run_h03", "Hist 3"),
-    ("Policy/run_h05", "Hist 5"),
+    ("TrainedPolicies/run_h00_baseline", "Baseline"),
+    ("TrainedPolicies/run_h01", "Hist 1"),
+    ("TrainedPolicies/run_h03", "Hist 3"),
+    ("TrainedPolicies/run_h05", "Hist 5"),
 ]
 
 COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]

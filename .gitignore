@@ -6,13 +6,15 @@
 ############## Control_code sub repo
 Control_code/Library/RobotCalibration/
 Control_code/TestScripts
-Control_code/Plots/
-Control_code/Data/
+Control_code/PaperPlots/
+Control_code/TrainingData/
+Control_code/PolicyRuns/
+Control_code/TempOutput/
 Control_code/CompareModels/
 Control_code/TrainingClosest/
 Control_code/EchoProcessor/
 Control_code/Emulator/
-Control_code/Policy/
+Control_code/TrainedPolicies/
 Control_code/PolicyAssessment/
 Control_code/ValidStarts/
 Control_code/Cache/

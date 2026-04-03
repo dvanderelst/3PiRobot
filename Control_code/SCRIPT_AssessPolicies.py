@@ -50,10 +50,10 @@ from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input, load_starts
 # ══════════════════════════════════════════════════════════════════════════════
 
 RUN_DIRS = [
-    "Policy/run_h00_baseline",
-    "Policy/run_h01",
-    "Policy/run_h03",
-    "Policy/run_h05",
+    "TrainedPolicies/run_h00_baseline",
+    "TrainedPolicies/run_h01",
+    "TrainedPolicies/run_h03",
+    "TrainedPolicies/run_h05",
 ]
 N_POLICIES           = 5   # None = all HOF policies
 EPISODES_PER_SESSION = 5   # episodes per policy per session

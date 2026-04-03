@@ -998,13 +998,13 @@ def main() -> None:
                 history_len=0,
                 include_r1_in_input=False,
                 force_aligned=True,
-                output_dir=f"Policy/{CONDITION}_h00_baseline",
+                output_dir=f"TrainedPolicies/{CONDITION}_h00_baseline",
             )
             label = "baseline"
         else:
             cfg = Config(
                 history_len=history_len,
-                output_dir=f"Policy/{CONDITION}_h{history_len:02d}",
+                output_dir=f"TrainedPolicies/{CONDITION}_h{history_len:02d}",
             )
             label = f"history_len={history_len}"
         print(f"\n{'='*60}")
