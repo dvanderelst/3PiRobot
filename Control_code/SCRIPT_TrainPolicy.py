@@ -480,17 +480,19 @@ def next_generation(
 
 def save_policy(policy: MLPPolicy, fitness: float, generation: int, path: str) -> None:
     data = {
-        "history_len":     policy.cfg.history_len,
-        "hidden_sizes":    list(policy.cfg.hidden_sizes),
-        "max_rotate1_deg": policy.cfg.max_rotate1_deg,
-        "max_rotate2_deg": policy.cfg.max_rotate2_deg,
-        "fixed_drive_mm":  policy.cfg.fixed_drive_mm,
-        "max_dist_mm":     policy.cfg.max_dist_mm,
-        "max_iid_db":      policy.cfg.max_iid_db,
-        "genome_size":     policy.genome_size(),
-        "genome":          policy.get_genome().tolist(),
-        "fitness":         float(fitness),
-        "generation":      int(generation),
+        "history_len":        policy.cfg.history_len,
+        "hidden_sizes":       list(policy.cfg.hidden_sizes),
+        "include_r1_in_input": policy.cfg.include_r1_in_input,
+        "force_aligned":      policy.cfg.force_aligned,
+        "max_rotate1_deg":    policy.cfg.max_rotate1_deg,
+        "max_rotate2_deg":    policy.cfg.max_rotate2_deg,
+        "fixed_drive_mm":     policy.cfg.fixed_drive_mm,
+        "max_dist_mm":        policy.cfg.max_dist_mm,
+        "max_iid_db":         policy.cfg.max_iid_db,
+        "genome_size":        policy.genome_size(),
+        "genome":             policy.get_genome().tolist(),
+        "fitness":            float(fitness),
+        "generation":         int(generation),
     }
     with open(path, "w") as f:
         json.dump(data, f, indent=2)

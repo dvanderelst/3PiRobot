@@ -20,6 +20,7 @@ the network and negate the output rotation.  History stores canonical values.
 
 import collections
 import json
+import os
 import time
 
 import numpy as np
@@ -39,11 +40,11 @@ from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
 
-CONDITION    = "run4"                        # sub-folder under Policy/
+CONDITION    = "run_h05"                        # sub-folder under Policy/
 POLICY_FILE  = "best_policy.json"           # filename inside that folder
-SESSION      = "sessionP01"
+SESSION      = "session_h05_open2"
 ROBOT_ID     = 1
-MAX_STEPS    = 150
+MAX_STEPS    = 250
 
 # Dry-run flags (set False to disable movement for debugging)
 do_rotation    = True
@@ -61,14 +62,32 @@ POLICY_DIR = "Policy"
 def load_policy(path: str):
     with open(path) as f:
         data = json.load(f)
+
+    # Infer include_r1_in_input from stored genome_size for backward compat
+    # (older files didn't persist this flag; newer ones do)
+    if "include_r1_in_input" in data:
+        include_r1 = data["include_r1_in_input"]
+    else:
+        h = data["history_len"]
+        h1, h2 = data["hidden_sizes"]
+        in_dim_with_r1 = 4 * h + 3
+        size_with_r1 = (h1 * in_dim_with_r1 + h1) + (h2 * h1 + h2) + (h2 + 1)
+        include_r1 = (data.get("genome_size", size_with_r1) == size_with_r1)
+
+    # force_aligned was not saved in older files; infer from include_r1_in_input
+    # (the two flags always go together: force_aligned=True ↔ include_r1_in_input=False)
+    force_aligned = data.get("force_aligned", not include_r1)
+
     cfg = Config(
-        history_len     = data["history_len"],
-        hidden_sizes    = tuple(data["hidden_sizes"]),
-        max_rotate1_deg = data["max_rotate1_deg"],
-        max_rotate2_deg = data["max_rotate2_deg"],
-        fixed_drive_mm  = data["fixed_drive_mm"],
-        max_dist_mm     = data["max_dist_mm"],
-        max_iid_db      = data["max_iid_db"],
+        history_len          = data["history_len"],
+        hidden_sizes         = tuple(data["hidden_sizes"]),
+        max_rotate1_deg      = data["max_rotate1_deg"],
+        max_rotate2_deg      = data["max_rotate2_deg"],
+        fixed_drive_mm       = data["fixed_drive_mm"],
+        max_dist_mm          = data["max_dist_mm"],
+        max_iid_db           = data["max_iid_db"],
+        include_r1_in_input  = include_r1,
+        force_aligned        = force_aligned,
     )
     policy = MLPPolicy(cfg)
     policy.set_genome(np.array(data["genome"], dtype=np.float32))
@@ -85,6 +104,13 @@ print(f"Loaded policy: {policy_path}")
 print(f"  history_len={cfg.history_len}  hidden={cfg.hidden_sizes}")
 print(f"  max_rotate1={cfg.max_rotate1_deg}°  max_rotate2={cfg.max_rotate2_deg}°")
 print(f"  fixed_drive={cfg.fixed_drive_mm} mm")
+
+session_folder = os.path.join("Data", SESSION)
+if os.path.exists(session_folder) and os.listdir(session_folder):
+    response = input(f"Session folder '{session_folder}' already exists and is non-empty. Overwrite? [y/N]: ")
+    if response.strip().lower() != "y":
+        print("Aborted.")
+        raise SystemExit(0)
 
 control = PauseControl.PauseControl()
 client  = Client.Client(robot_number=ROBOT_ID)
@@ -105,6 +131,10 @@ history           = collections.deque(
 )
 last_physical_iid = 0.0   # no prior measurement on first step
 
+# Crash log — written on first crash, one line per event
+crash_log_path = f"Data/{SESSION}/crashes.tsv"
+last_position  = None     # position at end of previous step
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Main loop
 # ══════════════════════════════════════════════════════════════════════════════
@@ -112,17 +142,30 @@ last_physical_iid = 0.0   # no prior measurement on first step
 PushOver.send(f"Policy run started: {SESSION} ({CONDITION})")
 
 for step in range(MAX_STEPS):
-    control.wait_if_paused()
+    if control.wait_if_paused():
+        # User paused → robot bumped → log crash using position from last step
+        pos = last_position or {}
+        x, y, yaw = pos.get("x"), pos.get("y"), pos.get("yaw_deg")
+        write_header = not os.path.exists(crash_log_path)
+        with open(crash_log_path, "a") as _cf:
+            if write_header:
+                _cf.write("step\tx\ty\tyaw_deg\n")
+            _cf.write(f"{step}\t{x}\t{y}\t{yaw}\n")
+        print(f"  *** Crash logged (step {step}): x={x}, y={y}, yaw={yaw} ***")
 
     # ── Phase 1: decide and execute rotate1 ───────────────────────────────────
-    inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
-    rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
-    flip1   = last_physical_iid < 0.0
-    rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
+    if cfg.force_aligned:
+        rotate1_canonical = 0.0
+        rotate1           = 0.0
+    else:
+        inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
+        rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
+        flip1   = last_physical_iid < 0.0
+        rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
 
-    if do_rotation:
-        client.step(angle=rotate1)
-        time.sleep(0.5)
+        if do_rotation:
+            client.step(angle=rotate1)
+            time.sleep(0.5)
 
     # ── Sonar measurement at post-rotate1 orientation ─────────────────────────
     sonar_package = client.read_and_process(do_ping=True, plot=True)
@@ -187,6 +230,7 @@ for step in range(MAX_STEPS):
             "drive_mm":     cfg.fixed_drive_mm,
         },
     )
+    last_position = position
 
     if step % 100 == 0 and step > 0:
         PushOver.send(f"{SESSION}: {step}/{MAX_STEPS} steps")
