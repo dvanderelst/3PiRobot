@@ -50,7 +50,7 @@ from Library import CodeLogger
 
 
 # ── Condition ────────────────────────────────────────────────────────────────────
-CONDITION = "policy1"          # base name; output goes to TrainedPolicies/<CONDITION>_hNN/
+CONDITION = "policy1"          # base name; output goes to PolicyTraining/<CONDITION>_hNN/
 HISTORY_LENGTHS = [10, 5, 1, 0]  # train one run per history length, in order
 IID_NOISE_DB = 1         # Gaussian noise std injected into emulator IID during training (dB); 0 = disabled
 
@@ -1442,14 +1442,14 @@ def main() -> None:
                 history_len=0,
                 include_r1_in_input=False,
                 force_aligned=True,
-                output_dir=f"TrainedPolicies/{CONDITION}_h00",
+                output_dir=f"PolicyTraining/{CONDITION}_h00",
                 iid_noise_db=IID_NOISE_DB,
             )
             label = "baseline"
         else:
             cfg = Config(
                 history_len=history_len,
-                output_dir=f"TrainedPolicies/{CONDITION}_h{history_len:02d}",
+                output_dir=f"PolicyTraining/{CONDITION}_h{history_len:02d}",
                 iid_noise_db=IID_NOISE_DB,
             )
             label = f"history_len={history_len}"

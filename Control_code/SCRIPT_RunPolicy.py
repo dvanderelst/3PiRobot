@@ -40,7 +40,7 @@ from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input
 # ══════════════════════════════════════════════════════════════════════════════
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
-POLICY   = 'policy5_h10' # sub-folder under TrainedPolicies/
+POLICY   = 'policy5_h10' # sub-folder under PolicyTraining/
 ARENA     = 'arena1'
 REPEAT    = '03'
 MAX_STEPS = 250
@@ -56,7 +56,7 @@ do_translation = True
 
 wait_for_confirmation = False
 
-POLICY_DIR   = "TrainedPolicies"
+POLICY_DIR   = "PolicyTraining"
 DATA_FOLDER  = "PolicyRuns"
 
 

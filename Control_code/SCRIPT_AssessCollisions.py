@@ -44,7 +44,7 @@ from SCRIPT_TrainPolicy import (
 # Settings
 # ══════════════════════════════════════════════════════════════════════════════
 
-RUN_DIR                = "TrainedPolicies/policy5_h10"
+RUN_DIR                = "PolicyTraining/policy5_h10"
 N_EPISODES_PER_SESSION = 500
 NUM_WORKERS            = None   # None = os.cpu_count()
 SEED                   = 42
