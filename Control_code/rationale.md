@@ -162,6 +162,18 @@ fitness        = coverage × jitter_factor × collision_discount
 
 where `max_possible_jerk = 2 × (max_rotate1 + max_rotate2)` (the maximum possible heading reversal per step). A smooth arc has low mean jerk; left-right oscillation has high mean jerk. Consistent wall-following turns are not penalised — only reversals are. `w_smooth` controls penalty strength (0 = disabled, 1 = full weight).
 
+### Distance floor (sonar saturation)
+
+The real sonar cannot return distances below **300 mm** — any wall closer than this produces a saturated reading of 300 mm. To keep training consistent with deployment, the emulator's predicted distance is clamped from below at `min_dist_mm = 300.0` mm before being passed to the policy or stored in history:
+
+```python
+dist_mm = max(cfg.min_dist_mm, min(emulator_distance_mm, cfg.max_dist_mm))
+```
+
+Without this floor, the emulator may predict sub-300 mm values when the simulated robot gets close to a wall (geometrically correct for the simulation, but unreachable on the real robot). The policy would then learn to react to distance values it will never observe during deployment. Clamping ensures that 300 mm is treated as a saturated "at or closer than minimum range" signal, consistent with its meaning on the real robot.
+
+---
+
 ### Architecture choice
 
 The policy is an **MLP** (not an RNN). An RNN was considered but rejected: although it has fewer parameters, each parameter has compounding effects across time steps, making the GA fitness landscape more rugged. The MLP with explicit history has a smoother, more GA-friendly landscape and maps cleanly onto the input structure described above.

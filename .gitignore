@@ -18,6 +18,7 @@ Control_code/TrainedPolicies/
 Control_code/PolicyAssessment/
 Control_code/ValidStarts/
 Control_code/Cache/
+Control_code/CollisionAssessment/
 ############## Robot code sub repo
 robot_code/.Trash-1000/
 robot_code/System Volume Information/

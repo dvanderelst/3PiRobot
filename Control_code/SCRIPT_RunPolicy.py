@@ -24,6 +24,7 @@ import os
 import time
 
 import numpy as np
+from scipy._lib.pyprima.common import history
 
 from Library import Client
 from Library import CodeLogger
@@ -39,12 +40,15 @@ from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input
 # ══════════════════════════════════════════════════════════════════════════════
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
+POLICY   = 'policy5_h10' # sub-folder under TrainedPolicies/
+ARENA     = 'arena1'
+REPEAT    = '03'
+MAX_STEPS = 250
 
-CONDITION    = "run_h05"                        # sub-folder under TrainedPolicies/
-POLICY_FILE  = "best_policy.json"           # filename inside that folder
-SESSION      = "session_h05_open2"
 ROBOT_ID     = 1
-MAX_STEPS    = 250
+SHORT_POLICY = POLICY.replace('policy', '')
+POLICY_FILE  = "best_policy.json"
+SESSION      = f"session{SHORT_POLICY}_{ARENA}_{REPEAT}"
 
 # Dry-run flags (set False to disable movement for debugging)
 do_rotation    = True
@@ -99,7 +103,7 @@ def load_policy(path: str):
 # Setup
 # ══════════════════════════════════════════════════════════════════════════════
 
-policy_path = f"{POLICY_DIR}/{CONDITION}/{POLICY_FILE}"
+policy_path = f"{POLICY_DIR}/{POLICY}/{POLICY_FILE}"
 policy, cfg = load_policy(policy_path)
 print(f"Loaded policy: {policy_path}")
 print(f"  history_len={cfg.history_len}  hidden={cfg.hidden_sizes}")
@@ -143,7 +147,7 @@ last_position  = None     # position at end of previous step
 # Main loop
 # ══════════════════════════════════════════════════════════════════════════════
 
-PushOver.send(f"Policy run started: {SESSION} ({CONDITION})")
+PushOver.send(f"Policy run started: {SESSION}")
 
 for step in range(MAX_STEPS):
     if control.wait_if_paused():

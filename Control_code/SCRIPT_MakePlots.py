@@ -28,10 +28,10 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 # ══════════════════════════════════════════════════════════════════════════════
 
 TRAINING_RUN_DIRS = [
-    ("TrainedPolicies/run_h00_baseline", "Baseline"),
-    ("TrainedPolicies/run_h01", "Hist 1"),
-    ("TrainedPolicies/run_h03", "Hist 3"),
-    ("TrainedPolicies/run_h05", "Hist 5"),
+    ("TrainedPolicies/policy_h00", "Baseline"),
+    ("TrainedPolicies/policy_h01", "Hist 1"),
+    ("TrainedPolicies/policy_h03", "Hist 3"),
+    ("TrainedPolicies/policy_h05", "Hist 5"),
 ]
 
 COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]

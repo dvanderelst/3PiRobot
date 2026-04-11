@@ -55,7 +55,7 @@ class Config:
 
     # Profile
     opening_angle: float = 220.0
-    profile_steps: int = 20
+    profile_steps: int = 22
     profile_method: str = "min_bin"
 
     # Maximum distance in mm — two roles:
@@ -67,7 +67,7 @@ class Config:
 
     # CNN architecture
     conv_channels: List[int] = field(default_factory=lambda: [32, 64])
-    conv_kernel: int = 5
+    conv_kernel: int = 3
     fc_hidden: int = 64      # shared backbone FC
     head_hidden: int = 32    # per-head FC before output; 0 = linear head
 
@@ -81,8 +81,11 @@ class Config:
 
     # Train / validation split (quadrant indices withheld per session)
     validation_quadrants: Dict[str, List[int]] = field(default_factory=lambda: {
-        "sessionB01": [3],
-        "sessionB03": [3],
+        "sessionB01": [1],
+        "sessionB02": [3],
+        "sessionB03": [2],
+        "sessionB04": [4],
+        "sessionB05": [1],
     })
 
     # Output
@@ -615,6 +618,40 @@ def train(cfg: Config):
     plt.savefig(scatter_path, dpi=120)
     plt.close(fig)
     print(f"  Saved {scatter_path}")
+
+    # ── IID residuals by distance bin ─────────────────────────────────────────
+    all_true_iid  = np.concatenate([tr_true_iid[tr_ep],  va_true_iid[va_ep]])
+    all_pred_iid  = np.concatenate([tr_pred_iid[tr_ep],  va_pred_iid[va_ep]])
+    all_true_dist = np.concatenate([tr_true_dist[tr_ep], va_true_dist[va_ep]])
+    residuals     = all_true_iid - all_pred_iid
+
+    n_bins    = 5
+    bin_edges = np.percentile(all_true_dist, np.linspace(0, 100, n_bins + 1))
+    bin_edges[0]  -= 1.0
+    bin_edges[-1] += 1.0
+
+    fig, axes = plt.subplots(1, n_bins, figsize=(3.5 * n_bins, 4), sharey=True)
+    for i, ax in enumerate(axes):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        mask   = (all_true_dist >= lo) & (all_true_dist < hi)
+        resid  = residuals[mask]
+        ax.hist(resid, bins=25, color="#4C72B0", alpha=0.8, edgecolor="white", lw=0.4)
+        ax.axvline(0, color="k", lw=1, linestyle="--")
+        ax.set_title(f"{lo:.0f}–{hi:.0f} mm\nn={mask.sum()}", fontsize=9)
+        ax.set_xlabel("IID residual (dB)")
+        if i == 0:
+            ax.set_ylabel("Count")
+        std = float(resid.std()) if len(resid) > 1 else 0.0
+        ax.annotate(f"σ = {std:.2f} dB", xy=(0.97, 0.95), xycoords="axes fraction",
+                    ha="right", va="top", fontsize=9)
+
+    fig.suptitle("IID residuals (true − predicted) by distance bin  [train + val, echo-present]",
+                 fontsize=10)
+    plt.tight_layout()
+    resid_path = os.path.join(cfg.output_dir, "iid_residuals_by_distance.png")
+    plt.savefig(resid_path, dpi=120)
+    plt.close(fig)
+    print(f"  Saved {resid_path}")
 
     # ── Code log ──────────────────────────────────────────────────────────────
     CodeLogger.log_code(cfg.output_dir, [".", "Library"], label="emulator2")

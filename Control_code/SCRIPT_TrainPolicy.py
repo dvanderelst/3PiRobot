@@ -20,11 +20,10 @@ Input vector layout (size = 4 * history_len + 3):
   [r2_{t-n}...r2_{t-1}]                    n   values
 
 Fitness (per episode):
-  - Compute centroid of all visited positions.
-  - Divide 360° into bins of angular_bin_deg width.
-  - For each bin: mean distance from centroid (0 if no path points in that bin).
-  - raw_fitness = mean of these per-bin mean distances.
-  - If collision: fitness *= collision_discount.
+  - coverage = mean over angular bins of mean distance from centroid (0 for empty bins)
+  - survival = steps_survived / max_steps  (early termination on collision reduces this)
+  - jitter_factor = 1 - w_smooth * mean(|turn_t - turn_{t-1}|) / max_possible_jerk
+  - fitness = coverage * survival * jitter_factor
 """
 
 import collections
@@ -42,6 +41,7 @@ import matplotlib
 if not os.environ.get("DISPLAY") and os.name != "nt":
     matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 from tqdm import tqdm
 
@@ -50,8 +50,9 @@ from Library import CodeLogger
 
 
 # ── Condition ────────────────────────────────────────────────────────────────────
-CONDITION = "run"          # base name; output goes to Policy/<CONDITION>_hNN/
-HISTORY_LENGTHS = [0,1,3,5]  # train one run per history length, in order
+CONDITION = "policy1"          # base name; output goes to TrainedPolicies/<CONDITION>_hNN/
+HISTORY_LENGTHS = [10, 5, 1, 0]  # train one run per history length, in order
+IID_NOISE_DB = 1         # Gaussian noise std injected into emulator IID during training (dB); 0 = disabled
 
 # ── Pushover ─────────────────────────────────────────────────────────────────────
 try:
@@ -81,39 +82,51 @@ class Config:
     include_r1_in_input: bool = True  # if False, r1 slot removed from input vector (required when force_aligned=True)
     force_aligned: bool = False       # if True, rotate1 always 0 (head fixed to body) — baseline only
     hidden_sizes: Tuple[int, int] = (32, 16)
-    max_rotate1_deg: float = 45.0
-    max_rotate2_deg: float = 45.0
-    fixed_drive_mm: float = 200.0
+    max_rotate1_deg: float = 90.0
+    max_rotate2_deg: float = 90.0
+    max_net_rotation_deg: float = 90.0  # hard cap on |rotate1 + rotate2| per step
+    fixed_drive_mm: float = 100.0
 
     # Input normalisation constants
     max_dist_mm: float = 2000.0     # distances divided by this before entering network
+    min_dist_mm: float = 300.0      # sonar saturation floor (real robot cannot return below this)
     max_iid_db: float = 12.0        # IID divided by this before entering network
 
+    # Emulator noise injection (applied during both fitness evaluation and trajectory plotting)
+    iid_noise_db: float = 0.0       # std of Gaussian noise added to emulator IID output (dB); set via IID_NOISE_DB at top of script
+
+    # Sensor overrides (for diagnostics — isolate emulator problems from GA/fitness problems)
+    override_emulator_distance: bool = False        # replace emulator distance with geometric min over central cone
+    override_half_angle_deg: float = 30.0  # half-width of cone used for both distance and IID overrides (degrees)
+    override_emulator_iid: bool = False             # replace emulator IID with geometric 10·log10(d_left_min/d_right_min); implies distance override
+
     # Fitness
-    angular_bin_deg: float = 10.0       # width of angular bins for coverage metric
-    collision_discount: float = 0.1     # fitness multiplier on collision
-    w_smooth: float = 0.15               # jitter penalty weight (0 = disabled, 1 = full)
+    angular_bin_deg: float = 10.0      # width of angular bins for coverage metric
+    w_smooth: float = 0.05              # jitter penalty weight (0 = disabled, 1 = full)
+    collision_discount: float = 0.1    # fitness multiplier on collision (< 1 penalises crashes)
 
     # GA
     population_size: int = 100
-    generations: int = 100
-    elitism_count: int = 10
+    generations: int = 50
+    elitism_count: int = 5
     mutation_rate: float = 0.05          # fraction of weights perturbed per offspring
-    mutation_sigma: float = 0.3
+    mutation_sigma: float = 0.15
     crossover_prob: float = 0.5         # probability of crossover vs. single-parent mutation
     seed: int = 42
 
     # Evaluation
-    episodes_per_policy: int = 32
-    max_steps: int = 250
+    episodes_per_policy: int = 240
+    max_steps: int = 75
+    max_crash_starts_per_session: int = 20  # cap on the per-session crash-start pool
+    crash_backtrack_steps: int = 15         # how many steps before the crash to place the backtrack start
     starts_dir: str = "ValidStarts"
     starts_suffixes: List[str] = field(
-        default_factory=lambda: ["starts_wall_left", "starts_wall_right", "starts_headon"]
+        default_factory=lambda: ["starts_headon", "starts_wall_left", "starts_wall_right"] #"starts_wall_left", "starts_wall_right",
     )
     train_session_names: List[str] = field(
-        default_factory=lambda: ["sessionB01", "sessionB02", "sessionB03", "sessionB04"]
+        default_factory=lambda: ["sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"]
     )
-    validation_session_name: Optional[str] = "sessionB05"
+    validation_session_name: Optional[str] = None
     validation_episodes: int = 16
 
     # IO
@@ -124,7 +137,7 @@ class Config:
     head_arrow_length_mm: float = 150.0 # length of head-direction arrows in mm
     quiet_setup: bool = True
     parallel_eval: bool = True
-    num_workers: Optional[int] = 8#None
+    num_workers: Optional[int] = None
     save_all_generation_policies: bool = False
     n_best_policies: int = 50       # hall-of-fame size; 0 to disable
 
@@ -137,6 +150,7 @@ class Config:
 
 
 N_TRAJECTORY_EPISODES = 6   # number of example episodes to plot per trajectory snapshot
+BLACK_BOX_STEPS = 10        # number of final steps to record for each crashed episode
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -235,15 +249,20 @@ def compute_fitness(
     cfg: Config,
 ) -> float:
     """
-    Angular-coverage fitness with jitter penalty (see rationale.txt).
+    Angular-coverage fitness with survival and jitter penalty.
 
-    coverage   = mean over angular bins of mean distance from centroid (0 for empty bins).
+    coverage      = mean over angular bins of mean distance from centroid (0 for empty bins)
+    survival      = steps_survived / max_steps  (early termination on collision reduces this)
     jitter_factor = 1 - w_smooth * mean(|turn_t - turn_{t-1}|) / max_possible_jerk
-    fitness    = coverage * jitter_factor * collision_discount (if collided)
+    fitness       = coverage * survival * jitter_factor
     """
-    if len(positions) < 2:
+    steps_survived = len(positions) - 1  # positions includes start
+    if steps_survived < 1:
         return 0.0
 
+    survival = steps_survived / max(cfg.max_steps, 1)
+
+    # Angular coverage: spread of trajectory around its centroid.
     xs = np.array([p[0] for p in positions], dtype=np.float64)
     ys = np.array([p[1] for p in positions], dtype=np.float64)
     x_c, y_c = xs.mean(), ys.mean()
@@ -267,12 +286,12 @@ def compute_fitness(
     jitter_factor = 1.0
     if cfg.w_smooth > 0.0 and len(net_turns) >= 2:
         jerks = np.abs(np.diff(net_turns))
-        max_r1   = 0.0 if cfg.force_aligned else cfg.max_rotate1_deg
-        max_jerk = 2.0 * (max_r1 + cfg.max_rotate2_deg)
+        max_jerk = 2.0 * cfg.max_net_rotation_deg
         mean_jerk_norm = float(np.mean(jerks)) / max(max_jerk, 1e-6)
         jitter_factor = max(0.0, 1.0 - cfg.w_smooth * mean_jerk_norm)
 
-    return coverage * jitter_factor * (cfg.collision_discount if collided else 1.0)
+    discount = cfg.collision_discount if collided else 1.0
+    return coverage * survival * jitter_factor * discount
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -305,6 +324,76 @@ def load_starts(
 # ══════════════════════════════════════════════════════════════════════════════════
 # Episode
 # ══════════════════════════════════════════════════════════════════════════════════
+
+def _apply_net_rotation_clamp(
+    rotate1: float,
+    rotate2: float,
+    flip2: bool,
+    cfg: Config,
+) -> Tuple[float, float]:
+    """
+    Clip rotate2 so that |rotate1 + rotate2| <= max_net_rotation_deg.
+    Returns (rotate2_clipped, rotate2_canonical_clipped).
+    """
+    lo = -cfg.max_net_rotation_deg - rotate1
+    hi =  cfg.max_net_rotation_deg - rotate1
+    rotate2 = float(np.clip(rotate2, lo, hi))
+    rotate2_canonical = -rotate2 if flip2 else rotate2
+    return rotate2, rotate2_canonical
+
+
+def _get_measurement(
+    simulator: EnvironmentSimulator,
+    x: float,
+    y: float,
+    look_yaw: float,
+    cfg: Config,
+) -> Tuple[float, float]:
+    """
+    Return (dist_mm, physical_iid) for the given position/look direction.
+
+    The two flags are independent:
+      override_emulator_distance — geometric distance (min over central cone), emulator IID
+      override_emulator_iid      — geometric IID (10·log10(d_left/d_right)), emulator distance
+      both True                  — both from geometry
+      both False                 — both from emulator
+    """
+    need_profile = cfg.override_emulator_distance or cfg.override_emulator_iid
+    need_emulator = (not cfg.override_emulator_distance) or (not cfg.override_emulator_iid)
+
+    profile = simulator.get_profile_at_position(x, y, look_yaw) if need_profile else None
+    meas    = simulator.emulator.predict_single(profile) if (need_profile and need_emulator) \
+              else (simulator.get_sonar_measurement(x, y, look_yaw) if not need_profile else None)
+
+    if cfg.override_emulator_distance:
+        half_opening = simulator.opening_angle / 2
+        edges = np.linspace(-half_opening, half_opening, simulator.profile_steps + 1)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        central = profile[np.abs(centers) <= cfg.override_half_angle_deg]
+        valid_central = central[~np.isnan(central)]
+        geo_dist = float(np.min(valid_central)) if len(valid_central) > 0 else cfg.max_dist_mm
+        dist_mm = max(cfg.min_dist_mm, min(geo_dist, cfg.max_dist_mm))
+    else:
+        dist_mm = max(cfg.min_dist_mm, min(float(meas.get("distance_mm", cfg.max_dist_mm)), cfg.max_dist_mm))
+
+    if cfg.override_emulator_iid:
+        half_opening = simulator.opening_angle / 2
+        edges = np.linspace(-half_opening, half_opening, simulator.profile_steps + 1)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        half = cfg.override_half_angle_deg
+        # IID > 0 means wall closer on right (CCW-positive: centers>0 = left, centers<0 = right)
+        left  = profile[(centers > 0) & (np.abs(centers) <= half)]
+        right = profile[(centers < 0) & (np.abs(centers) <= half)]
+        #d_left  = float(np.nanmin(left))  if np.any(~np.isnan(left))  else cfg.max_dist_mm
+        #d_right = float(np.nanmin(right)) if np.any(~np.isnan(right)) else cfg.max_dist_mm
+        d_left = float(np.nanmean(left)) if np.any(~np.isnan(left)) else cfg.max_dist_mm
+        d_right = float(np.nanmean(right)) if np.any(~np.isnan(right)) else cfg.max_dist_mm
+        physical_iid = 20.0 * float(np.log10(max(d_left, 1.0) / max(d_right, 1.0)))
+    else:
+        physical_iid = float(meas.get("iid_db", 0.0))
+
+    return dist_mm, physical_iid
+
 
 def run_episode(
     policy: MLPPolicy,
@@ -351,9 +440,9 @@ def run_episode(
         look_yaw = original_yaw + rotate1
 
         # ── Step 2: sonar measurement at look direction ───────────────────────
-        meas = simulator.get_sonar_measurement(x, y, look_yaw)
-        dist_mm      = min(float(meas.get("distance_mm", cfg.max_dist_mm)), cfg.max_dist_mm)
-        physical_iid = float(meas.get("iid_db", 0.0))
+        dist_mm, physical_iid = _get_measurement(simulator, x, y, look_yaw, cfg)
+        if cfg.iid_noise_db > 0.0:
+            physical_iid += float(rng.normal(0.0, cfg.iid_noise_db))
 
         # ── Step 3: decide body turn (canonical frame) ────────────────────────
         flip2         = physical_iid < 0.0
@@ -361,6 +450,7 @@ def run_episode(
         inp2 = build_input(history, dist_mm, canonical_iid, rotate1_canonical, cfg)
         rotate2_canonical = policy.forward(inp2, cfg.max_rotate2_deg)
         rotate2 = -rotate2_canonical if flip2 else rotate2_canonical
+        rotate2, rotate2_canonical = _apply_net_rotation_clamp(rotate1, rotate2, flip2, cfg)
 
         # ── Step 4: execute movement ──────────────────────────────────────────
         action = {"rotate1_deg": rotate1, "rotate2_deg": rotate2, "drive_mm": cfg.fixed_drive_mm}
@@ -392,10 +482,15 @@ def evaluate_genome(
     starts_by_session: List[List[Tuple[float, float, float]]],
     cfg: Config,
     rng: np.random.Generator,
+    crash_starts_list: Optional[List[List[Tuple[float, float, float]]]] = None,
 ) -> Tuple[float, float]:
     """
     Evaluate one genome across all training sessions.
     Returns (mean_fitness, collision_rate).
+
+    crash_starts_list: per-session list of crash start positions (parallel to simulators).
+    Each crash start is run exactly once (guaranteed); remaining eps_per_session slots
+    are filled with randomly sampled starts from the normal pool.
     """
     policy = MLPPolicy(cfg)
     policy.set_genome(genome)
@@ -404,8 +499,17 @@ def evaluate_genome(
     fitnesses: List[float] = []
     collisions: List[float] = []
 
-    for sim, starts in zip(simulators, starts_by_session):
-        for _ in range(eps_per_session):
+    for i, (sim, starts) in enumerate(zip(simulators, starts_by_session)):
+        crash_starts = crash_starts_list[i] if crash_starts_list else []
+        n_guaranteed = min(len(crash_starts), eps_per_session)
+        n_random     = eps_per_session - n_guaranteed
+
+        for cs in crash_starts[:n_guaranteed]:
+            fit, col = run_episode(policy, sim, [cs], cfg, rng)
+            fitnesses.append(fit)
+            collisions.append(float(col))
+
+        for _ in range(n_random):
             fit, col = run_episode(policy, sim, starts, cfg, rng)
             fitnesses.append(fit)
             collisions.append(float(col))
@@ -439,9 +543,12 @@ def _init_worker(cfg_dict: dict) -> None:
         pass
 
 
-def _eval_worker(genome: np.ndarray) -> Tuple[float, float]:
+def _eval_worker(
+    args: Tuple[np.ndarray, Optional[List[List[Tuple[float, float, float]]]]]
+) -> Tuple[float, float]:
+    genome, crash_starts_list = args
     rng = np.random.default_rng()
-    return evaluate_genome(genome, _WORKER_SIMS, _WORKER_STARTS, _WORKER_CFG, rng)
+    return evaluate_genome(genome, _WORKER_SIMS, _WORKER_STARTS, _WORKER_CFG, rng, crash_starts_list)
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -486,6 +593,7 @@ def save_policy(policy: MLPPolicy, fitness: float, generation: int, path: str) -
         "force_aligned":      policy.cfg.force_aligned,
         "max_rotate1_deg":    policy.cfg.max_rotate1_deg,
         "max_rotate2_deg":    policy.cfg.max_rotate2_deg,
+        "max_net_rotation_deg": policy.cfg.max_net_rotation_deg,
         "fixed_drive_mm":     policy.cfg.fixed_drive_mm,
         "max_dist_mm":        policy.cfg.max_dist_mm,
         "max_iid_db":         policy.cfg.max_iid_db,
@@ -535,6 +643,204 @@ def save_history(hist: Dict[str, list], output_dir: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
+# Black box
+# ══════════════════════════════════════════════════════════════════════════════════
+
+_BB_CSS = """
+body  { font-family: monospace; font-size: 13px; margin: 24px; color: #222; }
+h1    { font-size: 15px; margin-bottom: 4px; }
+h2    { font-size: 13px; margin: 20px 0 4px; color: #444; border-top: 1px solid #ddd; padding-top: 8px; }
+h3    { font-size: 13px; margin: 12px 0 4px; }
+p.note { font-size: 11px; color: #888; margin: 2px 0 10px; }
+img   { max-width: 100%; border: 1px solid #ddd; margin-bottom: 14px; display: block; }
+table { border-collapse: collapse; margin-bottom: 16px; }
+th, td { border: 1px solid #ccc; padding: 3px 10px; text-align: right; white-space: nowrap; }
+th    { background: #f0f0f0; text-align: center; }
+td.c  { text-align: center; }
+tr.crash td { background: #ffe4e4; font-weight: bold; }
+a     { color: #197a4a; text-decoration: none; }
+a:hover { text-decoration: underline; }
+"""
+
+_BB_INDEX_CSS = """
+body  { font-family: monospace; font-size: 13px; margin: 24px; color: #222; }
+h1    { font-size: 15px; }
+p.note { font-size: 11px; color: #888; margin: 2px 0 12px; }
+table { border-collapse: collapse; }
+th, td { border: 1px solid #ccc; padding: 3px 12px; text-align: left; }
+th    { background: #f0f0f0; }
+td.num { text-align: right; }
+a     { color: #197a4a; text-decoration: none; }
+a:hover { text-decoration: underline; }
+"""
+
+
+def _bb_step_table(steps: List[Dict]) -> str:
+    """Render a list of step dicts as an HTML table. Last row is the crash step."""
+    header = (
+        "<tr>"
+        "<th>step</th>"
+        "<th>x (mm)</th><th>y (mm)</th><th>yaw (&deg;)</th>"
+        "<th>emu dist (mm)</th><th>emu IID (dB)</th>"
+        "<th>geo dist (mm)</th><th>geo IID (dB)</th>"
+        "<th>rot1 (&deg;)</th><th>rot2 (&deg;)</th><th>net (&deg;)</th>"
+        "</tr>"
+    )
+    rows = []
+    for i, s in enumerate(steps):
+        cls = ' class="crash"' if i == len(steps) - 1 else ""
+        rows.append(
+            f'<tr{cls}>'
+            f'<td class="c">{s["step"]}</td>'
+            f'<td>{s["x_mm"]:.1f}</td><td>{s["y_mm"]:.1f}</td><td>{s["yaw_deg"]:+.1f}</td>'
+            f'<td>{s["emu_dist_mm"]:.1f}</td><td>{s["emu_iid_db"]:+.2f}</td>'
+            f'<td>{s["geo_dist_mm"]:.1f}</td><td>{s["geo_iid_db"]:+.2f}</td>'
+            f'<td>{s["rotate1_deg"]:+.1f}</td><td>{s["rotate2_deg"]:+.1f}</td>'
+            f'<td>{s["net_rot_deg"]:+.1f}</td>'
+            "</tr>"
+        )
+    return f'<table>{header}{"".join(rows)}</table>'
+
+
+def _write_blackbox_html(
+    crashes_by_session: Dict[str, List[Dict]],
+    generation: int,
+    blackbox_dir: str,
+) -> None:
+    """Write blackbox/blackbox_gen{gen:04d}.html for one generation."""
+    img_src = f"../trajectories_gen{generation:04d}.png"
+    sections = []
+    for session_name, crashed_trials in crashes_by_session.items():
+        trial_blocks = []
+        for entry in crashed_trials:
+            t = entry["trial"]
+            total = entry["total_steps"]
+            steps = entry["last_steps"]
+            shown = len(steps)
+            trial_blocks.append(
+                f'<h3>T{t} &#x2717; &mdash; crashed at step {total - 1} / '
+                f'{total} &nbsp;(showing last {shown} steps)</h3>'
+                + _bb_step_table(steps)
+            )
+        sections.append(
+            f'<h2>{session_name}</h2>' + "".join(trial_blocks)
+        )
+
+    html = (
+        f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+        f'<title>Black box — Gen {generation}</title>'
+        f'<style>{_BB_CSS}</style></head><body>'
+        f'<h1>Generation {generation} — crash log</h1>'
+        f'<p class="note">IID &gt; 0 = wall on right &nbsp;|&nbsp; '
+        f'IID &lt; 0 = wall on left &nbsp;|&nbsp; '
+        f'last row (red) = crash step</p>'
+        f'<img src="{img_src}" alt="trajectories gen {generation:04d}">'
+        + "".join(sections)
+        + "</body></html>"
+    )
+    path = os.path.join(blackbox_dir, f"blackbox_gen{generation:04d}.html")
+    with open(path, "w") as f:
+        f.write(html)
+
+
+def _regenerate_blackbox_index(blackbox_dir: str) -> None:
+    """
+    Read _index.json (summary accumulated across gens) and rewrite index.html.
+    """
+    index_json = os.path.join(blackbox_dir, "_index.json")
+    if not os.path.exists(index_json):
+        return
+    with open(index_json) as f:
+        entries = json.load(f)   # list of {gen, sessions: {name: [trial_ids]}}
+
+    entries.sort(key=lambda e: e["gen"])
+    rows = []
+    for e in entries:
+        gen = e["gen"]
+        sessions = e["sessions"]
+        n_crashes = sum(len(ts) for ts in sessions.values())
+        session_str = ", ".join(
+            f"{sn} (T{', T'.join(str(t) for t in ts)})"
+            for sn, ts in sessions.items()
+        )
+        rows.append(
+            f'<tr>'
+            f'<td class="num"><a href="blackbox_gen{gen:04d}.html">{gen}</a></td>'
+            f'<td class="num">{n_crashes}</td>'
+            f'<td>{session_str}</td>'
+            f'</tr>'
+        )
+
+    html = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<title>Black box index</title>'
+        f'<style>{_BB_INDEX_CSS}</style></head><body>'
+        '<h1>Black box — crash index</h1>'
+        '<p class="note">Only generations with &ge;1 crash in the trajectory plot are listed.</p>'
+        '<table>'
+        '<tr><th>gen</th><th>crashes</th><th>sessions / trials</th></tr>'
+        + "".join(rows)
+        + '</table></body></html>'
+    )
+    with open(os.path.join(blackbox_dir, "index.html"), "w") as f:
+        f.write(html)
+
+
+def save_blackbox(
+    trajs_by_session: Dict[str, Tuple[List[Dict], EnvironmentSimulator]],
+    generation: int,
+    blackbox_dir: str,
+    n_steps: int = BLACK_BOX_STEPS,
+) -> bool:
+    """
+    For every crashed episode in this generation's trajectory plot, write
+    blackbox_dir/blackbox_gen{gen:04d}.html and update the index.
+    Returns True if any crashes were found (and the file was written).
+    """
+    crashes_by_session: Dict[str, List[Dict]] = {}
+    for session_name, (trajectories, _) in trajs_by_session.items():
+        crashed = []
+        for trial_idx, traj in enumerate(trajectories, 1):
+            if not traj["collided"]:
+                continue
+            steps = traj.get("steps", [])
+            crashed.append({
+                "trial":       trial_idx,
+                "total_steps": len(steps),
+                "last_steps":  steps[-n_steps:],
+            })
+        if crashed:
+            crashes_by_session[session_name] = crashed
+
+    if not crashes_by_session:
+        return False
+
+    os.makedirs(blackbox_dir, exist_ok=True)
+    _write_blackbox_html(crashes_by_session, generation, blackbox_dir)
+
+    # Update the persistent index summary.
+    index_json = os.path.join(blackbox_dir, "_index.json")
+    entries = []
+    if os.path.exists(index_json):
+        with open(index_json) as f:
+            entries = json.load(f)
+    # Remove any existing entry for this generation (e.g. on resume).
+    entries = [e for e in entries if e["gen"] != generation]
+    entries.append({
+        "gen": generation,
+        "sessions": {
+            sn: [c["trial"] for c in cs]
+            for sn, cs in crashes_by_session.items()
+        },
+    })
+    with open(index_json, "w") as f:
+        json.dump(entries, f)
+
+    _regenerate_blackbox_index(blackbox_dir)
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
 # Hall of fame
 # ══════════════════════════════════════════════════════════════════════════════════
 
@@ -576,9 +882,10 @@ def save_hof(hof: List[HofEntry], cfg: Config, hof_dir: str) -> None:
             "rank":            rank,
             "history_len":     pol.cfg.history_len,
             "hidden_sizes":    list(pol.cfg.hidden_sizes),
-            "max_rotate1_deg": pol.cfg.max_rotate1_deg,
-            "max_rotate2_deg": pol.cfg.max_rotate2_deg,
-            "fixed_drive_mm":  pol.cfg.fixed_drive_mm,
+            "max_rotate1_deg":     pol.cfg.max_rotate1_deg,
+            "max_rotate2_deg":     pol.cfg.max_rotate2_deg,
+            "max_net_rotation_deg": pol.cfg.max_net_rotation_deg,
+            "fixed_drive_mm":      pol.cfg.fixed_drive_mm,
             "max_dist_mm":     pol.cfg.max_dist_mm,
             "max_iid_db":      pol.cfg.max_iid_db,
             "genome_size":     pol.genome_size(),
@@ -620,21 +927,27 @@ def record_trajectories(
     n_episodes: int,
     rng: np.random.Generator,
 ) -> List[Dict]:
-    """Run n_episodes and return trajectory info (positions + collided flag)."""
+    """Run n_episodes and return trajectory info (positions + collided flag + per-step black-box data)."""
+    # Config for geometric reference measurements (both overrides on), used for black-box logging only.
+    geo_cfg = dataclasses.replace(cfg, override_emulator_distance=True, override_emulator_iid=True)
+
     trajectories = []
     for _ in range(n_episodes):
         if not starts:
             break
         x, y, yaw = starts[int(rng.integers(len(starts)))]
+        start_pos = (float(x), float(y), float(yaw))
         history: collections.deque = collections.deque(
             [(0.0, 0.0, 0.0, 0.0)] * cfg.history_len, maxlen=cfg.history_len
         )
         last_physical_iid = 0.0
         positions  = [(float(x), float(y))]
-        look_yaws  = []   # head direction (yaw after rotate1) recorded per step
+        body_yaws  = [float(yaw)]   # body heading after each step (index parallel to positions)
+        look_yaws  = []             # head direction (yaw after rotate1) recorded per step
+        steps_data: List[Dict] = []
         collided = False
 
-        for _ in range(cfg.max_steps):
+        for step_idx in range(cfg.max_steps):
             original_yaw = yaw
             if cfg.force_aligned:
                 rotate1_canonical = 0.0
@@ -646,27 +959,59 @@ def record_trajectories(
                 rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
             look_yaw = original_yaw + rotate1
             look_yaws.append(look_yaw)
-            meas = simulator.get_sonar_measurement(x, y, look_yaw)
-            dist_mm      = min(float(meas.get("distance_mm", cfg.max_dist_mm)), cfg.max_dist_mm)
-            physical_iid = float(meas.get("iid_db", 0.0))
+
+            dist_mm, physical_iid = _get_measurement(simulator, x, y, look_yaw, cfg)
+            emu_dist = dist_mm          # emulator/override distance fed to the network
+            emu_iid  = physical_iid     # emulator/override IID before noise
+            if cfg.iid_noise_db > 0.0:
+                physical_iid += float(rng.normal(0.0, cfg.iid_noise_db))
+
+            # Geometric reference (always computed from geometry, regardless of cfg overrides).
+            geo_dist, geo_iid = _get_measurement(simulator, x, y, look_yaw, geo_cfg)
+
             flip2         = physical_iid < 0.0
             canonical_iid = abs(physical_iid)
             inp2 = build_input(history, dist_mm, canonical_iid, rotate1_canonical, cfg)
             rotate2_canonical = policy.forward(inp2, cfg.max_rotate2_deg)
             rotate2 = -rotate2_canonical if flip2 else rotate2_canonical
+            rotate2, rotate2_canonical = _apply_net_rotation_clamp(rotate1, rotate2, flip2, cfg)
+            step_x, step_y = x, y   # position at start of step (where measurement was taken)
             action = {"rotate1_deg": rotate1, "rotate2_deg": rotate2, "drive_mm": cfg.fixed_drive_mm}
             result = simulator.simulate_robot_movement(x, y, original_yaw, [action], compute_sonar=False)[0]
             x   = float(result["position"]["x"])
             y   = float(result["position"]["y"])
             yaw = float(result["orientation"])
             positions.append((x, y))
+            body_yaws.append(float(yaw))
             history.append((dist_mm, canonical_iid, rotate1_canonical, rotate2_canonical))
             last_physical_iid = physical_iid
+
+            steps_data.append({
+                "step":           step_idx,
+                "x_mm":           round(step_x, 1),
+                "y_mm":           round(step_y, 1),
+                "yaw_deg":        round(original_yaw, 1),
+                "emu_dist_mm":    round(emu_dist, 1),
+                "emu_iid_db":     round(emu_iid, 2),
+                "geo_dist_mm":    round(geo_dist, 1),
+                "geo_iid_db":     round(geo_iid, 2),
+                "rotate1_deg":    round(rotate1, 1),
+                "rotate2_deg":    round(rotate2, 1),
+                "net_rot_deg":    round(rotate1 + rotate2, 1),
+            })
+
             if result["collision"]["drive_blocked"]:
                 collided = True
                 break
 
-        trajectories.append({"positions": positions, "look_yaws": look_yaws, "collided": collided})
+        trajectories.append({
+            "positions":  positions,
+            "body_yaws":  body_yaws,
+            "look_yaws":  look_yaws,
+            "collided":   collided,
+            "steps":      steps_data,
+            "start":      start_pos,
+        })
     return trajectories
 
 
@@ -676,6 +1021,7 @@ def plot_trajectories(
     fitness: float,
     cfg: Config,
     output_dir: str,
+    crash_starts_by_session: Optional[Dict[str, List[Tuple[float, float, float]]]] = None,
 ) -> None:
     """
     Multi-panel trajectory plot — one panel per session.
@@ -727,6 +1073,30 @@ def plot_trajectories(
                         headwidth=4, headlength=4, zorder=4,
                     )
 
+        # Crash-pool start positions
+        if crash_starts_by_session:
+            pool = crash_starts_by_session.get(session_name, [])
+            for (px, py, pyaw) in pool:
+                ax.plot(px, py, "x", color="black", markersize=5,
+                        markeredgewidth=1.2, zorder=5, alpha=0.7)
+                rad = np.deg2rad(pyaw)
+                ax.quiver(px, py,
+                          np.cos(rad) * arrow_len * 0.7, np.sin(rad) * arrow_len * 0.7,
+                          angles="xy", scale_units="xy", scale=1,
+                          color="black", alpha=0.5, width=0.002,
+                          headwidth=3, headlength=3, zorder=5)
+
+        # Trial legend: colour + crash marker so the black-box file is easy to cross-reference.
+        legend_handles = [
+            Line2D([0], [0], color=c,
+                   linestyle="--" if t["collided"] else "-",
+                   linewidth=1.5,
+                   label=f"T{i + 1}" + (" \u2717" if t["collided"] else ""))
+            for i, (t, c) in enumerate(zip(trajectories, colours))
+        ]
+        ax.legend(handles=legend_handles, fontsize=6, loc="upper left",
+                  framealpha=0.5, ncol=2, handlelength=1.5)
+
         n_coll = sum(1 for t in trajectories if t["collided"])
         ax.set_title(f"{session_name}  |  coll {n_coll}/{len(trajectories)}", fontsize=9)
         ax.set_xlabel("X (mm)", fontsize=8)
@@ -769,6 +1139,8 @@ def train(cfg: Config) -> None:
         "val": [], "val_std": [], "collision_rate": [], "mean_collision_rate": [],
     }
     best_genome, best_fitness = None, -np.inf
+    crash_starts_by_session: Dict[str, List[Tuple[float, float, float]]] = {}
+    crash_starts_path = os.path.join(cfg.output_dir, "crash_starts.json")
 
     if os.path.exists(checkpoint_path):
         ck        = np.load(checkpoint_path)
@@ -779,10 +1151,16 @@ def train(cfg: Config) -> None:
             with open(saved_cfg_path) as f:
                 saved = json.load(f)
             cur = asdict(cfg)
+            def _eq(a, b):
+                # treat lists and tuples as equivalent (JSON serialises tuples as lists)
+                if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+                    return list(a) == list(b)
+                return a == b
+
             mismatches = [
                 f"  {k}: saved={saved.get(k)!r}  current={cur[k]!r}"
                 for k in cur
-                if k != "output_dir" and cur[k] != saved.get(k)
+                if k != "output_dir" and not _eq(cur[k], saved.get(k))
             ]
             if mismatches:
                 print(f"Config mismatch — cannot resume '{cfg.output_dir}':")
@@ -811,6 +1189,13 @@ def train(cfg: Config) -> None:
                         for k, vals in raw.items()}
             if os.path.isdir(hof_dir):
                 hof = _load_hof_entries(hof_dir)
+            if os.path.exists(crash_starts_path):
+                with open(crash_starts_path) as f:
+                    raw = json.load(f)
+                crash_starts_by_session = {
+                    sn: [tuple(s) for s in starts]
+                    for sn, starts in raw.items()
+                }
             print(f"Resuming from generation {start_gen}  (best so far: {best_fitness:.1f})")
         else:
             population = _fresh_population(cfg, rng)
@@ -838,11 +1223,10 @@ def train(cfg: Config) -> None:
     print(f"Genome size: {template.genome_size()}")
     print(f"Output dir:  {cfg.output_dir}")
 
-    # Non-parallel setup (only used when parallel_eval=False)
-    train_sims, train_starts = None, None
-    if not cfg.parallel_eval:
-        train_sims   = [build_simulator(sn, cfg.quiet_setup) for sn in cfg.train_session_names]
-        train_starts = [load_starts(sn, cfg) for sn in cfg.train_session_names]
+    # Always build train_sims/train_starts — needed for crash-start retirement
+    # even in parallel_eval mode.
+    train_sims   = [build_simulator(sn, cfg.quiet_setup) for sn in cfg.train_session_names]
+    train_starts = [load_starts(sn, cfg) for sn in cfg.train_session_names]
 
     # Validation simulator
     val_sim    = build_simulator(cfg.validation_session_name, cfg.quiet_setup) \
@@ -874,11 +1258,17 @@ def train(cfg: Config) -> None:
         for gen in tqdm(range(start_gen, cfg.generations), desc="GA"):
 
             # ── Evaluate population ───────────────────────────────────────────
+            crash_starts_list = [
+                crash_starts_by_session.get(sn, [])
+                for sn in cfg.train_session_names
+            ]
             if cfg.parallel_eval:
-                results = list(executor.map(_eval_worker, population))
+                results = list(executor.map(
+                    _eval_worker, [(g, crash_starts_list) for g in population]
+                ))
             else:
                 results = [
-                    evaluate_genome(g, train_sims, train_starts, cfg, rng)
+                    evaluate_genome(g, train_sims, train_starts, cfg, rng, crash_starts_list)
                     for g in population
                 ]
 
@@ -947,7 +1337,58 @@ def train(cfg: Config) -> None:
                     )
                     for sn, (sim, starts) in plot_sims_by_session.items()
                 }
-                plot_trajectories(trajs_by_session, gen, best_fitness, cfg, cfg.output_dir)
+                plot_trajectories(trajs_by_session, gen, best_fitness, cfg, cfg.output_dir,
+                                  crash_starts_by_session=crash_starts_by_session)
+                save_blackbox(trajs_by_session, gen, os.path.join(cfg.output_dir, "blackbox"))
+
+                # ── Update crash-start pool from this generation's crashes ────
+                pool_changed = False
+                for sn, (trajectories, _) in trajs_by_session.items():
+                    for traj in trajectories:
+                        if traj["collided"]:
+                            positions  = traj["positions"]
+                            body_yaws  = traj.get("body_yaws", [])
+                            if not body_yaws:
+                                continue
+                            # Step back K positions from the crash (capped by trajectory length).
+                            k   = min(cfg.crash_backtrack_steps, len(positions) - 1)
+                            idx = -(k + 1)
+                            bx, by = positions[idx]
+                            byaw   = body_yaws[idx]
+                            pool = crash_starts_by_session.setdefault(sn, [])
+                            pool.append((bx, by, byaw))
+                            # Keep only the most recent entries within the cap.
+                            if len(pool) > cfg.max_crash_starts_per_session:
+                                crash_starts_by_session[sn] = pool[-cfg.max_crash_starts_per_session:]
+                            pool_changed = True
+                # ── Retire pool entries the best genome now handles ───────────
+                if crash_starts_by_session and best_genome is not None:
+                    retire_pol = MLPPolicy(cfg)
+                    retire_pol.set_genome(best_genome)
+                    pool_changed_retire = False
+                    for sn, sim in zip(cfg.train_session_names, train_sims):
+                        pool = crash_starts_by_session.get(sn, [])
+                        if not pool:
+                            continue
+                        survivors = []
+                        for cs in pool:
+                            _, col = run_episode(retire_pol, sim, [cs], cfg, rng)
+                            if col:
+                                survivors.append(cs)
+                        if len(survivors) < len(pool):
+                            crash_starts_by_session[sn] = survivors
+                            pool_changed = True
+                            pool_changed_retire = True
+
+                if pool_changed:
+                    with open(crash_starts_path, "w") as f:
+                        json.dump(crash_starts_by_session, f)
+
+                n_traj_coll  = sum(t["collided"] for trajs, _ in trajs_by_session.values() for t in trajs)
+                n_traj_total = sum(len(trajs)     for trajs, _ in trajs_by_session.values())
+                traj_coll_rate = n_traj_coll / n_traj_total if n_traj_total > 0 else float("nan")
+            else:
+                traj_coll_rate = float("nan")
 
             hist["best"].append(gen_best)
             hist["mean"].append(gen_mean)
@@ -958,9 +1399,12 @@ def train(cfg: Config) -> None:
             hist["collision_rate"].append(gen_coll)
             hist["mean_collision_rate"].append(gen_mean_coll)
 
+            traj_str = f"  traj_coll={traj_coll_rate:.2f}" if not np.isnan(traj_coll_rate) else ""
+            n_crash_pool = sum(len(v) for v in crash_starts_by_session.values())
+            crash_str = f"  crash_pool={n_crash_pool}" if n_crash_pool > 0 else ""
             tqdm.write(
                 f"Gen {gen:4d} | best={gen_best:7.1f}  mean={gen_mean:7.1f}"
-                f"  val={val_fit:7.1f}  coll={gen_coll:.2f}"
+                f"  coll={gen_coll:.2f}{traj_str}{crash_str}"
             )
 
             # ── Evolve ────────────────────────────────────────────────────────
@@ -974,7 +1418,7 @@ def train(cfg: Config) -> None:
             # ── Pushover ──────────────────────────────────────────────────────
             if cfg.pushover_every_n > 0 and (gen + 1) % cfg.pushover_every_n == 0:
                 pushover_notify(
-                    f"h{cfg.history_len:02d} Gen {gen+1}/{cfg.generations}  best={gen_best:.0f}  val={val_fit:.0f}"
+                    f"h{cfg.history_len:02d} Gen {gen+1}/{cfg.generations}  best={gen_best:.0f}  coll={gen_coll:.2f}"
                 )
 
             save_plot(hist, cfg.output_dir)
@@ -998,13 +1442,15 @@ def main() -> None:
                 history_len=0,
                 include_r1_in_input=False,
                 force_aligned=True,
-                output_dir=f"TrainedPolicies/{CONDITION}_h00_baseline",
+                output_dir=f"TrainedPolicies/{CONDITION}_h00",
+                iid_noise_db=IID_NOISE_DB,
             )
             label = "baseline"
         else:
             cfg = Config(
                 history_len=history_len,
                 output_dir=f"TrainedPolicies/{CONDITION}_h{history_len:02d}",
+                iid_noise_db=IID_NOISE_DB,
             )
             label = f"history_len={history_len}"
         print(f"\n{'='*60}")
