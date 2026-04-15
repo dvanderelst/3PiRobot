@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 calibration_folder = 'Library/RobotCalibration'
 calibration_plot_folder = 'Library/RobotCalibration/Plots'
-data_folder = 'Data'
+data_folder = 'TrainingData'
 
 controller_verbosity = 2  # 0=errors, 1=warnings, 2=info, 3=debug
 client_verbosity = 3  # 0=errors, 1=warnings, 2=info, 3=debug

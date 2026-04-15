@@ -251,36 +251,33 @@ class EnvironmentSimulator:
         robot_radius_mm: float = 85.0,
         boundary_margin_mm: Optional[float] = None,
         collision_step_mm: float = 20.0,
+        emulator_dir: str = "Emulator",
     ):
         """
         Initialize simulator with arena layout and emulator.
-        
+
         Args:
             session_name: Session to use for arena layout
             robot_radius_mm: Collision clearance radius around robot center
             boundary_margin_mm: Min distance from arena border (defaults to robot radius)
             collision_step_mm: Step size for drive-segment collision checking
+            emulator_dir: Directory containing emulator artifacts
         """
         # Load arena layout
         self.arena = ArenaLayout(session_name)
-        
-        # Load emulator
-        self.emulator = Emulator.load(device="cpu")  # Use CPU for stability
-        
-        # Get profile parameters from emulator (ensures consistency)
-        self.profile_params = self.emulator.get_profile_params()
-        self.opening_angle = self.profile_params['profile_opening_angle']
-        self.profile_steps = self.profile_params['profile_steps']
-        self.robot_radius_mm = float(robot_radius_mm)
-        self.boundary_margin_mm = float(boundary_margin_mm) if boundary_margin_mm is not None else float(robot_radius_mm)
-        self.collision_step_mm = max(1.0, float(collision_step_mm))
 
-        # Pre-compute the central-90° profile slice indices (constant; reused in every sonar call).
-        n_p = self.profile_steps
-        _central_frac = min(90.0 / float(self.opening_angle), 1.0)
-        _margin = (1.0 - _central_frac) / 2.0
-        self._central_lo = int(np.round(_margin * (n_p - 1)))
-        self._central_hi = int(np.round((1.0 - _margin) * (n_p - 1))) + 1  # exclusive
+        # Load emulator
+        self.emulator = Emulator.load(emulator_dir=emulator_dir, device="cpu")
+
+        # Profile parameters — read from the emulator artifact so they are always
+        # consistent with what the model was trained on.
+        self.profile_params = self.emulator.get_profile_params()
+        self.opening_angle  = self.profile_params['profile_opening_angle']
+        self.profile_steps  = self.profile_params['profile_steps']
+
+        self.robot_radius_mm    = float(robot_radius_mm)
+        self.boundary_margin_mm = float(boundary_margin_mm) if boundary_margin_mm is not None else float(robot_radius_mm)
+        self.collision_step_mm  = max(1.0, float(collision_step_mm))
 
         print(f"Simulator initialized with {session_name}")
         print(f"Profile config: {self.opening_angle}° opening, {self.profile_steps} steps")
@@ -404,12 +401,7 @@ class EnvironmentSimulator:
         """
         Get predicted sonar measurement at position/orientation.
 
-        This is the main interface for policy learning.
-
-        Distance is computed geometrically as the minimum profile value over the
-        central 90° of the opening angle (rather than from the emulator, which has
-        poor accuracy at close distances).  IID and echo_present_prob are still
-        predicted by the emulator.
+        Both IID and distance are predicted by the emulator CNN.
 
         Args:
             x, y: Position in mm
@@ -417,28 +409,11 @@ class EnvironmentSimulator:
 
         Returns:
             Dictionary with keys:
-            - 'echo_present_prob': Predicted echo presence probability
-            - 'echo_distance_mm': Geometric minimum distance over central 90° (mm)
-            - 'distance_mm': Alias for echo_distance_mm (backward compat)
-            - 'iid_db': Predicted IID in decibels
+            - 'iid_db':      Predicted IID in decibels
+            - 'distance_mm': Predicted sonar distance in mm
         """
-        # Get distance profile
         profile = self.get_profile_at_position(x, y, orientation_deg)
-
-        # Use emulator for IID and echo_present_prob only
-        result = self.emulator.predict_single(profile)
-
-        # Replace emulator distance with geometric minimum over the central 90°
-        # of the profile (or the full profile if opening_angle <= 90°).
-        # Profile spans opening_angle degrees with profile_steps bins.
-        central_profile = profile[self._central_lo:self._central_hi]
-        finite_vals = central_profile[np.isfinite(central_profile)]
-        geo_dist_mm = float(np.min(finite_vals)) if len(finite_vals) > 0 else 3000.0
-
-        result['echo_distance_mm'] = geo_dist_mm
-        result['distance_mm'] = geo_dist_mm
-
-        return result
+        return self.emulator.predict_single(profile)
     
     def get_sonar_measurements_batch(
         self,
@@ -467,21 +442,13 @@ class EnvironmentSimulator:
         # Single batched CNN inference for all positions
         emulator_results = self.emulator.predict(profiles)
 
-        # Geometric distance: min over central 90° bins (same logic as get_sonar_measurement)
-        central = profiles[:, self._central_lo:self._central_hi]  # (N, central_bins)
-
-        results: List[Dict[str, float]] = []
-        for k in range(len(positions)):
-            fv = central[k]
-            fv = fv[np.isfinite(fv)]
-            geo_dist = float(np.min(fv)) if len(fv) > 0 else 3000.0
-            results.append({
-                'echo_present_prob': float(emulator_results['echo_present_prob'][k]),
-                'echo_distance_mm':  geo_dist,
-                'distance_mm':       geo_dist,
-                'iid_db':            float(emulator_results['iid_db'][k]),
-            })
-        return results
+        return [
+            {
+                "iid_db":      float(emulator_results["iid_db"][k]),
+                "distance_mm": float(emulator_results["distance_mm"][k]),
+            }
+            for k in range(len(positions))
+        ]
 
     def simulate_robot_movement(self, start_x: float, start_y: float, start_orientation: float,
                                actions: List[Dict[str, float]],

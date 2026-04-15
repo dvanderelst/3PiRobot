@@ -1,3 +1,4 @@
+import os
 from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
@@ -8,7 +9,9 @@ from Library import DataProcessor, Utils
 # ============================================
 # CONFIGURATION
 # ============================================
-session = "policy_memory09a"
+#data_folder = "TrainingData"  # or "PolicyRuns"
+data_folder = "PolicyRuns"
+session = "session5_h10_arena1_02"
 
 # Session trajectory/profile visualization.
 show_trajectory_plot = True
@@ -22,7 +25,8 @@ distance_tolerance_m = 1.0  # sonar too far/too close threshold in meters
 
 
 def plot_session_trajectory(session_name):
-    processor = DataProcessor.DataProcessor(session_name)
+    session_path = os.path.abspath(os.path.join(data_folder, session_name))
+    processor = DataProcessor.DataProcessor(session_path)
     _ = processor.load_profiles(opening_angle=max(profile_opening_angles_deg), steps=profile_steps)
 
     n_steps = processor.n
@@ -56,7 +60,8 @@ def run_session_sonar_visual_check(session_name):
     max_opening_angle = float(max(profile_opening_angles_deg))
     max_half_angle = 0.5 * max_opening_angle
 
-    dc = DataProcessor.DataCollection([session_name])
+    session_path = os.path.abspath(os.path.join(data_folder, session_name))
+    dc = DataProcessor.DataCollection([session_path])
     profiles_mm, centers_deg = dc.load_profiles(opening_angle=max_opening_angle, steps=profile_steps, fill_nans=True)
     profiles_m = profiles_mm / 1000.0
     sonar_distance = np.asarray(dc.get_field('sonar_package', 'corrected_distance'), dtype=np.float32)

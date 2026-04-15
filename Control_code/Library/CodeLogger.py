@@ -3,7 +3,7 @@ import zipfile
 from datetime import datetime
 
 
-def log_code(output_path, folders, label=None):
+def log_code(output_path, folders, label=None, timestamp=False):
     """
     Archive all .py files found in the given folders into a zip file.
 
@@ -16,15 +16,23 @@ def log_code(output_path, folders, label=None):
         Files in each folder are added non-recursively unless the folder ends with '/**'.
     label : str, optional
         Extra label inserted into the zip filename, e.g. a run ID or script name.
-        Filename format: code_<label>_<timestamp>.zip  (or code_<timestamp>.zip)
+        Filename format: code_<label>.zip  (or code.zip)
+    timestamp : bool, optional
+        If True, append a timestamp to the zip filename (old behaviour, creates a new
+        file each run).  If False (default), the zip is overwritten each run and a
+        'timestamp.txt' is written inside the archive instead.
     """
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    filename = f'code_{label}_{timestamp}.zip' if label else f'code_{timestamp}.zip'
+    ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    if timestamp:
+        filename = f'code_{label}_{ts}.zip' if label else f'code_{ts}.zip'
+    else:
+        filename = f'code_{label}.zip' if label else 'code.zip'
     zip_path = os.path.join(output_path, filename)
 
     os.makedirs(output_path, exist_ok=True)
 
     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('timestamp.txt', ts)
         for folder in folders:
             recursive = folder.endswith('/**')
             folder = folder.removesuffix('/**')

@@ -1,134 +1,253 @@
+#!/usr/bin/env python3
 """
-SCRIPT_RunPolicy.py — drive the robot with a trained HistoryNNPolicy.
+SCRIPT_RunPolicy2.py
 
-Mirrors SCRIPT_DataAcquisition.py structure, replacing the heuristic controller
-with PolicyController.  Sonar data and position are saved identically to
-SCRIPT_DataAcquisition.py so downstream analysis scripts work unchanged.
+Deploy a policy trained by SCRIPT_TrainPolicy2.py on the real robot.
 
-Ping ordering (DataAcquisition-style):
-    ping → compute rotate1 (from last_iid) + rotate2 (from current ping)
-         → execute rotate1 → execute rotate2 → execute drive
+Two-phase step sequence (from rationale.md):
+  Phase 1 — look:
+    1. Decide rotate1 from policy (IID symmetry wrapper applied)
+    2. Rotate body by rotate1
+    3. Sonar ping → corrected_iid, corrected_distance
+  Phase 2 — move:
+    4. Decide rotate2 from policy (IID symmetry wrapper applied)
+    5. Rotate body by rotate2
+    6. Drive forward fixed_drive_mm
+
+IID symmetry wrapper: if physical IID < 0 (wall on left), pass abs(IID) to
+the network and negate the output rotation.  History stores canonical values.
 """
 
+import collections
+import json
+import os
 import time
 
 import numpy as np
-from Library import Dialog
+from scipy._lib.pyprima.common import history
+
 from Library import Client
 from Library import CodeLogger
 from Library import DataStorage
+from Library import Dialog
 from Library import LorexTracker
 from Library import PauseControl
 from Library import PushOver
-from Library.PolicyController import PolicyController, load_policy
 from LorexLib.Environment import capture_environment_layout
+from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input
 
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Settings — edit these
+# ══════════════════════════════════════════════════════════════════════════════
+POLICY   = 'policy5_h10' # sub-folder under PolicyTraining/
+ARENA     = 'arena1'
+REPEAT    = '03'
+MAX_STEPS = 250
 
-CONDITION       = "memory09"              # sub-folder under Policy/ that holds the JSON
-ROBOT_ID        = 1
-SESSION         = "policy_memory09a"     # data session folder name
-MAX_STEPS       = 500
-FIXED_DRIVE_MM  = 100.0
+ROBOT_ID     = 1
+SHORT_POLICY = POLICY.replace('policy', '')
+POLICY_FILE  = "best_policy.json"
+SESSION      = f"session{SHORT_POLICY}_{ARENA}_{REPEAT}"
+
+# Dry-run flags (set False to disable movement for debugging)
+do_rotation    = True
+do_translation = True
+
 wait_for_confirmation = False
 
-# Dry-run flags (mirror SCRIPT_DataAcquisition.py convention)
-do_rotation     = True
-do_translation  = True
+POLICY_DIR   = "PolicyTraining"
+DATA_FOLDER  = "PolicyRuns"
 
-POLICY_DIR          = "Policy"               # root folder containing CONDITION sub-folder
 
-# ── Setup ────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Load policy
+# ══════════════════════════════════════════════════════════════════════════════
 
-policy_path = f"{POLICY_DIR}/{CONDITION}/best_policy.json"
-policy      = load_policy(policy_path)
-ctrl        = PolicyController(policy, fixed_drive_mm=FIXED_DRIVE_MM)
+def load_policy(path: str):
+    with open(path) as f:
+        data = json.load(f)
+
+    # Infer include_r1_in_input from stored genome_size for backward compat
+    # (older files didn't persist this flag; newer ones do)
+    if "include_r1_in_input" in data:
+        include_r1 = data["include_r1_in_input"]
+    else:
+        h = data["history_len"]
+        h1, h2 = data["hidden_sizes"]
+        in_dim_with_r1 = 4 * h + 3
+        size_with_r1 = (h1 * in_dim_with_r1 + h1) + (h2 * h1 + h2) + (h2 + 1)
+        include_r1 = (data.get("genome_size", size_with_r1) == size_with_r1)
+
+    # force_aligned was not saved in older files; infer from include_r1_in_input
+    # (the two flags always go together: force_aligned=True ↔ include_r1_in_input=False)
+    force_aligned = data.get("force_aligned", not include_r1)
+
+    cfg = Config(
+        history_len          = data["history_len"],
+        hidden_sizes         = tuple(data["hidden_sizes"]),
+        max_rotate1_deg      = data["max_rotate1_deg"],
+        max_rotate2_deg      = data["max_rotate2_deg"],
+        fixed_drive_mm       = data["fixed_drive_mm"],
+        max_dist_mm          = data["max_dist_mm"],
+        max_iid_db           = data["max_iid_db"],
+        include_r1_in_input  = include_r1,
+        force_aligned        = force_aligned,
+    )
+    policy = MLPPolicy(cfg)
+    policy.set_genome(np.array(data["genome"], dtype=np.float32))
+    return policy, cfg
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Setup
+# ══════════════════════════════════════════════════════════════════════════════
+
+policy_path = f"{POLICY_DIR}/{POLICY}/{POLICY_FILE}"
+policy, cfg = load_policy(policy_path)
+print(f"Loaded policy: {policy_path}")
+print(f"  history_len={cfg.history_len}  hidden={cfg.hidden_sizes}")
+print(f"  max_rotate1={cfg.max_rotate1_deg}°  max_rotate2={cfg.max_rotate2_deg}°")
+print(f"  fixed_drive={cfg.fixed_drive_mm} mm")
+
+from Library import Settings as _settings
+_settings.data_folder = DATA_FOLDER
+
+session_folder = os.path.join(DATA_FOLDER, SESSION)
+if os.path.exists(session_folder) and os.listdir(session_folder):
+    response = input(f"Session folder '{session_folder}' already exists and is non-empty. Overwrite? [y/N]: ")
+    if response.strip().lower() != "y":
+        print("Aborted.")
+        raise SystemExit(0)
 
 control = PauseControl.PauseControl()
 client  = Client.Client(robot_number=ROBOT_ID)
 tracker = LorexTracker.LorexTracker()
 writer  = DataStorage.DataWriter(SESSION, autoclear=True, verbose=False)
-writer.add_file("Library/PolicyController.py")
 writer.add_file("SCRIPT_RunPolicy.py")
-snapshot = capture_environment_layout(save_root=f"Data/{SESSION}")
-CodeLogger.log_code(f"Data/{SESSION}", ['.', 'Library'], label=SESSION)
+snapshot = capture_environment_layout(save_root=f"{DATA_FOLDER}/{SESSION}")
+CodeLogger.log_code(f"{DATA_FOLDER}/{SESSION}", [".", "Library"], label=SESSION)
 
-# Warm up sonar (flush stale buffers)
+# Warm up sonar
 for _ in range(5):
     client.acquire("ping")
     time.sleep(0.5)
 
-# ── Main loop ────────────────────────────────────────────────────────────────
+# History buffer — zero-initialised, consistent with training
+history           = collections.deque(
+    [(0.0, 0.0, 0.0, 0.0)] * cfg.history_len, maxlen=cfg.history_len
+)
+last_physical_iid = 0.0   # no prior measurement on first step
 
-ctrl.reset()
-PushOver.send(f"Policy run started: {SESSION} ({CONDITION})")
+# Crash log — written on first crash, one line per event
+crash_log_path = f"{DATA_FOLDER}/{SESSION}/crashes.tsv"
+last_position  = None     # position at end of previous step
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main loop
+# ══════════════════════════════════════════════════════════════════════════════
+
+PushOver.send(f"Policy run started: {SESSION}")
 
 for step in range(MAX_STEPS):
-    control.wait_if_paused()
+    if control.wait_if_paused():
+        # User paused → robot bumped → log crash using position from last step
+        pos = last_position or {}
+        x, y, yaw = pos.get("x"), pos.get("y"), pos.get("yaw_deg")
+        write_header = not os.path.exists(crash_log_path)
+        with open(crash_log_path, "a") as _cf:
+            if write_header:
+                _cf.write("step\tx\ty\tyaw_deg\n")
+            _cf.write(f"{step}\t{x}\t{y}\t{yaw}\n")
+        print(f"  *** Crash logged (step {step}): x={x}, y={y}, yaw={yaw} ***")
 
-    # --- Rotate1: orient head based on last step's IID (before pinging) ---
-    rotate1 = ctrl.compute_rotate1()
-    if do_rotation:
-        client.step(angle=rotate1)
-        time.sleep(0.5)
+    # ── Phase 1: decide and execute rotate1 ───────────────────────────────────
+    if cfg.force_aligned:
+        rotate1_canonical = 0.0
+        rotate1           = 0.0
+    else:
+        inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
+        rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
+        flip1   = last_physical_iid < 0.0
+        rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
 
-    # --- Sonar ping at post-rotate1 orientation ---
+        if do_rotation:
+            client.step(angle=rotate1)
+            time.sleep(0.5)
+
+    # ── Sonar measurement at post-rotate1 orientation ─────────────────────────
     sonar_package = client.read_and_process(do_ping=True, plot=True)
     position      = tracker.get_position(ROBOT_ID)
 
     if sonar_package is None:
-        print(f"Warning: No sonar data at step {step}, skipping.")
+        print(f"Step {step:4d}: no sonar data — skipping step")
+        writer.save_data(
+            sonar_package=None,
+            position=position,
+            motion={"rotate1": rotate1, "rotate2": 0.0,
+                    "net_rotation": rotate1, "drive_mm": 0.0},
+        )
         continue
 
     sonar_package["robot_number"] = ROBOT_ID
-    iid_db            = float(sonar_package['corrected_iid'])
-    dist_mm           = float(sonar_package['corrected_distance']) * 1000.0
-    echo_present_prob = float(sonar_package.get('echo_present_prob', 1.0))
+    physical_iid = float(sonar_package["corrected_iid"])
+    dist_mm      = min(float(sonar_package["corrected_distance"]) * 1000.0,
+                       cfg.max_dist_mm)
 
-    # --- Rotate2: body turn based on current ping ---
-    rotate2 = ctrl.compute_rotate2(iid_db, dist_mm, echo_present_prob)
+    # ── Phase 2: decide and execute rotate2 ───────────────────────────────────
+    flip2         = physical_iid < 0.0
+    canonical_iid = abs(physical_iid)
+    inp2 = build_input(history, dist_mm, canonical_iid, rotate1_canonical, cfg)
+    rotate2_canonical = policy.forward(inp2, cfg.max_rotate2_deg)
+    rotate2 = -rotate2_canonical if flip2 else rotate2_canonical
 
-    rob_x       = position["x"]
-    rob_y       = position["y"]
-    rob_yaw_deg = position["yaw_deg"]
-    if None not in (rob_x, rob_y, rob_yaw_deg):
-        pos_str = f"({rob_x:.3f}, {rob_y:.3f}, {rob_yaw_deg:.1f}°)"
-    else:
-        pos_str = "N/A"
-
-    print(
-        f"Step {step:3d}: IID={iid_db:+6.2f} dB  dist={dist_mm:6.0f} mm  "
-        f"rot1={rotate1:+6.1f}°  rot2={rotate2:+6.1f}°  net={rotate1+rotate2:+6.1f}°  "
-        f"drive={FIXED_DRIVE_MM:.0f} mm  pos={pos_str}"
-    )
-
-    # --- Execute rotate2 and drive ---
     if do_rotation:
         client.step(angle=rotate2)
         time.sleep(0.5)
 
+    # ── Drive forward ─────────────────────────────────────────────────────────
     if do_translation:
-        client.step(distance=FIXED_DRIVE_MM / 1000.0)   # Client expects metres
+        client.step(distance=cfg.fixed_drive_mm / 1000.0)
         time.sleep(0.15)
 
-    # --- Update controller history ---
-    ctrl.update(rotate1, rotate2, iid_db, dist_mm, echo_present_prob=echo_present_prob)
+    # ── Update history (canonical frame) ─────────────────────────────────────
+    history.append((dist_mm, canonical_iid, rotate1_canonical, rotate2_canonical))
+    last_physical_iid = physical_iid
 
-    # --- Save data ---
+    # ── Log ───────────────────────────────────────────────────────────────────
+    net_rotation = rotate1 + rotate2
+    rob_x        = position["x"]
+    rob_y        = position["y"]
+    rob_yaw_deg  = position["yaw_deg"]
+    pos_str = f"({rob_x:.3f}, {rob_y:.3f}, {rob_yaw_deg:.1f}°)" \
+              if None not in (rob_x, rob_y, rob_yaw_deg) else "N/A"
+
+    print(
+        f"Step {step:4d}: IID={physical_iid:+6.2f} dB  dist={dist_mm:6.0f} mm  "
+        f"r1={rotate1:+6.1f}°  r2={rotate2:+6.1f}°  net={net_rotation:+6.1f}°  "
+        f"pos={pos_str}"
+    )
+
     writer.save_data(
         sonar_package=sonar_package,
         position=position,
-        motion={"rotate1": rotate1, "rotate2": rotate2, "drive_mm": FIXED_DRIVE_MM},
+        motion={
+            "rotate1":      rotate1,
+            "rotate2":      rotate2,
+            "net_rotation": net_rotation,
+            "drive_mm":     cfg.fixed_drive_mm,
+        },
     )
+    last_position = position
 
     if step % 100 == 0 and step > 0:
-        PushOver.send(f"Policy run progress: {step}/{MAX_STEPS} steps ({SESSION})")
+        PushOver.send(f"{SESSION}: {step}/{MAX_STEPS} steps")
 
     if wait_for_confirmation:
         response = Dialog.ask_yes_no("Continue", min_size=(400, 200))
-        if response[0] == 'No': break
+        if response[0] == "No":
+            break
     else:
         time.sleep(0.25)
 
-PushOver.send(f"Policy run completed: {MAX_STEPS} steps for session {SESSION}.")
+PushOver.send(f"Policy run completed: {SESSION}, {step + 1} steps.")

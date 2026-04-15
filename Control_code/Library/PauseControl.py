@@ -9,8 +9,9 @@ class PauseControl:
         font=("Arial", 12),
         keep_on_top=True,
     ):
-        self._paused = False
-        self._closed = False
+        self._paused  = False
+        self._crashed = False
+        self._closed  = False
 
         sg.set_options(font=font)
 
@@ -18,8 +19,7 @@ class PauseControl:
             [sg.Text("Data acquisition running", key="-STATUS-", expand_x=True, justification="center")],
             [
                 sg.Button("Pause", key="-TOGGLE-", bind_return_key=True, size=(10, 1)),
-                sg.Button("Other", key="-OTHER-", size=(10, 1)),
-                sg.Button("Other 2", key="-OTHER2-", size=(10, 1)),
+                sg.Button("Crash", key="-CRASH-",  size=(10, 1)),
             ],
             [sg.Text("Note:"), sg.Input("", key="-NOTE-", expand_x=True)],
         ]
@@ -49,14 +49,17 @@ class PauseControl:
         values = self._window.read(timeout=0)[1]
         return values.get("-NOTE-", "") if values else ""
 
-    def _toggle_pause(self):
-        self._paused = not self._paused
-        if self._paused:
-            self._window["-STATUS-"].update("Paused - click again to resume")
-            self._window["-TOGGLE-"].update("Resume")
-        else:
-            self._window["-STATUS-"].update("Data acquisition running")
-            self._window["-TOGGLE-"].update("Pause")
+    def _set_paused(self, crashed: bool):
+        self._paused  = True
+        self._crashed = crashed
+        status = "CRASH — fix robot, then Resume" if crashed else "Paused — click Resume to continue"
+        self._window["-STATUS-"].update(status)
+        self._window["-TOGGLE-"].update("Resume")
+
+    def _resume(self):
+        self._paused = False
+        self._window["-STATUS-"].update("Data acquisition running")
+        self._window["-TOGGLE-"].update("Pause")
 
     def _pump(self, timeout=0):
         if self._closed:
@@ -66,12 +69,23 @@ class PauseControl:
             self._closed = True
             return
         if event == "-TOGGLE-":
-            self._toggle_pause()
+            if self._paused:
+                self._resume()
+            else:
+                self._set_paused(crashed=False)
+        elif event == "-CRASH-":
+            self._set_paused(crashed=True)
 
     def wait_if_paused(self, poll_ms=100):
+        """Wait while paused.  Returns True if resumed from a crash-pause, False otherwise."""
         self._pump(timeout=0)
+        if not self._paused:
+            return False
         while self._paused and not self._closed:
             self._pump(timeout=poll_ms)
+        was_crash = self._crashed
+        self._crashed = False
+        return was_crash
 
     def close(self):
         if self._window is not None:

@@ -6,15 +6,18 @@
 ############## Control_code sub repo
 Control_code/Library/RobotCalibration/
 Control_code/TestScripts
-Control_code/Plots/
-Control_code/Data/
-Control_code/CompareModels/
-Control_code/TrainingClosest/
+Control_code/PaperPlots/
+Control_code/TrainingData/
+Control_code/PolicyRuns/
+Control_code/PolicyTraining/
+Control_code/TempOutput/
 Control_code/EchoProcessor/
 Control_code/Emulator/
-Control_code/Policy/
+
 Control_code/PolicyAssessment/
 Control_code/ValidStarts/
+Control_code/Cache/
+Control_code/CollisionAssessment/
 ############## Robot code sub repo
 robot_code/.Trash-1000/
 robot_code/System Volume Information/
@@ -29,3 +32,7 @@ Control_code/cache/
 *.zip
 
 
+
+Control_code/SupervisorData/
+
+Control_code/DemonstratorData/

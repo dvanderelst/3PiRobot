@@ -1,498 +1,874 @@
+#!/usr/bin/env python3
 """
-Train an environment emulator that predicts sonar measurements from profiles.
+SCRIPT_TrainEmulator2.py
 
-This script trains a neural network that maps geometric profiles to sonar cues.
-It predicts IID and echo presence probability from profile data.
-Distance is computed geometrically (minimum over the profile opening angle)
-rather than being regressed, so it is not a training target here.
+Train a CNN emulator that predicts sonar readings (IID and distance) from
+geometric profiles of the robot arena.
 
-Supervision targets:
-- iid_db: corrected_iid from sonar_package
-- echo_present: binary label (distance_mm < no_echo_min_distance_mm)
+Architecture:
+  - Input: 1D profile of wall distances (normalised by fixed global scale)
+  - Conv layers -> AdaptiveAvgPool -> FC -> two regression heads:
+      iid_head      : predicted IID in dB       (echo-present samples only)
+      distance_head : predicted distance in mm  (echo-present samples only)
+  - Echo presence is NOT predicted. Both heads are trained and evaluated on
+    echo-present samples only (corrected_distance < max_dist_mm). For
+    echo-absent situations the networks extrapolate: a flat far-away profile
+    naturally maps to large distance and near-zero IID.
+
+Artifacts saved to output_dir/:
+  best_model_pytorch.pth, training_params.json,
+  training_curve.png, scatter_plots.png, code_emulator2.zip
 """
 
-# ============================================
-# CONFIGURATION
-# ============================================
-sessions = ["sessionB01", "sessionB02", "sessionB03"]
-profile_opening_angle = 90
-profile_steps = 61
-
-output_dir = "Emulator"
-
-val_fraction = 0.15   # random holdout fraction for validation
-seed = 42
-
-batch_size = 64
-epochs = 120
-patience = 12
-learning_rate = 1e-3
-l2_reg = 1e-4
-# CNN architecture
-conv_channels = [16, 32, 32]   # channels per conv layer
-conv_kernel    = 7              # kernel size (same for all layers)
-fc_hidden      = 64             # FC hidden size after conv
-
-# Loss settings
-iid_huber_delta = 2.0
-echo_present_loss_weight = 1.0  # relative weight of echo_present vs IID loss
-
-# IID sample weighting (applied to IID loss term)
-iid_near_zero_abs_db = 1.5
-iid_near_zero_weight = 1.25
-iid_tail_abs_db = 5.0
-iid_tail_weight = 1.25
-
-# No-echo detection threshold: samples with distance_mm >= this value are treated as
-# "no echo detected" (sonar returned max range). Determined empirically from data gap.
-no_echo_min_distance_mm = 3500.0
-
-
-# ============================================
-# IMPORTS
-# ============================================
 import json
 import os
-import time
 
 import matplotlib
 if not os.environ.get("DISPLAY") and os.name != "nt":
     matplotlib.use("Agg")
-
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from matplotlib import pyplot as plt
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
+from dataclasses import asdict, dataclass, field
+from typing import Dict, List, Optional, Tuple
 
-from Library import DataProcessor
+from Library.DataProcessor import DataCollection
 from Library import CodeLogger
 
 
-os.makedirs(output_dir, exist_ok=True)
-CodeLogger.log_code(output_dir, ['.', 'Library'], label='TrainEmulator')
+# ══════════════════════════════════════════════════════════════════════════════
+# Settings  ← change these before running
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Data
+SESSION_PATHS   = ["sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"]
+CACHE_DIR       = "Cache"
+FORCE_RECOMPUTE = False   # set True when changing PROFILE_STEPS / OPENING_ANGLE /
+                          # PROFILE_METHOD to bypass the per-session profile cache
+
+# Profile geometry
+OPENING_ANGLE  = 220.0     # degrees — total angular span of the profile
+PROFILE_STEPS  = 111        # number of azimuth bins
+PROFILE_METHOD = "min_bin" # "min_bin" or "ray_center"
+MAX_DIST_MM    = 3000.0    # echo-presence threshold and normalisation scale
+
+# IID → azimuth calibration
+AZ_FIT_CONE_HALF_DEG = 30.0  # only wall points within ±this of forward are used
+                              # as echo-source ground truth
+AZ_FIT_DIST_MIN_MM   = 300.0  # exclude very close distances (IID saturation)
+AZ_FIT_DIST_MAX_MM   = 2000.0 # exclude very far distances (weak/noisy echoes)
+
+# CNN architecture
+CONV_CHANNELS = [32, 64]
+CONV_KERNEL   = 3
+FC_HIDDEN     = 64
+HEAD_HIDDEN   = 32
+
+# Training
+LR               = 1e-3
+BATCH_SIZE       = 64
+EPOCHS           = 100
+DIST_LOSS_WEIGHT = 1.0
+
+# Train / validation split
+VALIDATION_QUADRANTS = {
+    "sessionB01": [1],
+    "sessionB02": [3],
+    "sessionB03": [2],
+    "sessionB04": [4],
+    "sessionB05": [1],
+}
+
+# Output
+OUTPUT_DIR = "Emulator"
+SEED       = 42
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Config
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class Config:
+    # Data
+    session_paths: List[str] = field(default_factory=lambda: [
+        "sessionB01",
+        "sessionB02",
+        "sessionB03",
+        "sessionB04",
+        "sessionB05",
+    ])
+    cache_dir: str = "Cache"
+
+    # Profile
+    opening_angle: float = 220.0
+    profile_steps: int = 100
+    profile_method: str = "min_bin"
+
+    # Maximum distance in mm — two roles:
+    #   1. Normalisation scale: profiles divided by this value before z-scoring.
+    #   2. Echo presence threshold: samples with corrected_distance >= this value
+    #      are treated as no-echo (sentinel from AcousticProcessing) and excluded
+    #      from both regression losses.
+    max_dist_mm: float = 3000.0
+
+    # CNN architecture
+    conv_channels: List[int] = field(default_factory=lambda: [32, 64])
+    conv_kernel: int = 3
+    fc_hidden: int = 64      # shared backbone FC
+    head_hidden: int = 32    # per-head FC before output; 0 = linear head
+
+    # Training
+    lr: float = 1e-3
+    batch_size: int = 64
+    epochs: int = 100
+    # Relative weight of distance MSE vs IID MSE in the combined loss.
+    # Both are in normalised (z-scored) units so 1.0 is a reasonable starting point.
+    dist_loss_weight: float = 1.0
+
+    # Train / validation split (quadrant indices withheld per session)
+    validation_quadrants: Dict[str, List[int]] = field(default_factory=lambda: {
+        "sessionB01": [1],
+        "sessionB02": [3],
+        "sessionB03": [2],
+        "sessionB04": [4],
+        "sessionB05": [1],
+    })
+
+    # Cache
+    force_recompute: bool = True   # bypass per-session profile cache
+
+    # IID → azimuth calibration
+    # OLS fit:  az_deg = slope * IID_dB + intercept
+    # Only wall points within ±az_fit_cone_half_deg of forward are used as
+    # ground-truth echo sources (points outside this cone are too peripheral
+    # to be first-echo candidates in a realistic sonar beam).
+    az_fit_cone_half_deg: float = 30.0
+    az_fit_dist_min_mm:   float = 300.0   # exclude very close (IID saturation)
+    az_fit_dist_max_mm:   float = 2000.0  # exclude very far (weak/noisy echoes)
+
+    # Output
+    output_dir: str = "Emulator"
+    seed: int = 42
 
 
-def save_plot(filename):
-    plt.savefig(f"{output_dir}/{filename}.png", dpi=240, bbox_inches="tight", facecolor="white")
+# ══════════════════════════════════════════════════════════════════════════════
+# Model
+# ══════════════════════════════════════════════════════════════════════════════
 
+class EmulatorCNN(nn.Module):
+    """
+    1D CNN emulator: profile -> (iid_head, distance_head).
 
-def rankdata(a):
-    a = np.asarray(a)
-    order = np.argsort(a, kind="mergesort")
-    ranks = np.empty(len(a), dtype=np.float64)
-    i = 0
-    while i < len(a):
-        j = i
-        while j + 1 < len(a) and a[order[j + 1]] == a[order[i]]:
-            j += 1
-        r = 0.5 * (i + j) + 1.0
-        ranks[order[i:j + 1]] = r
-        i = j + 1
-    return ranks
-
-
-def pearson_corr(x, y):
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
-    m = np.isfinite(x) & np.isfinite(y)
-    if np.sum(m) < 2:
-        return np.nan
-    xx = x[m] - np.mean(x[m])
-    yy = y[m] - np.mean(y[m])
-    den = np.sqrt(np.sum(xx * xx) * np.sum(yy * yy))
-    if den <= 1e-12:
-        return np.nan
-    return float(np.sum(xx * yy) / den)
-
-
-def spearman_corr(x, y):
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
-    m = np.isfinite(x) & np.isfinite(y)
-    if np.sum(m) < 2:
-        return np.nan
-    return pearson_corr(rankdata(x[m]), rankdata(y[m]))
-
-
-class ProfileTargetDataset(Dataset):
-    def __init__(self, x_profiles, y_targets, echo_present):
-        self.x = torch.as_tensor(x_profiles, dtype=torch.float32)
-        self.y = torch.as_tensor(y_targets, dtype=torch.float32)
-        self.ep = torch.as_tensor(echo_present, dtype=torch.float32)
-
-    def __len__(self):
-        return len(self.x)
-
-    def __getitem__(self, idx):
-        return self.x[idx], self.y[idx], self.ep[idx]
-
-
-
-def compute_norm_stats(ds):
-    x_mean = ds.x.mean(dim=0)
-    x_std  = ds.x.std(dim=0).clamp_min(1e-6)
-    y_mean = ds.y.mean(dim=0)
-    y_std  = ds.y.std(dim=0).clamp_min(1e-6)
-    return {"x_mean": x_mean, "x_std": x_std, "y_mean": y_mean, "y_std": y_std}
-
-
-def normalize_batch(x, y, norm, device):
-    x = (x - norm["x_mean"].to(device)) / norm["x_std"].to(device)
-    y = (y - norm["y_mean"].to(device)) / norm["y_std"].to(device)
-    return x, y
-
-
-def denorm_y(y_pred, norm):
-    ym = norm["y_mean"].cpu().numpy().reshape(1, -1)
-    ys = norm["y_std"].cpu().numpy().reshape(1, -1)
-    return y_pred * ys + ym
-
-
-class ProfileCNN(nn.Module):
-    def __init__(self):
+    Input shape:  (batch, profile_steps)  -- normalised wall distances
+    Output dict:  {"iid": (batch, 1), "distance": (batch, 1)}
+                  Both outputs are in normalised (z-scored) units.
+    """
+    def __init__(
+        self,
+        profile_steps: int,
+        conv_channels: List[int],
+        conv_kernel: int,
+        fc_hidden: int,
+        head_hidden: int = 0,
+    ):
         super().__init__()
-        layers = []
+        layers: List[nn.Module] = []
         in_ch = 1
         for out_ch in conv_channels:
-            layers += [nn.Conv1d(in_ch, out_ch, conv_kernel, padding=conv_kernel // 2), nn.ReLU()]
+            layers += [
+                nn.Conv1d(in_ch, out_ch, conv_kernel, padding=conv_kernel // 2),
+                nn.ReLU(),
+            ]
             in_ch = out_ch
         self.conv = nn.Sequential(*layers)
         self.pool = nn.AdaptiveAvgPool1d(8)
-        self.fc   = nn.Sequential(nn.Linear(conv_channels[-1] * 8, fc_hidden), nn.ReLU())
-        self.echo_present_head = nn.Linear(fc_hidden, 1)
-        self.iid_head          = nn.Linear(fc_hidden, 1)
+        self.fc   = nn.Sequential(
+            nn.Linear(conv_channels[-1] * 8, fc_hidden),
+            nn.ReLU(),
+        )
 
-    def forward(self, x):
+        def make_head(in_dim: int, hidden: int) -> nn.Module:
+            if hidden > 0:
+                return nn.Sequential(
+                    nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, 1)
+                )
+            return nn.Linear(in_dim, 1)
+
+        self.iid_head      = make_head(fc_hidden, head_hidden)
+        self.distance_head = make_head(fc_hidden, head_hidden)
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        # x: (batch, profile_steps)  -- add channel dim
         z = self.conv(x.unsqueeze(1))   # (batch, C, L)
         z = self.pool(z).flatten(1)
         z = self.fc(z)
-        return {"echo_logit": self.echo_present_head(z), "iid": self.iid_head(z)}
+        return {
+            "iid":      self.iid_head(z),
+            "distance": self.distance_head(z),
+        }
 
 
-def collect_predictions(model, loader, norm):
-    device = next(model.parameters()).device
-    model.eval()
-    y_true, y_pred, ep_true, ep_pred = [], [], [], []
-    with torch.no_grad():
-        for x, y, ep in loader:
-            x, y, ep = x.to(device), y.to(device), ep.to(device)
-            x, y = normalize_batch(x, y, norm, device)
-            out = model(x)
-            y_pred.append(out["iid"].cpu().numpy())
-            y_true.append(y.cpu().numpy())
-            ep_pred.append(torch.sigmoid(out["echo_logit"]).cpu().numpy())
-            ep_true.append(ep.cpu().numpy())
-    y_true  = denorm_y(np.concatenate(y_true,  axis=0), norm)
-    y_pred  = denorm_y(np.concatenate(y_pred,  axis=0), norm)
-    ep_true = np.concatenate(ep_true, axis=0)
-    ep_pred = np.concatenate(ep_pred, axis=0).squeeze(1)
-    return y_true.astype(np.float32), y_pred.astype(np.float32), ep_true.astype(np.float32), ep_pred.astype(np.float32)
+# ══════════════════════════════════════════════════════════════════════════════
+# Data helpers
+# ══════════════════════════════════════════════════════════════════════════════
 
+def load_dataset(cfg: Config):
+    """
+    Load profiles, corrected_iid, corrected_distance and echo label from all
+    sessions. Returns per-processor list for quadrant-based splitting.
 
-def fit_calibration(y_true, y_pred):
-    """Linear calibration: fit pred -> true for each output column."""
-    cal = []
-    for k in range(y_true.shape[1]):
-        yt, yp = y_true[:, k], y_pred[:, k]
-        m = np.isfinite(yt) & np.isfinite(yp)
-        if np.sum(m) < 2 or np.std(yp[m]) < 1e-8:
-            cal.append({"slope": 1.0, "intercept": 0.0})
-        else:
-            a, b = np.polyfit(yp[m], yt[m], 1)
-            cal.append({"slope": float(a), "intercept": float(b)})
-    return cal
-
-
-def apply_calibration(y_pred, calibration):
-    out = np.asarray(y_pred, dtype=np.float32).copy()
-    for k, c in enumerate(calibration):
-        out[:, k] = float(c["slope"]) * out[:, k] + float(c["intercept"])
-    return out
-
-
-def iid_sample_weights(iid_true_raw):
-    """Per-sample IID loss weights from raw (de-normalised) IID in dB."""
-    w = torch.ones_like(iid_true_raw)
-    w = w * torch.where(torch.abs(iid_true_raw) <= float(iid_near_zero_abs_db), float(iid_near_zero_weight), 1.0)
-    w = w * torch.where(torch.abs(iid_true_raw) >= float(iid_tail_abs_db), float(iid_tail_weight), 1.0)
-    return w
-
-
-def multitask_loss(pred_out, y, y_raw, ep, iid_criterion, bce_criterion):
-    loss_ep = bce_criterion(pred_out["echo_logit"][:, 0], ep)
-    loss_iid_per_sample = iid_criterion(pred_out["iid"][:, 0], y[:, 0])
-    w_iid = iid_sample_weights(y_raw[:, 0])
-    loss_iid = torch.sum(w_iid * loss_iid_per_sample) / torch.clamp(torch.sum(w_iid), min=1.0)
-    return echo_present_loss_weight * loss_ep + loss_iid
-
-
-def train_model(model, train_loader, val_loader, norm):
-    device = next(model.parameters()).device
-    opt = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
-    iid_criterion = nn.HuberLoss(delta=iid_huber_delta, reduction="none")
-    bce_criterion = nn.BCEWithLogitsLoss()
-    history = {"train": [], "val": []}
-
-    best_val = float("inf")
-    no_improve = 0
-    for epoch in range(epochs):
-        model.train()
-        run_train = 0.0
-        for x, y, ep in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}"):
-            x, y, ep = x.to(device), y.to(device), ep.to(device)
-            y_raw = y.clone()
-            x, y = normalize_batch(x, y, norm, device)
-            loss = multitask_loss(model(x), y, y_raw, ep, iid_criterion, bce_criterion)
-            opt.zero_grad(); loss.backward(); opt.step()
-            run_train += loss.item() * x.size(0)
-        train_loss = run_train / len(train_loader.dataset)
-
-        model.eval()
-        run_val = 0.0
-        with torch.no_grad():
-            for x, y, ep in val_loader:
-                x, y, ep = x.to(device), y.to(device), ep.to(device)
-                y_raw = y.clone()
-                x, y = normalize_batch(x, y, norm, device)
-                run_val += multitask_loss(model(x), y, y_raw, ep, iid_criterion, bce_criterion).item() * x.size(0)
-        val_loss = run_val / len(val_loader.dataset)
-
-        history["train"].append(train_loss)
-        history["val"].append(val_loss)
-        print(f"Epoch {epoch + 1}: train={train_loss:.5f}, val={val_loss:.5f}")
-
-        if val_loss < best_val:
-            best_val = val_loss
-            no_improve = 0
-            torch.save({"model_state_dict": model.state_dict(), "history": history}, f"{output_dir}/best_model_pytorch.pth")
-        else:
-            no_improve += 1
-            if no_improve >= patience:
-                print(f"Early stop at epoch {epoch + 1}")
-                break
-    return history
-
-
-def plot_training(history):
-    plt.figure(figsize=(8, 4))
-    plt.plot(history["train"], label="train")
-    plt.plot(history["val"], label="val")
-    plt.xlabel("Epoch"); plt.ylabel("Huber loss")
-    plt.title("Profile -> IID training")
-    plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout()
-    save_plot("training_curves"); plt.close()
-
-
-def plot_scatter(y_true, y_pred, ep_true, ep_pred_prob, min_dist):
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    # IID — coloured by min_dist(profile)
-    ax = axes[0]
-    yt, yp = y_true[:, 0], y_pred[:, 0]
-    lo, hi = float(min(np.min(yt), np.min(yp))), float(max(np.max(yt), np.max(yp)))
-    sc = ax.scatter(yt, yp, c=min_dist, cmap="plasma_r", s=10, alpha=0.5,
-                    vmin=np.percentile(min_dist, 2), vmax=np.percentile(min_dist, 98))
-    plt.colorbar(sc, ax=ax, label="min profile dist (mm)")
-    ax.plot([lo, hi], [lo, hi], "r--", linewidth=1)
-    p = pearson_corr(yt, yp)
-    s = spearman_corr(yt, yp)
-    bias = float(np.mean(yp - yt))
-    sign_acc = float(np.mean(np.sign(yp) == np.sign(yt)))
-    pos_acc = float(np.mean(yp[yt >= 0] >= 0)) if np.any(yt >= 0) else float("nan")
-    neg_acc = float(np.mean(yp[yt < 0] < 0)) if np.any(yt < 0) else float("nan")
-    ax.set_xlabel("True IID (dB)"); ax.set_ylabel("Pred IID (dB)")
-    ax.set_title(
-        f"corrected_iid (dB)\nPearson={p:.3f}, Spearman={s:.3f}, Bias={bias:+.3f} dB\n"
-        f"SignAcc={sign_acc:.3f}  PosAcc={pos_acc:.3f}  NegAcc={neg_acc:.3f}"
+    Returns
+    -------
+    per_proc : list of dicts, one per processor, each with keys:
+        session_name, profiles, iid, distance, crossed, quadrants
+    """
+    dc = DataCollection(cfg.session_paths, cache_dir=cfg.cache_dir,
+                        force_recompute=cfg.force_recompute)
+    dc.load_profiles(
+        opening_angle=cfg.opening_angle,
+        steps=cfg.profile_steps,
+        profile_method=cfg.profile_method,
+        force_recompute=cfg.force_recompute,
     )
-    ax.grid(True, alpha=0.3)
 
-    # Echo present classification
-    ep_pred_bin = (ep_pred_prob >= 0.5).astype(np.float32)
-    acc = float(np.mean(ep_pred_bin == ep_true))
-    n_pos, n_neg = int(np.sum(ep_true > 0.5)), int(np.sum(ep_true <= 0.5))
-    axes[1].scatter(ep_true, ep_pred_prob, s=10, alpha=0.3)
-    axes[1].axhline(0.5, color='r', linestyle='--', linewidth=1)
-    axes[1].set_xlabel("True echo_present"); axes[1].set_ylabel("Pred echo_present prob")
-    axes[1].set_title(f"echo_present\nAcc={acc:.3f}  N_echo={n_pos}  N_no_echo={n_neg}")
-    axes[1].grid(True, alpha=0.3)
+    per_proc = []
+    for proc in dc.processors:
+        session_name = os.path.basename(proc.session)
+        n = proc.n
 
-    plt.tight_layout(); save_plot("test_scatter"); plt.close(fig)
+        profiles = proc.profiles  # (n, profile_steps)
+
+        # corrected_distance is in metres in the sonar_package; convert to mm.
+        iid_vals  = proc.get_field('sonar_package', 'corrected_iid')
+        dist_vals = proc.get_field('sonar_package', 'corrected_distance')
+
+        iid_vals  = np.where(np.isfinite(iid_vals),  iid_vals,  0.0).astype(np.float32)
+        dist_vals = np.where(np.isfinite(dist_vals), dist_vals,
+                             cfg.max_dist_mm / 1000.0).astype(np.float32)
+        dist_vals = dist_vals * 1000.0   # metres → mm
+
+        # Echo presence label: True when distance < max_dist_mm.
+        # Used to exclude sentinel no-echo values from regression training.
+        crossed = (dist_vals < cfg.max_dist_mm)
+
+        quads = proc.quadrants  # (n,) int array
+
+        per_proc.append({
+            "session_name": session_name,
+            "profiles":     profiles.astype(np.float32),
+            "iid":          iid_vals,
+            "distance":     dist_vals,
+            "crossed":      crossed,
+            "quadrants":    quads,
+        })
+        print(f"  {session_name}: {n} samples, "
+              f"echo_present={crossed.sum()}/{n} ({100*crossed.mean():.1f}%), "
+              f"quadrants={sorted(set(quads.tolist()))}")
+
+    return per_proc
 
 
-def main():
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+def make_split(per_proc: List[dict], validation_quadrants: Dict[str, List[int]]):
+    """
+    Split per-processor data into train and validation sets.
 
-    print("Loading data...")
-    dc = DataProcessor.DataCollection(sessions)
-    profiles, _ = dc.load_profiles(opening_angle=profile_opening_angle, steps=profile_steps)
+    Samples whose quadrant is in validation_quadrants[session] go to validation;
+    all others go to training. Sessions not listed contribute all data to training.
+    """
+    def empty():
+        return {k: [] for k in ("profiles", "iid", "distance", "crossed")}
 
-    finite = np.isfinite(profiles).all(axis=1)
-    profiles  = profiles[finite].astype(np.float32)
-    print(f"Kept {len(profiles)} samples after filtering.")
+    train_parts = empty()
+    val_parts   = empty()
 
-    distance_m = dc.get_field('sonar_package', 'corrected_distance').astype(np.float32)[finite]
-    iid        = dc.get_field('sonar_package', 'corrected_iid').astype(np.float32)[finite]
-    distance_mm = distance_m * 1000.0
-    targets     = iid.reshape(-1, 1)   # IID is the only regression target
-    valid_target = np.isfinite(targets[:, 0]) & np.isfinite(distance_mm)
-    profiles    = profiles[valid_target]
-    targets     = targets[valid_target]
-    distance_mm = distance_mm[valid_target]
-    print(f"Kept {len(profiles)} samples after target filtering.")
+    for pd in per_proc:
+        name  = pd["session_name"]
+        val_q = set(validation_quadrants.get(name, []))
+        quads = pd["quadrants"]
+        is_val = np.isin(quads, list(val_q)) if val_q else np.zeros(len(quads), dtype=bool)
 
-    echo_present = (distance_mm < no_echo_min_distance_mm).astype(np.float32)
-    n_echo = int(np.sum(echo_present))
-    print(f"Echo present: {n_echo}/{len(echo_present)} samples ({100*n_echo/len(echo_present):.1f}% echo, {100*(1-n_echo/len(echo_present)):.1f}% no-echo)")
+        for key in ("profiles", "iid", "distance", "crossed"):
+            arr = pd[key]
+            train_parts[key].append(arr[~is_val])
+            val_parts[key].append(arr[is_val])
 
-    # Flip augmentation: mirror profile + negate IID, balancing pos/neg IID perfectly.
-    profiles_flipped     = profiles[:, ::-1].copy()
-    targets_flipped      = targets.copy(); targets_flipped[:, 0] *= -1.0
-    echo_present_flipped = echo_present.copy()
-    profiles_aug     = np.concatenate([profiles,      profiles_flipped],      axis=0)
-    targets_aug      = np.concatenate([targets,       targets_flipped],       axis=0)
-    echo_present_aug = np.concatenate([echo_present,  echo_present_flipped],  axis=0)
-    print(f"Profile flip augmentation: {len(profiles)} -> {len(profiles_aug)} samples.")
+    def concat(parts):
+        return {k: np.concatenate(parts[k], axis=0) for k in parts}
 
-    n_aug  = len(profiles_aug)
-    idx    = np.random.permutation(n_aug)
-    n_val  = max(1, int(val_fraction * n_aug))
-    val_mask   = np.zeros(n_aug, dtype=bool); val_mask[idx[:n_val]]  = True
-    train_mask = ~val_mask
-    print(f"Random split: {train_mask.sum()} train, {val_mask.sum()} val ({val_fraction:.0%} holdout).")
+    return concat(train_parts), concat(val_parts)
 
-    # Keep original distances for scatter plot colouring (before normalisation).
-    min_dist_test = np.min(profiles_aug, axis=1)
 
-    # Normalise each profile by its mean so the CNN sees shape (relative asymmetry)
-    # rather than absolute distances. This makes IID prediction scale-invariant.
-    profile_means = np.mean(profiles_aug, axis=1, keepdims=True)
-    profiles_aug  = profiles_aug / np.clip(profile_means, 1e-6, None)
+# ══════════════════════════════════════════════════════════════════════════════
+# Normalisation helpers
+# ══════════════════════════════════════════════════════════════════════════════
 
-    ds_train = ProfileTargetDataset(profiles_aug[train_mask], targets_aug[train_mask], echo_present_aug[train_mask])
-    ds_val   = ProfileTargetDataset(profiles_aug[val_mask],   targets_aug[val_mask],   echo_present_aug[val_mask])
-    ds_test  = ProfileTargetDataset(profiles_aug,             targets_aug,             echo_present_aug)
+def compute_norm_stats(train: dict, max_dist_mm: float) -> dict:
+    """
+    Compute normalisation statistics from training data (echo-present samples only
+    for IID and distance, so sentinel no-echo values don't bias the stats).
 
-    norm = compute_norm_stats(ds_train)
+    x is divided by max_dist_mm then z-scored.
+    IID and distance are z-scored independently.
+
+    Returns dict with lists: x_mean, x_std, iid_mean, iid_std, dist_mean, dist_std.
+    """
+    x_norm = train["profiles"] / max_dist_mm
+    x_mean = x_norm.mean(axis=0)
+    x_std  = x_norm.std(axis=0)
+    x_std  = np.where(x_std < 1e-8, 1.0, x_std)
+
+    ep = train["crossed"].astype(bool)
+
+    iid_vals  = train["iid"][ep]
+    iid_mean  = float(iid_vals.mean()) if len(iid_vals) > 0 else 0.0
+    iid_std   = float(iid_vals.std())  if len(iid_vals) > 1 else 1.0
+    iid_std   = max(iid_std, 1e-8)
+
+    dist_vals = train["distance"][ep]
+    dist_mean = float(dist_vals.mean()) if len(dist_vals) > 0 else 0.0
+    dist_std  = float(dist_vals.std())  if len(dist_vals) > 1 else 1.0
+    dist_std  = max(dist_std, 1e-8)
+
+    return {
+        "x_mean":    x_mean.tolist(),
+        "x_std":     x_std.tolist(),
+        "iid_mean":  iid_mean,
+        "iid_std":   iid_std,
+        "dist_mean": dist_mean,
+        "dist_std":  dist_std,
+    }
+
+
+def normalise_x(profiles: np.ndarray, max_dist_mm: float,
+                x_mean: np.ndarray, x_std: np.ndarray) -> np.ndarray:
+    return ((profiles / max_dist_mm) - x_mean) / x_std
+
+
+def normalise(vals: np.ndarray, mean: float, std: float) -> np.ndarray:
+    return (vals - mean) / std
+
+
+def denormalise(vals: np.ndarray, mean: float, std: float) -> np.ndarray:
+    return vals * std + mean
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IID → azimuth calibration
+# ══════════════════════════════════════════════════════════════════════════════
+
+def profile_bin_centers(opening_angle: float, profile_steps: int) -> np.ndarray:
+    """
+    Return the azimuth (degrees) of each profile bin centre.
+
+    Matches the convention in DataProcessor.get_profile:
+        edges   = np.linspace(-opening_angle/2, opening_angle/2, profile_steps + 1)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+
+    For opening_angle=220, profile_steps=22 this gives
+    [-105, -95, …, -5, +5, …, +105] in 10° steps.
+    """
+    edges = np.linspace(-opening_angle / 2, opening_angle / 2, profile_steps + 1)
+    return 0.5 * (edges[:-1] + edges[1:])
+
+
+def fit_iid_to_azimuth(
+    all_profiles: np.ndarray,
+    all_iid: np.ndarray,
+    all_crossed: np.ndarray,
+    all_distance: np.ndarray,
+    opening_angle: float,
+    profile_steps: int,
+    cone_half_deg: float,
+    dist_min_mm: float = 0.0,
+    dist_max_mm: float = np.inf,
+) -> Tuple[float, float, np.ndarray, np.ndarray]:
+    """
+    Fit  az_deg = slope * IID_dB + intercept  using echo-present samples.
+
+    Ground-truth azimuth for each sample = centre of the profile bin with the
+    minimum distance within the central ±cone_half_deg of the opening angle.
+    Points outside this cone are unlikely to produce first detectable echoes.
+
+    dist_min_mm / dist_max_mm: distance range filter applied before fitting.
+    Very close distances saturate IID; very far distances are noisy.
+
+    Returns
+    -------
+    slope, intercept : OLS coefficients
+    iid_ep, true_az  : arrays used for the fit (for diagnostic plots)
+    """
+    centers   = profile_bin_centers(opening_angle, profile_steps)
+    cone_mask = np.abs(centers) <= cone_half_deg
+    cone_centers = centers[cone_mask]
+
+    ep = all_crossed.astype(bool)
+    profiles_ep = all_profiles[ep]          # (N_ep, profile_steps)
+    iid_ep      = all_iid[ep]               # (N_ep,)
+    dist_ep     = all_distance[ep]          # (N_ep,)
+
+    # Distance filter: remove saturation-prone close distances and noisy far ones
+    dist_mask   = (dist_ep >= dist_min_mm) & (dist_ep <= dist_max_mm)
+    profiles_ep = profiles_ep[dist_mask]
+    iid_ep      = iid_ep[dist_mask]
+
+    # Azimuth of the closest wall point within the cone (argmin).
+    cone_dists  = profiles_ep[:, cone_mask]                     # (N_ep, n_cone)
+    argmin_cone = np.argmin(cone_dists, axis=1)                 # (N_ep,)
+    true_az     = cone_centers[argmin_cone]                     # (N_ep,)
+
+    # Exclude samples where argmin lands on the cone boundary — those are
+    # cases where the actual closest wall is outside the cone and the edge
+    # bin is returned as a spurious minimum.
+    n_cone   = cone_dists.shape[1]
+    interior = (argmin_cone > 0) & (argmin_cone < n_cone - 1)
+    iid_ep   = iid_ep[interior]
+    true_az  = true_az[interior]
+
+    X      = np.column_stack([iid_ep, np.ones(len(iid_ep))])
+    coeffs, _, _, _ = np.linalg.lstsq(X, true_az, rcond=None)
+
+    return float(coeffs[0]), float(coeffs[1]), iid_ep, true_az
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Dataset / DataLoader
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ProfileDataset(torch.utils.data.Dataset):
+    def __init__(self, profiles_norm: np.ndarray, iid_norm: np.ndarray,
+                 dist_norm: np.ndarray, crossed: np.ndarray):
+        self.profiles = torch.as_tensor(profiles_norm, dtype=torch.float32)
+        self.iid      = torch.as_tensor(iid_norm,      dtype=torch.float32)
+        self.dist     = torch.as_tensor(dist_norm,     dtype=torch.float32)
+        self.crossed  = torch.as_tensor(crossed.astype(np.float32), dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.profiles)
+
+    def __getitem__(self, idx):
+        return self.profiles[idx], self.iid[idx], self.dist[idx], self.crossed[idx]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Training loop
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_epoch(model: nn.Module, loader: torch.utils.data.DataLoader,
+              optimiser: Optional[torch.optim.Optimizer],
+              dist_loss_weight: float,
+              device: torch.device) -> Tuple[float, float]:
+    """
+    Run one epoch. If optimiser is None, runs in eval mode (validation).
+
+    Both IID MSE and distance MSE are computed on echo-present samples only.
+
+    Returns (mean_iid_mse, mean_dist_mse) in normalised units.
+    """
+    training = optimiser is not None
+    model.train(training)
+
+    total_iid_mse  = 0.0
+    total_dist_mse = 0.0
+    n_batches = 0
+
+    ctx = torch.enable_grad() if training else torch.no_grad()
+    with ctx:
+        for profiles, iid_norm, dist_norm, crossed in loader:
+            profiles = profiles.to(device)
+            iid_norm = iid_norm.to(device)
+            dist_norm = dist_norm.to(device)
+            crossed  = crossed.to(device)
+
+            out      = model(profiles)
+            pred_iid  = out["iid"].squeeze(1)       # (batch,)
+            pred_dist = out["distance"].squeeze(1)   # (batch,)
+
+            mask = crossed.bool()
+            if mask.any():
+                iid_mse  = ((pred_iid[mask]  - iid_norm[mask])  ** 2).mean()
+                dist_mse = ((pred_dist[mask] - dist_norm[mask]) ** 2).mean()
+            else:
+                iid_mse  = torch.tensor(0.0, device=device)
+                dist_mse = torch.tensor(0.0, device=device)
+
+            loss = iid_mse + dist_loss_weight * dist_mse
+
+            if training:
+                optimiser.zero_grad()
+                loss.backward()
+                optimiser.step()
+
+            total_iid_mse  += iid_mse.item()
+            total_dist_mse += dist_mse.item()
+            n_batches += 1
+
+    denom = max(n_batches, 1)
+    return total_iid_mse / denom, total_dist_mse / denom
+
+
+def train(cfg: Config):
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+
+    os.makedirs(cfg.output_dir, exist_ok=True)
+
+    # ── Data ─────────────────────────────────────────────────────────────────
+    print("\n[1/5] Loading data")
+    per_proc = load_dataset(cfg)
+    train_data, val_data = make_split(per_proc, cfg.validation_quadrants)
+    n_train     = len(train_data['profiles'])
+    n_ep_train  = int(train_data['crossed'].sum())
+    print(f"  Train: {n_train} samples ({n_ep_train} echo-present, "
+          f"{n_train - n_ep_train} no-echo excluded from loss)")
+    n_val    = len(val_data['profiles'])
+    n_ep_val = int(val_data['crossed'].sum())
+    print(f"  Val:   {n_val} samples ({n_ep_val} echo-present)")
+
+    # ── Normalisation stats ───────────────────────────────────────────────────
+    print("\n[2/5] Computing normalisation stats")
+    stats = compute_norm_stats(train_data, cfg.max_dist_mm)
+    x_mean    = np.array(stats["x_mean"], dtype=np.float32)
+    x_std     = np.array(stats["x_std"],  dtype=np.float32)
+    iid_mean  = stats["iid_mean"]
+    iid_std   = stats["iid_std"]
+    dist_mean = stats["dist_mean"]
+    dist_std  = stats["dist_std"]
+    print(f"  IID:      mean={iid_mean:.3f} dB,  std={iid_std:.3f} dB")
+    print(f"  Distance: mean={dist_mean:.1f} mm, std={dist_std:.1f} mm")
+
+    # ── Normalise inputs/outputs ──────────────────────────────────────────────
+    def prep(split):
+        x    = normalise_x(split["profiles"], cfg.max_dist_mm, x_mean, x_std)
+        y_i  = normalise(split["iid"],      iid_mean,  iid_std)
+        y_d  = normalise(split["distance"], dist_mean, dist_std)
+        return (x.astype(np.float32), y_i.astype(np.float32),
+                y_d.astype(np.float32), split["crossed"])
+
+    train_x, train_yi, train_yd, train_c = prep(train_data)
+    val_x,   val_yi,   val_yd,   val_c   = prep(val_data)
+
+    train_ds = ProfileDataset(train_x, train_yi, train_yd, train_c)
+    val_ds   = ProfileDataset(val_x,   val_yi,   val_yd,   val_c)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_ds, batch_size=cfg.batch_size, shuffle=True,  drop_last=False)
+    val_loader   = torch.utils.data.DataLoader(
+        val_ds,   batch_size=cfg.batch_size, shuffle=False, drop_last=False)
+
+    # ── Model ─────────────────────────────────────────────────────────────────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pin = device.type == "cuda"
-    train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True,  pin_memory=pin)
-    val_loader   = DataLoader(ds_val,   batch_size=batch_size, shuffle=False, pin_memory=pin)
-    test_loader  = DataLoader(ds_test,  batch_size=batch_size, shuffle=False, pin_memory=pin)
+    print(f"\n[3/5] Building model on {device}")
+    model = EmulatorCNN(
+        profile_steps=cfg.profile_steps,
+        conv_channels=cfg.conv_channels,
+        conv_kernel=cfg.conv_kernel,
+        fc_hidden=cfg.fc_hidden,
+        head_hidden=cfg.head_hidden,
+    ).to(device)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Parameters: {n_params:,}")
 
-    model = ProfileCNN().to(device)
-    history = train_model(model, train_loader, val_loader, norm)
-    ckpt = torch.load(f"{output_dir}/best_model_pytorch.pth", map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    optimiser = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
-    yv_true, yv_pred, _, _ = collect_predictions(model, val_loader, norm)
-    calibration = fit_calibration(yv_true, yv_pred)
-    print(f"Validation calibration: iid y={calibration[0]['slope']:.4f}*pred+{calibration[0]['intercept']:.2f}")
-
-    y_true, y_pred_raw, ep_true, ep_pred = collect_predictions(model, test_loader, norm)
-    y_pred = apply_calibration(y_pred_raw, calibration)
-
-    iid_true, iid_pred = y_true[:, 0], y_pred[:, 0]
-    true_pos = iid_true >= 0.0; true_neg = iid_true < 0.0
-    pred_pos = iid_pred >= 0.0; pred_neg = iid_pred < 0.0
-    tp = int(np.sum(true_pos & pred_pos)); tn = int(np.sum(true_neg & pred_neg))
-    fp = int(np.sum(true_neg & pred_pos)); fn = int(np.sum(true_pos & pred_neg))
-    n_sign   = int(len(iid_true))
-    acc_pos  = float(tp / max(1, int(np.sum(true_pos))))
-    acc_neg  = float(tn / max(1, int(np.sum(true_neg))))
-    sign_acc = float((tp + tn) / max(1, n_sign))
-
-    ep_pred_bin = (ep_pred >= 0.5).astype(np.float32)
-    ep_acc = float(np.mean(ep_pred_bin == ep_true))
-    ep_tp  = int(np.sum((ep_true > 0.5) & (ep_pred_bin > 0.5)))
-    ep_tn  = int(np.sum((ep_true <= 0.5) & (ep_pred_bin <= 0.5)))
-    ep_fp  = int(np.sum((ep_true <= 0.5) & (ep_pred_bin > 0.5)))
-    ep_fn  = int(np.sum((ep_true > 0.5) & (ep_pred_bin <= 0.5)))
-
-    metrics = {
-        "iid": {
-            "rmse_db": float(np.sqrt(np.mean((iid_pred - iid_true) ** 2))),
-            "mae_db":  float(np.mean(np.abs(iid_pred - iid_true))),
-            "bias_db": float(np.mean(iid_pred - iid_true)),
-            "pearson":  pearson_corr(iid_true, iid_pred),
-            "spearman": spearman_corr(iid_true, iid_pred),
-            "sign_accuracy": sign_acc,
-            "sign_confusion_counts": {
-                "true_pos_pred_pos": tp, "true_pos_pred_neg": fn,
-                "true_neg_pred_pos": fp, "true_neg_pred_neg": tn,
-            },
-            "sign_accuracy_true_pos": acc_pos,
-            "sign_accuracy_true_neg": acc_neg,
-            "sign_n": n_sign,
-        },
-        "echo_present": {
-            "accuracy": ep_acc,
-            "tp": ep_tp, "tn": ep_tn, "fp": ep_fp, "fn": ep_fn,
-            "n_echo":    int(np.sum(ep_true > 0.5)),
-            "n_no_echo": int(np.sum(ep_true <= 0.5)),
-        },
+    # ── Training loop ─────────────────────────────────────────────────────────
+    print(f"\n[4/5] Training for {cfg.epochs} epochs")
+    history = {
+        "train_iid_mse": [], "train_dist_mse": [],
+        "val_iid_mse":   [], "val_dist_mse":   [],
     }
+    best_val_loss = float("inf")
+    best_epoch    = -1
 
-    print("\nTest metrics:")
-    print(
-        f"IID: RMSE={metrics['iid']['rmse_db']:.3f} dB, "
-        f"MAE={metrics['iid']['mae_db']:.3f} dB, Bias={metrics['iid']['bias_db']:.3f} dB, "
-        f"Pearson={metrics['iid']['pearson']:.3f}, Spearman={metrics['iid']['spearman']:.3f}, "
-        f"SignAcc={metrics['iid']['sign_accuracy']:.3f}"
-    )
-    print(
-        f"IID sign confusion (N={n_sign}): "
-        f"TP={tp}, FN={fn}, FP={fp}, TN={tn}, PosAcc={acc_pos:.3f}, NegAcc={acc_neg:.3f}"
-    )
-    print(
-        f"Echo present: Acc={ep_acc:.3f}, "
-        f"TP={ep_tp}, TN={ep_tn}, FP={ep_fp}, FN={ep_fn}, "
-        f"N_echo={metrics['echo_present']['n_echo']}, N_no_echo={metrics['echo_present']['n_no_echo']}"
-    )
+    model_save_path = os.path.join(cfg.output_dir, "best_model_pytorch.pth")
 
-    plot_training(history)
-    plot_scatter(y_true, y_pred, ep_true, ep_pred, min_dist_test)
+    for epoch in range(1, cfg.epochs + 1):
+        tr_iid, tr_dist = run_epoch(model, train_loader, optimiser,
+                                    cfg.dist_loss_weight, device)
+        va_iid, va_dist = run_epoch(model, val_loader,   None,
+                                    cfg.dist_loss_weight, device)
 
-    params = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "sessions": sessions,
-        "profile_opening_angle": profile_opening_angle,
-        "profile_steps": profile_steps,
-        "val_fraction": val_fraction,
-        "batch_size": batch_size,
-        "epochs": epochs,
-        "patience": patience,
-        "learning_rate": learning_rate,
-        "l2_reg": l2_reg,
-        "conv_channels": conv_channels,
-        "conv_kernel": conv_kernel,
-        "fc_hidden": fc_hidden,
-        "iid_huber_delta": iid_huber_delta,
-        "echo_present_loss_weight": echo_present_loss_weight,
-        "no_echo_min_distance_mm": no_echo_min_distance_mm,
-        "num_train": len(ds_train),
-        "num_val": len(ds_val),
-        "num_test": len(ds_test),
-        "metrics": metrics,
-        "calibration": calibration,
+        history["train_iid_mse"].append(tr_iid)
+        history["train_dist_mse"].append(tr_dist)
+        history["val_iid_mse"].append(va_iid)
+        history["val_dist_mse"].append(va_dist)
+
+        val_loss = va_iid + cfg.dist_loss_weight * va_dist
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch    = epoch
+            torch.save({"model_state_dict": model.state_dict()}, model_save_path)
+
+        if epoch % 10 == 0 or epoch == 1:
+            print(f"  Epoch {epoch:4d}/{cfg.epochs}  "
+                  f"train IID={tr_iid:.4f}  dist={tr_dist:.4f}  |  "
+                  f"val IID={va_iid:.4f}  dist={va_dist:.4f}"
+                  + (" *" if epoch == best_epoch else ""))
+
+    print(f"\n  Best epoch: {best_epoch}  val combined={best_val_loss:.4f}")
+
+    # ── Save artifacts ────────────────────────────────────────────────────────
+    print("\n[6/6] Saving artifacts")
+
+    checkpoint = torch.load(model_save_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    # ── IID → azimuth calibration ─────────────────────────────────────────────
+    print("\n[5/6] Fitting IID → azimuth calibration")
+    all_profiles = np.concatenate([train_data["profiles"], val_data["profiles"]])
+    all_iid_raw  = np.concatenate([train_data["iid"],      val_data["iid"]])
+    all_crossed  = np.concatenate([train_data["crossed"],  val_data["crossed"]])
+    all_distance = np.concatenate([train_data["distance"], val_data["distance"]])
+
+    az_slope, az_intercept, iid_fit, true_az_fit = fit_iid_to_azimuth(
+        all_profiles, all_iid_raw, all_crossed, all_distance,
+        cfg.opening_angle, cfg.profile_steps, cfg.az_fit_cone_half_deg,
+        dist_min_mm=cfg.az_fit_dist_min_mm,
+        dist_max_mm=cfg.az_fit_dist_max_mm,
+    )
+    print(f"  az_deg = {az_slope:.4f} * IID_dB + {az_intercept:.4f}")
+    print(f"  (fitted on {len(iid_fit):,} echo-present samples, "
+          f"cone ±{cfg.az_fit_cone_half_deg}°, "
+          f"dist {cfg.az_fit_dist_min_mm:.0f}–{cfg.az_fit_dist_max_mm:.0f} mm)")
+
+    # Scatter plot: IID vs true azimuth + fit line
+    fig_az, ax_az = plt.subplots(figsize=(6, 5))
+    ax_az.scatter(iid_fit, true_az_fit, s=8, alpha=0.3, color="steelblue",
+                  label=f"n={len(iid_fit):,}")
+    iid_line = np.array([iid_fit.min(), iid_fit.max()])
+    ax_az.plot(iid_line, az_slope * iid_line + az_intercept,
+               color="red", lw=2, label=f"OLS  slope={az_slope:.3f}  b={az_intercept:.3f}")
+    ax_az.set_xlabel("Measured IID (dB)")
+    ax_az.set_ylabel("Azimuth of closest wall point (°)")
+    ax_az.set_title(f"IID → azimuth calibration  (cone ±{cfg.az_fit_cone_half_deg}°)")
+    ax_az.legend(markerscale=5)
+    az_plot_path = os.path.join(cfg.output_dir, "iid_azimuth_calibration.png")
+    fig_az.tight_layout()
+    fig_az.savefig(az_plot_path, dpi=120)
+    plt.close(fig_az)
+    print(f"  Saved {az_plot_path}")
+
+    # training_params.json -- fields read by Emulator.load() are marked
+    training_params = {
+        # Architecture (read by Emulator.load)
+        "conv_channels":         cfg.conv_channels,
+        "conv_kernel":           cfg.conv_kernel,
+        "fc_hidden":             cfg.fc_hidden,
+        "head_hidden":           cfg.head_hidden,
+        # Profile params (read by Emulator.load)
+        "profile_opening_angle": cfg.opening_angle,
+        "profile_steps":         cfg.profile_steps,
+        # Normalisation (read by Emulator.load)
+        # norm_stats uses legacy keys x_mean/x_std/y_mean/y_std for IID backward compat;
+        # distance norm is stored separately.
         "norm_stats": {
-            "x_mean": norm["x_mean"].tolist(),
-            "x_std":  norm["x_std"].tolist(),
-            "y_mean": norm["y_mean"].tolist(),
-            "y_std":  norm["y_std"].tolist(),
+            "x_mean": stats["x_mean"],
+            "x_std":  stats["x_std"],
+            "y_mean": [iid_mean],
+            "y_std":  [iid_std],
         },
+        "normalize_x":            True,
+        "normalize_y":            True,
+        "calibration":            None,
+        # Distance normalisation
+        "dist_norm": {
+            "dist_mean": dist_mean,
+            "dist_std":  dist_std,
+        },
+        # Echo threshold (used at inference to gate outputs)
+        "no_echo_min_distance_mm": cfg.max_dist_mm,
+        # IID → azimuth calibration (loaded downstream for echo-source projection)
+        "iid_to_az": {
+            "slope":          az_slope,
+            "intercept":      az_intercept,
+            "cone_half_deg":  cfg.az_fit_cone_half_deg,
+            "dist_min_mm":    cfg.az_fit_dist_min_mm,
+            "dist_max_mm":    cfg.az_fit_dist_max_mm,
+        },
+        # Config
+        "dist_loss_weight": cfg.dist_loss_weight,
+        "config":           asdict(cfg),
     }
-    with open(f"{output_dir}/training_params.json", "w") as f:
-        json.dump(params, f, indent=2)
+    params_path = os.path.join(cfg.output_dir, "training_params.json")
+    with open(params_path, "w") as f:
+        json.dump(training_params, f, indent=2)
+    print(f"  Saved {params_path}")
 
-    print(f"\nDone. Outputs in: {output_dir}")
+    # ── Training curve ────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    epochs_ax = np.arange(1, cfg.epochs + 1)
 
+    axes[0].plot(epochs_ax, history["train_iid_mse"],  label="train")
+    axes[0].plot(epochs_ax, history["val_iid_mse"],    label="val")
+    axes[0].axvline(best_epoch, color="k", linestyle="--", alpha=0.5,
+                    label=f"best={best_epoch}")
+    axes[0].set_title("IID MSE (normalised, echo-present)")
+    axes[0].set_xlabel("Epoch")
+    axes[0].legend()
+
+    axes[1].plot(epochs_ax, history["train_dist_mse"], label="train")
+    axes[1].plot(epochs_ax, history["val_dist_mse"],   label="val")
+    axes[1].axvline(best_epoch, color="k", linestyle="--", alpha=0.5,
+                    label=f"best={best_epoch}")
+    axes[1].set_title("Distance MSE (normalised, echo-present)")
+    axes[1].set_xlabel("Epoch")
+    axes[1].legend()
+
+    plt.tight_layout()
+    curve_path = os.path.join(cfg.output_dir, "training_curve.png")
+    plt.savefig(curve_path, dpi=120)
+    plt.close(fig)
+    print(f"  Saved {curve_path}")
+
+    # ── Scatter plots ─────────────────────────────────────────────────────────
+    def predict_split(x_norm):
+        """Run best model; return pred_iid_db and pred_dist_mm (denormalised)."""
+        ds  = torch.utils.data.TensorDataset(
+            torch.as_tensor(x_norm, dtype=torch.float32))
+        ldr = torch.utils.data.DataLoader(ds, batch_size=256, shuffle=False)
+        iid_preds, dist_preds = [], []
+        with torch.no_grad():
+            for (batch,) in ldr:
+                out = model(batch.to(device))
+                iid_preds.append(out["iid"].cpu().squeeze(1))
+                dist_preds.append(out["distance"].cpu().squeeze(1))
+        pred_iid  = denormalise(torch.cat(iid_preds).numpy(),  iid_mean,  iid_std)
+        pred_dist = denormalise(torch.cat(dist_preds).numpy(), dist_mean, dist_std)
+        return pred_iid, pred_dist
+
+    tr_pred_iid, tr_pred_dist = predict_split(train_x)
+    va_pred_iid, va_pred_dist = predict_split(val_x)
+
+    tr_true_iid  = train_data["iid"]
+    va_true_iid  = val_data["iid"]
+    tr_true_dist = train_data["distance"]
+    va_true_dist = val_data["distance"]
+
+    from scipy.stats import pearsonr
+
+    def scatter_panel(ax, true_tr, pred_tr, mask_tr, true_va, pred_va, mask_va,
+                      xlabel, ylabel, title):
+        if mask_tr.any():
+            ax.scatter(true_tr[mask_tr], pred_tr[mask_tr],
+                       alpha=0.2, s=5, label=f"train n={mask_tr.sum()}")
+        if mask_va.any():
+            ax.scatter(true_va[mask_va], pred_va[mask_va],
+                       alpha=0.3, s=5, color="orange", label=f"val n={mask_va.sum()}")
+        all_true = np.concatenate([true_tr[mask_tr], true_va[mask_va]])
+        all_pred = np.concatenate([pred_tr[mask_tr], pred_va[mask_va]])
+        if len(all_true) > 0:
+            lo = min(all_true.min(), all_pred.min())
+            hi = max(all_true.max(), all_pred.max())
+            ax.plot([lo, hi], [lo, hi], "k--", lw=1)
+        if mask_tr.sum() > 1:
+            r, _ = pearsonr(true_tr[mask_tr], pred_tr[mask_tr])
+            rmse = float(np.sqrt(np.mean((true_tr[mask_tr] - pred_tr[mask_tr])**2)))
+            ax.annotate(f"train  r={r:.3f}  RMSE={rmse:.2f}",
+                        xy=(0.04, 0.93), xycoords="axes fraction",
+                        fontsize=8, color="steelblue")
+        if mask_va.sum() > 1:
+            r, _ = pearsonr(true_va[mask_va], pred_va[mask_va])
+            rmse = float(np.sqrt(np.mean((true_va[mask_va] - pred_va[mask_va])**2)))
+            ax.annotate(f"val    r={r:.3f}  RMSE={rmse:.2f}",
+                        xy=(0.04, 0.86), xycoords="axes fraction",
+                        fontsize=8, color="orange")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.legend(markerscale=3)
+
+    tr_ep = train_c.astype(bool)
+    va_ep = val_c.astype(bool)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    scatter_panel(axes[0],
+                  tr_true_iid,  tr_pred_iid,  tr_ep,
+                  va_true_iid,  va_pred_iid,  va_ep,
+                  "True IID (dB)", "Predicted IID (dB)",
+                  "IID (echo-present only)")
+
+    scatter_panel(axes[1],
+                  tr_true_dist, tr_pred_dist, tr_ep,
+                  va_true_dist, va_pred_dist, va_ep,
+                  "True distance (mm)", "Predicted distance (mm)",
+                  "Distance (echo-present only)")
+
+    plt.tight_layout()
+    scatter_path = os.path.join(cfg.output_dir, "scatter_plots.png")
+    plt.savefig(scatter_path, dpi=120)
+    plt.close(fig)
+    print(f"  Saved {scatter_path}")
+
+    # ── IID residuals by distance bin ─────────────────────────────────────────
+    all_true_iid  = np.concatenate([tr_true_iid[tr_ep],  va_true_iid[va_ep]])
+    all_pred_iid  = np.concatenate([tr_pred_iid[tr_ep],  va_pred_iid[va_ep]])
+    all_true_dist = np.concatenate([tr_true_dist[tr_ep], va_true_dist[va_ep]])
+    residuals     = all_true_iid - all_pred_iid
+
+    n_bins    = 5
+    bin_edges = np.percentile(all_true_dist, np.linspace(0, 100, n_bins + 1))
+    bin_edges[0]  -= 1.0
+    bin_edges[-1] += 1.0
+
+    fig, axes = plt.subplots(1, n_bins, figsize=(3.5 * n_bins, 4), sharey=True)
+    for i, ax in enumerate(axes):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        mask   = (all_true_dist >= lo) & (all_true_dist < hi)
+        resid  = residuals[mask]
+        ax.hist(resid, bins=25, color="#4C72B0", alpha=0.8, edgecolor="white", lw=0.4)
+        ax.axvline(0, color="k", lw=1, linestyle="--")
+        ax.set_title(f"{lo:.0f}–{hi:.0f} mm\nn={mask.sum()}", fontsize=9)
+        ax.set_xlabel("IID residual (dB)")
+        if i == 0:
+            ax.set_ylabel("Count")
+        std = float(resid.std()) if len(resid) > 1 else 0.0
+        ax.annotate(f"σ = {std:.2f} dB", xy=(0.97, 0.95), xycoords="axes fraction",
+                    ha="right", va="top", fontsize=9)
+
+    fig.suptitle("IID residuals (true − predicted) by distance bin  [train + val, echo-present]",
+                 fontsize=10)
+    plt.tight_layout()
+    resid_path = os.path.join(cfg.output_dir, "iid_residuals_by_distance.png")
+    plt.savefig(resid_path, dpi=120)
+    plt.close(fig)
+    print(f"  Saved {resid_path}")
+
+    # ── Code log ──────────────────────────────────────────────────────────────
+    CodeLogger.log_code(cfg.output_dir, [".", "Library"], label="emulator2")
+
+    print("\nDone.")
+    print(f"  Artifacts in: {cfg.output_dir}/")
+    return model, training_params
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Entry point
+# ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    main()
+    cfg = Config(
+        session_paths         = SESSION_PATHS,
+        cache_dir             = CACHE_DIR,
+        force_recompute       = FORCE_RECOMPUTE,
+        opening_angle         = OPENING_ANGLE,
+        profile_steps         = PROFILE_STEPS,
+        profile_method        = PROFILE_METHOD,
+        max_dist_mm           = MAX_DIST_MM,
+        az_fit_cone_half_deg  = AZ_FIT_CONE_HALF_DEG,
+        az_fit_dist_min_mm    = AZ_FIT_DIST_MIN_MM,
+        az_fit_dist_max_mm    = AZ_FIT_DIST_MAX_MM,
+        conv_channels         = CONV_CHANNELS,
+        conv_kernel           = CONV_KERNEL,
+        fc_hidden             = FC_HIDDEN,
+        head_hidden           = HEAD_HIDDEN,
+        lr                    = LR,
+        batch_size            = BATCH_SIZE,
+        epochs                = EPOCHS,
+        dist_loss_weight      = DIST_LOSS_WEIGHT,
+        validation_quadrants  = VALIDATION_QUADRANTS,
+        output_dir            = OUTPUT_DIR,
+        seed                  = SEED,
+    )
+    train(cfg)

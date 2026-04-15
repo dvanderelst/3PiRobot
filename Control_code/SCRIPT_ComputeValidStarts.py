@@ -30,6 +30,13 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 from Library.EnvironmentSimulator import ArenaLayout
+from Library.GeometryUtils import (
+    min_wall_distances,
+    inside_arena_mask,
+    largest_component_mask,
+    valid_headings,
+    wall_lateral_angle,
+)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -70,103 +77,11 @@ N_FAN_EXAMPLES = 12
 
 # ── Core functions ─────────────────────────────────────────────────────────────
 
-def _min_wall_distances(walls: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-    """
-    Vectorised: minimum distance from each (xs[i], ys[i]) to the wall point cloud.
-
-    Parameters
-    ----------
-    walls : (N, 2) float array  — wall point cloud in mm
-    xs, ys : (M,) float arrays  — query positions
-
-    Returns
-    -------
-    (M,) float array of minimum distances in mm
-    """
-    pts = np.column_stack([xs, ys])          # (M, 2)
-    # Compute pairwise distances efficiently using broadcasting
-    # (M, 1, 2) - (1, N, 2)  →  (M, N)
-    diff = pts[:, np.newaxis, :] - walls[np.newaxis, :, :]
-    d = np.sqrt((diff ** 2).sum(axis=2))     # (M, N)
-    return d.min(axis=1)                     # (M,)
-
-
-def _inside_arena_mask(walls: np.ndarray, xs: np.ndarray, ys: np.ndarray,
-                       n_sectors: int = 8) -> np.ndarray:
-    """
-    Vectorised inside-arena test using angular sector coverage.
-
-    A point is considered inside the arena if the wall point cloud contains at
-    least one point in every angular sector around it.  A point outside the
-    arena will have at least one empty sector (the one pointing away from the
-    arena into open space), so this correctly rejects exterior positions even
-    when they happen to be far from the nearest wall point.
-
-    Parameters
-    ----------
-    walls    : (N, 2) wall point cloud in mm
-    xs, ys   : (M,) candidate positions
-    n_sectors: number of equal angular slices (8 → 45° each)
-
-    Returns
-    -------
-    (M,) bool array — True where the point is enclosed by walls on all sides
-    """
-    if len(walls) == 0:
-        return np.ones(len(xs), dtype=bool)
-
-    dx = walls[:, 0][np.newaxis, :] - xs[:, np.newaxis]   # (M, N)
-    dy = walls[:, 1][np.newaxis, :] - ys[:, np.newaxis]   # (M, N)
-    angles = (np.degrees(np.arctan2(dy, dx)) % 360)        # (M, N) in [0, 360)
-
-    sector_size = 360.0 / n_sectors
-    inside = np.ones(len(xs), dtype=bool)
-    for i in range(n_sectors):
-        lo = i * sector_size
-        hi = (i + 1) * sector_size
-        has_wall = np.any((angles >= lo) & (angles < hi), axis=1)  # (M,)
-        inside &= has_wall
-
-    return inside
-
-
-def _valid_headings(x: float, y: float, walls: np.ndarray,
-                    heading_step: int = HEADING_STEP_DEG,
-                    min_clearance: float = MIN_FORWARD_CLEARANCE_MM,
-                    cone_half: float = CONE_HALF_WIDTH_DEG) -> np.ndarray:
-    """
-    Return array of valid heading angles (degrees, 0 = +X axis / East) at (x, y).
-
-    A heading h is *invalid* if any wall point lies within `min_clearance` mm
-    inside a cone of ±cone_half degrees around h.
-    """
-    headings = np.arange(0, 360, heading_step, dtype=float)
-    if len(walls) == 0:
-        return headings
-
-    dx = walls[:, 0] - x
-    dy = walls[:, 1] - y
-    wall_angles = np.degrees(np.arctan2(dy, dx))   # (N,) in [-180, 180]
-    wall_dists  = np.hypot(dx, dy)                 # (N,)
-
-    valid = []
-    for h in headings:
-        dang = wall_angles - h
-        dang = (dang + 180.0) % 360.0 - 180.0      # wrap to [-180, 180]
-        in_cone = np.abs(dang) <= cone_half
-        if not np.any(in_cone):
-            # Nothing in this direction at all — definitely valid
-            valid.append(h)
-        elif wall_dists[in_cone].min() > min_clearance:
-            valid.append(h)
-
-    return np.array(valid, dtype=float)
-
 
 def compute_valid_starts(
     arena: ArenaLayout,
     wall_margin_mm: float       = WALL_MARGIN_MM,
-    min_forward_clearance_mm: float = None,  # defaults to 2 × wall_margin_mm
+    min_forward_clearance_mm: float = None,  # defaults to 3 × wall_margin_mm
     grid_step_mm: float         = GRID_STEP_MM,
     heading_step_deg: int       = HEADING_STEP_DEG,
     cone_half_width_deg: float  = CONE_HALF_WIDTH_DEG,
@@ -190,7 +105,7 @@ def compute_valid_starts(
     are returned as separate entries.
     """
     if min_forward_clearance_mm is None:
-        min_forward_clearance_mm = 2.0 * wall_margin_mm
+        min_forward_clearance_mm = 3.0 * wall_margin_mm
 
     walls = arena.walls  # (N, 2) mm
 
@@ -207,9 +122,12 @@ def compute_valid_starts(
         # points outside the arena boundary (e.g. rectangle corners outside an
         # octagonal arena) which would otherwise pass the distance test because
         # the wall point cloud has no points on the exterior side.
-        inside = _inside_arena_mask(walls, gx, gy, n_sectors=8)
-        min_d  = _min_wall_distances(walls, gx, gy)
+        inside = inside_arena_mask(walls, gx, gy, n_sectors=8)
+        min_d  = min_wall_distances(walls, gx, gy)
         pos_mask = inside & (min_d >= wall_margin_mm)
+        # Drop isolated islands (e.g. positions inside enclosed obstacles that
+        # still pass the sector test because outer walls fill all sectors).
+        pos_mask = largest_component_mask(pos_mask, (len(ys), len(xs)))
     else:
         pos_mask = np.ones(len(gx), dtype=bool)
 
@@ -219,7 +137,7 @@ def compute_valid_starts(
     # ── 3. For each valid position, compute valid headings ────────────────────
     starts = []
     for x, y in zip(valid_x, valid_y):
-        headings = _valid_headings(
+        headings = valid_headings(
             x, y, walls,
             heading_step=heading_step_deg,
             min_clearance=min_forward_clearance_mm,
@@ -232,37 +150,6 @@ def compute_valid_starts(
 
 
 # ── Sided starts ───────────────────────────────────────────────────────────────
-
-def _wall_lateral_angle(x: float, y: float, heading_deg: float,
-                        walls: np.ndarray,
-                        k_nearest: int = WALL_SIDE_K_NEAREST) -> float:
-    """
-    Estimate the lateral angle (degrees) from the robot to the nearest wall.
-
-    Uses the centroid of the K nearest wall points for robustness against
-    sparse / unevenly sampled wall point clouds.
-
-    Returns
-    -------
-    float in [-180, 180]
-        Positive  → wall centroid is to the LEFT  of the heading  (IID < 0)
-        Negative  → wall centroid is to the RIGHT of the heading  (IID > 0)
-    """
-    if len(walls) == 0:
-        return 0.0
-
-    dx = walls[:, 0] - x
-    dy = walls[:, 1] - y
-    dists = np.hypot(dx, dy)
-
-    k = min(k_nearest, len(walls))
-    idx = np.argpartition(dists, k)[:k]
-    cx = dx[idx].mean()
-    cy = dy[idx].mean()
-
-    abs_angle = np.degrees(np.arctan2(cy, cx))
-    rel_angle = abs_angle - heading_deg
-    return float((rel_angle + 180.0) % 360.0 - 180.0)   # wrap to [-180, 180]
 
 
 def compute_sided_starts(
@@ -307,10 +194,11 @@ def compute_sided_starts(
     gx, gy = gx.ravel(), gy.ravel()
 
     if len(walls) > 0:
-        inside = _inside_arena_mask(walls, gx, gy, n_sectors=8)
-        min_d  = _min_wall_distances(walls, gx, gy)
+        inside = inside_arena_mask(walls, gx, gy, n_sectors=8)
+        min_d  = min_wall_distances(walls, gx, gy)
         # Near-wall band: far enough to fit, close enough to sense the wall
         pos_mask = inside & (min_d >= wall_margin_mm) & (min_d <= near_wall_max_mm)
+        pos_mask = largest_component_mask(pos_mask, (len(ys), len(xs)))
     else:
         pos_mask = np.ones(len(gx), dtype=bool)
 
@@ -322,14 +210,14 @@ def compute_sided_starts(
     starts_right: list = []
 
     for x, y in zip(valid_x, valid_y):
-        headings = _valid_headings(
+        headings = valid_headings(
             x, y, walls,
             heading_step=heading_step_deg,
             min_clearance=min_forward_clearance_mm,
             cone_half=cone_half_width_deg,
         )
         for h in headings:
-            lat = _wall_lateral_angle(x, y, h, walls, k_nearest=k_nearest)
+            lat = wall_lateral_angle(x, y, h, walls, k_nearest=k_nearest)
             if lat > wall_side_min_angle:
                 starts_left.append({"x": float(x), "y": float(y), "yaw_deg": float(h)})
             elif lat < -wall_side_min_angle:
@@ -349,7 +237,7 @@ def compute_headon_starts(
 ) -> list:
     """
     Compute starting configurations where the robot faces directly toward a
-    nearby wall.  The heading filter is the *inverse* of _valid_headings: a
+    nearby wall.  The heading filter is the *inverse* of valid_headings: a
     heading is included only if there IS a wall within `headon_max_dist_mm`
     inside a cone of ±headon_cone_half_deg around it.
 
@@ -368,9 +256,10 @@ def compute_headon_starts(
     gx, gy = gx.ravel(), gy.ravel()
 
     if len(walls) > 0:
-        inside = _inside_arena_mask(walls, gx, gy, n_sectors=8)
-        min_d  = _min_wall_distances(walls, gx, gy)
+        inside = inside_arena_mask(walls, gx, gy, n_sectors=8)
+        min_d  = min_wall_distances(walls, gx, gy)
         pos_mask = inside & (min_d >= wall_margin_mm) & (min_d <= near_wall_max_mm)
+        pos_mask = largest_component_mask(pos_mask, (len(ys), len(xs)))
     else:
         pos_mask = np.ones(len(gx), dtype=bool)
 
