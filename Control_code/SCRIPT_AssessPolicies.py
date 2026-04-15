@@ -27,6 +27,7 @@ Outputs (to PolicyAssessment/<run_name>/):
 """
 
 import collections
+import concurrent.futures
 import dataclasses
 import glob
 import json
@@ -50,14 +51,13 @@ from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input, load_starts
 # ══════════════════════════════════════════════════════════════════════════════
 
 RUN_DIRS = [
-    "PolicyTraining/policy_h00",
-    "PolicyTraining/policy_h01",
-    "PolicyTraining/policy_h03",
-    "PolicyTraining/policy_h05",
+    "PolicyTraining/sonar_h01",
+    "PolicyTraining/sonar_h10",
 ]
-N_POLICIES           = 5   # None = all HOF policies
-EPISODES_PER_SESSION = 5   # episodes per policy per session
+N_POLICIES           = 5    # None = all HOF policies
+EPISODES_PER_SESSION = 50   # episodes per policy per session
 SEED                 = 42
+N_WORKERS            = None  # parallel workers; None = os.cpu_count()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -154,10 +154,14 @@ def run_episodes(
         for step_idx in range(cfg.max_steps):
             original_yaw = yaw
 
-            inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
-            rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
-            flip1 = last_physical_iid < 0.0
-            rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
+            if cfg.force_aligned:
+                rotate1_canonical = 0.0
+                rotate1           = 0.0
+            else:
+                inp1 = build_input(history, 0.0, 0.0, 0.0, cfg)
+                rotate1_canonical = policy.forward(inp1, cfg.max_rotate1_deg)
+                flip1  = last_physical_iid < 0.0
+                rotate1 = -rotate1_canonical if flip1 else rotate1_canonical
             look_yaw = yaw + rotate1
 
             meas          = simulator.get_sonar_measurement(x, y, look_yaw)
@@ -314,6 +318,19 @@ EPISODE_CSV_FIELDS = [
 ]
 
 
+def _run_worker(args: tuple) -> tuple:
+    """
+    Top-level function (picklable) for ProcessPoolExecutor.
+    Builds its own simulator so nothing unpicklable crosses process boundaries.
+    Returns (sens_r2, records, rank, fitness, generation, session_name).
+    """
+    policy, session_name, starts, cfg, seed, n_episodes, rank, fitness, generation = args
+    rng       = np.random.default_rng(seed)
+    simulator = build_simulator(session_name)
+    sens_r2, records = run_episodes(policy, simulator, starts, cfg, rng, n_episodes)
+    return sens_r2, records, rank, fitness, generation, session_name
+
+
 def run_one(run_dir: str, rng: np.random.Generator) -> None:
     import csv as _csv
 
@@ -329,9 +346,32 @@ def run_one(run_dir: str, rng: np.random.Generator) -> None:
     if cfg.validation_session_name:
         all_sessions.append(cfg.validation_session_name)
 
-    print("Loading simulators...")
-    simulators = {sn: build_simulator(sn) for sn in all_sessions}
-    starts_by  = {sn: load_starts(sn, cfg, quiet=True) for sn in all_sessions}
+    starts_by = {sn: load_starts(sn, cfg, quiet=True) for sn in all_sessions}
+
+    # Build one task per (policy, session) pair
+    tasks = []
+    for entry in hof:
+        for sn in all_sessions:
+            tasks.append((
+                entry["policy"], sn, starts_by[sn], cfg,
+                int(rng.integers(2**31)),
+                EPISODES_PER_SESSION,
+                entry["rank"], entry["fitness"], entry["generation"],
+            ))
+
+    n_workers = N_WORKERS or os.cpu_count()
+    results: list[tuple] = []
+    if n_workers == 1:
+        for task in tqdm(tasks, desc="Policy×Session"):
+            results.append(_run_worker(task))
+    else:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
+            futures = [ex.submit(_run_worker, t) for t in tasks]
+            for fut in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures), desc="Policy×Session",
+            ):
+                results.append(fut.result())
 
     ep_csv_path = f"{prefix}_episodes.csv"
     means_r2    = []
@@ -340,27 +380,17 @@ def run_one(run_dir: str, rng: np.random.Generator) -> None:
     with open(ep_csv_path, "w", newline="") as ep_f:
         writer = _csv.DictWriter(ep_f, fieldnames=EPISODE_CSV_FIELDS)
         writer.writeheader()
-
-        for entry in tqdm(hof, desc="Policies"):
-            rank, fitness, generation = entry["rank"], entry["fitness"], entry["generation"]
-            policy = entry["policy"]
-
-            for sn in all_sessions:
-                sens_r2, records = run_episodes(
-                    policy, simulators[sn], starts_by[sn],
-                    cfg, rng, EPISODES_PER_SESSION,
-                )
-                if sens_r2.shape[0] > 0:
-                    means_r2.append(sens_r2.mean(axis=0))
-
-                for rec in records:
-                    writer.writerow({
-                        "run": run_name, "history_len": cfg.history_len,
-                        "rank": rank, "fitness": fitness, "generation": generation,
-                        "session": sn,
-                        **rec,
-                    })
-                total_steps += len(records)
+        for sens_r2, records, rank, fitness, generation, sn in results:
+            if sens_r2.shape[0] > 0:
+                means_r2.append(sens_r2.mean(axis=0))
+            for rec in records:
+                writer.writerow({
+                    "run": run_name, "history_len": cfg.history_len,
+                    "rank": rank, "fitness": fitness, "generation": generation,
+                    "session": sn,
+                    **rec,
+                })
+            total_steps += len(records)
 
     print(f"Saved {ep_csv_path}  ({total_steps:,} steps)")
 

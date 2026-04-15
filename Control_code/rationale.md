@@ -152,15 +152,25 @@ The policy is trained with a genetic algorithm (GA), assessed on two criteria: (
 3. For each bin, find all path points whose angle from the centroid falls in that bin and record the mean distance from the centroid. If no points fall in a bin, its distance is 0.
 4. The **raw fitness** is the mean of these per-bin mean distances across all bins. This rewards paths that are consistently far from the centroid in every direction. Using the mean (not max) per bin prevents a degenerate strategy where the robot shoots briefly to the walls in each direction and returns to the centre — the robot must spend sustained time far from the centroid to score well.
 5. If the episode ends in a collision, the raw fitness is multiplied by a **collision discount factor** (< 1).
-6. A **jitter penalty** is applied multiplicatively to enforce smooth paths:
+6. A **survival** factor penalises early termination:
+
+```
+survival = steps_survived / max_steps
+```
+
+7. A **jitter penalty** is applied multiplicatively to enforce smooth paths:
 
 ```
 jerk_t         = |(rotate1_t + rotate2_t) − (rotate1_{t−1} + rotate2_{t−1})|   # physical turns
 jitter_factor  = 1 − w_smooth × mean(jerk_t) / max_possible_jerk
-fitness        = coverage × jitter_factor × collision_discount
+fitness        = coverage × survival × jitter_factor × collision_discount
 ```
 
-where `max_possible_jerk = 2 × (max_rotate1 + max_rotate2)` (the maximum possible heading reversal per step). A smooth arc has low mean jerk; left-right oscillation has high mean jerk. Consistent wall-following turns are not penalised — only reversals are. `w_smooth` controls penalty strength (0 = disabled, 1 = full weight).
+where `max_possible_jerk = 2 × max_net_rotation_deg` (the maximum heading reversal per step, governed by the net-rotation cap described below). A smooth arc has low mean jerk; left-right oscillation has high mean jerk. Consistent wall-following turns are not penalised — only reversals are. `w_smooth` controls penalty strength (0 = disabled, 1 = full weight).
+
+### Net rotation cap
+
+The net body rotation per step is hard-capped: `|rotate1 + rotate2| ≤ max_net_rotation_deg`. After the policy produces `rotate2`, it is clipped so the cap is not exceeded. This prevents the robot from spinning excessively in a single step, regardless of what the policy outputs. `max_possible_jerk` in the jitter penalty is defined relative to this cap.
 
 ### Distance floor (sonar saturation)
 
@@ -171,6 +181,16 @@ dist_mm = max(cfg.min_dist_mm, min(emulator_distance_mm, cfg.max_dist_mm))
 ```
 
 Without this floor, the emulator may predict sub-300 mm values when the simulated robot gets close to a wall (geometrically correct for the simulation, but unreachable on the real robot). The policy would then learn to react to distance values it will never observe during deployment. Clamping ensures that 300 mm is treated as a saturated "at or closer than minimum range" signal, consistent with its meaning on the real robot.
+
+### IID noise injection
+
+During training (fitness evaluation and trajectory plotting), Gaussian noise with std `iid_noise_db` is optionally added to the emulator's IID output before it is fed to the policy. This prevents the policy from overfitting to the emulator's exact IID values and encourages robustness to the measurement noise present on the real robot. Set `iid_noise_db = 0` to disable.
+
+### Crash-start pool
+
+To prevent the GA from ignoring collision-prone situations, a **crash-start pool** is maintained throughout training. When a trajectory episode ends in a collision, the robot's position and heading `crash_backtrack_steps` steps before the crash are added to the pool. In each subsequent generation a fixed number of guaranteed episodes are started from pool positions (in addition to randomly sampled starts), forcing every genome to face previously lethal situations.
+
+Pool entries are **retired** after each generation: the current best-genome policy is re-run from each pool start, and any start it now navigates without crashing is removed. This prevents stale easy-to-solve starts from accumulating and keeps the pool focused on genuinely difficult positions. The pool is capped at `max_crash_starts_per_session` entries per session.
 
 ---
 
@@ -209,9 +229,13 @@ The baseline therefore learns only how to scale its body rotation as a function 
 
 This is the minimal policy that makes meaningful use of the two-phase structure with memory.
 
+### Hall of fame
+
+The top-N genomes seen across all generations are retained in a **hall of fame** (`top_policies/rank001.json` … `rankNNN.json`). This provides a pool of high-quality policies from different points in training, which is useful for post-hoc analysis and deployment: the overall best policy may appear at any generation, not just the final one.
+
 ### Multi-run training
 
-`SCRIPT_TrainPolicy.py` loops over `HISTORY_LENGTHS`. A value of 0 trains the baseline (`Policy/<condition>_h00_baseline`); any other value trains the standard config for that history length (`Policy/<condition>_h01`, `Policy/<condition>_h02`, etc.). All other settings (GA parameters, fitness function, architecture hidden sizes) are identical across runs.
+`SCRIPT_TrainPolicy.py` loops over `HISTORY_LENGTHS`. A value of 0 trains the baseline (`PolicyTraining/<condition>_h00`); any other value trains the standard config for that history length (`PolicyTraining/<condition>_h01`, `PolicyTraining/<condition>_h10`, etc.). All other settings (GA parameters, fitness function, architecture hidden sizes) are identical across runs.
 
 ---
 

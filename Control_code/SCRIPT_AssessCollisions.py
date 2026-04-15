@@ -44,12 +44,12 @@ from SCRIPT_TrainPolicy import (
 # Settings
 # ══════════════════════════════════════════════════════════════════════════════
 
-RUN_DIR                = "PolicyTraining/policy5_h10"
+RUN_DIR                = "PolicyTraining/sonar_h05"
 N_EPISODES_PER_SESSION = 500
 NUM_WORKERS            = None   # None = os.cpu_count()
 SEED                   = 42
 N_LAST_STEPS           = 15    # steps to record per episode for emulator accuracy analysis
-MIN_CRASH_STEPS        = 11     # exclude crashes that occur within this many steps (memory not yet useful)
+MIN_CRASH_STEPS        = 6     # exclude crashes that occur within this many steps (memory not yet useful)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -5,11 +5,34 @@ SCRIPT_MakePlots.py
 Publication-ready plots assembled from data produced by other scripts.
 All outputs go to PaperPlots/.
 
-Sections
---------
-1. Training curves  — best and mean fitness per generation across runs
+Data flow
+---------
+Section 1 — Training curves
+    Reads:  {run_dir}/training_history.json          (SCRIPT_TrainPolicy.py or
+                                                       SCRIPT_TrainPolicy_discriminability.py)
+            Keys used: "best", "val", "collision_rate", and optionally "discriminability"
+            (the last key is only present in discriminability-training runs)
+            PolicyAssessment/{run_name}_episodes.csv  (SCRIPT_AssessPolicies.py)
+
+Section 2 — Rotation strategy
+    Reads:  PolicyAssessment/{run_name}_episodes.csv  (SCRIPT_AssessPolicies.py)
+
+Section 3 — Robot paths
+    Runs:   episodes live via EnvironmentSimulator    (no pre-computed data)
+    Reads:  ValidStarts/{session}_valid_starts.json   (SCRIPT_ComputeValidStarts.py)
+            {run_dir}/top_policies/rank*.json         (SCRIPT_TrainPolicy.py)
+
+Section 4 — History usage
+    Reads:  PolicyAssessment/{run_name}_history_sensitivity.csv  (SCRIPT_AssessPolicies.py)
+
+Section 5 — Baseline policy map  (force_aligned runs only)
+    Reads:  {run_dir}/top_policies/rank*.json  (SCRIPT_TrainPolicy.py)
+    Note:   Only applicable to force_aligned policies (history_len=0, rotate1=0).
+            Their input is exactly (dist, iid), so the full policy can be
+            characterised by sweeping this 2-D space analytically — no simulation needed.
 """
 
+import copy
 import json
 import os
 
@@ -24,21 +47,40 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Section 1: Training curves
+# Settings
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Runs (shared across all sections) ─────────────────────────────────────────
 TRAINING_RUN_DIRS = [
-    ("PolicyTraining/policy_h00", "Baseline"),
-    ("PolicyTraining/policy_h01", "Hist 1"),
-    ("PolicyTraining/policy_h03", "Hist 3"),
-    ("PolicyTraining/policy_h05", "Hist 5"),
+    ("PolicyTraining/sonar_h00", "Baseline"),
+    ("PolicyTraining/sonar_h01", "Hist 1"),
+    ("PolicyTraining/sonar_h05", "Hist 5"),
+    ("PolicyTraining/sonar_h10", "Hist 10"),
 ]
-
 COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
 
-# ── Rotation strategy plot ranges ─────────────────────────────────────────────
+# ── Section 1: Fitness plots ──────────────────────────────────
+FITNESS_RANGE = [0.9, 1.01]
+
+# ── Section 2: Rotation strategy plot ranges ──────────────────────────────────
 ROT1_RANGE    = (-45, 45)   # x-axis: look angle (rotate1), degrees
 NET_ROT_RANGE = (-30, 30)   # y-axis: net body rotation (rotate1 + rotate2), degrees
+
+# ── Section 3: Robot paths ────────────────────────────────────────────────────
+PATH_SESSIONS   = ["sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"]
+PATH_N_EPISODES = 1     # episodes to run per (session, policy) combination
+PATH_MAX_STEPS  = 100  # max steps per episode; None = use value from config.json
+PATH_RANDOM_SEED = 42   # seed for start-position sampling (None = non-deterministic)
+
+# ── Section 4: History usage ──────────────────────────────────────────────────
+CHANNELS       = ["dist", "iid", "r1", "r2"]
+CHANNEL_LABELS = {"dist": "Distance", "iid": "IID", "r1": "Rotate1", "r2": "Rotate2"}
+
+# ── Section 5: Baseline policy map ───────────────────────────────────────────
+POLICY_MAP_N_POLICIES = 5             # HOF policies to average over (None = all)
+POLICY_MAP_DIST_RANGE = (0,   2000)   # mm  — x-axis
+POLICY_MAP_IID_RANGE  = (0,   10)     # dB  — y-axis
+POLICY_MAP_RESOLUTION = 200           # grid points per axis
 
 
 def _fitness_components(run_dir: str) -> dict | None:
@@ -106,27 +148,30 @@ def _fitness_components(run_dir: str) -> dict | None:
         by_rank[rank]["jitter_factors"].append(jitter_f)
         by_rank[rank]["collided"].append(float(blocked))
 
-    # One value per policy
-    coverages, jitter_factors, collision_free = [], [], []
+    # coverage and jitter_factor: one value per policy (for boxplots)
+    # collision_free_rate: single scalar over all episodes (for bar)
+    coverages, jitter_factors, all_collided = [], [], []
     for rank_data in by_rank.values():
         coverages.append(float(np.mean(rank_data["coverages"])))
         jitter_factors.append(float(np.mean(rank_data["jitter_factors"])))
-        collision_free.append(1.0 - float(np.mean(rank_data["collided"])))
+        all_collided.extend(rank_data["collided"])
 
     return {
         "coverage":            coverages,
         "jitter_factor":       jitter_factors,
-        "collision_free_rate": collision_free,
+        "collision_free_rate": 1.0 - float(np.mean(all_collided)),
     }
 
 
 def plot_training_curves() -> None:
-    fig = plt.figure(figsize=(12, 6))
-    gs  = fig.add_gridspec(2, 2, width_ratios=[2, 1], hspace=0.1, wspace=0.35)
+    fig = plt.figure(figsize=(12, 8))
+    gs  = fig.add_gridspec(3, 2, width_ratios=[2, 1], hspace=0.1, wspace=0.35)
     ax_fit  = fig.add_subplot(gs[0, 0])
     ax_col  = fig.add_subplot(gs[1, 0], sharex=ax_fit)
+    ax_disc = fig.add_subplot(gs[2, 0], sharex=ax_fit)
     ax_comp = fig.add_subplot(gs[:, 1])
 
+    has_disc = False
     for (run_dir, label), color in zip(TRAINING_RUN_DIRS, COLORS):
         hist_path = os.path.join(run_dir, "training_history.json")
         if not os.path.exists(hist_path):
@@ -145,6 +190,12 @@ def plot_training_curves() -> None:
         ax_fit.plot(gens, val,  color=color, lw=1.0, linestyle="--", alpha=0.6)
         ax_col.plot(gens, coll, color=color, lw=1.5, label=label)
 
+        disc_vals = hist.get("discriminability")
+        if disc_vals:
+            disc = np.array([v if v is not None else np.nan for v in disc_vals])
+            ax_disc.plot(np.arange(len(disc)), disc, color=color, lw=1.5, label=label)
+            has_disc = True
+
     from matplotlib.lines import Line2D
     handles, labels = ax_fit.get_legend_handles_labels()
     handles.append(Line2D([0], [0], color="black", lw=1.0, linestyle="--", alpha=0.6))
@@ -155,15 +206,32 @@ def plot_training_curves() -> None:
     ax_fit.grid(True, alpha=0.3)
     plt.setp(ax_fit.get_xticklabels(), visible=False)
 
-    ax_col.set_xlabel("Generation")
     ax_col.set_ylabel("Collision rate")
     ax_col.set_ylim(0, 1)
     ax_col.legend(fontsize=8)
     ax_col.grid(True, alpha=0.3)
+    plt.setp(ax_col.get_xticklabels(), visible=False)
+
+    ax_disc.set_xlabel("Generation")
+    ax_disc.set_ylabel("Discriminability\n(Spearman r)")
+    ax_disc.set_ylim(-1, 1)
+    ax_disc.axhline(0, color="black", lw=0.8, linestyle=":", alpha=0.5)
+    ax_disc.grid(True, alpha=0.3)
+    if has_disc:
+        ax_disc.legend(fontsize=8)
+    else:
+        ax_disc.text(0.5, 0.5, "No discriminability data\n(disc runs only)",
+                     ha="center", va="center", transform=ax_disc.transAxes,
+                     fontsize=9, color="0.5")
 
     # ── Fitness components panel ──────────────────────────────────────────────
-    comp_labels = ["Coverage\n(norm.)", "Smoothness\n(jitter factor)", "Collision-free\nrate"]
-    comp_keys   = ["coverage", "jitter_factor", "collision_free_rate"]
+    # coverage and jitter_factor: boxplots (distribution over HOF policies)
+    # collision_free_rate: single bar (overall fraction across all episodes)
+    boxplot_labels = ["Coverage\n(norm.)", "Smoothness\n(jitter factor)"]
+    boxplot_keys   = ["coverage", "jitter_factor"]
+    bar_label      = "Collision-free\nrate"
+    bar_key        = "collision_free_rate"
+    comp_labels    = boxplot_labels + [bar_label]
 
     run_names, all_comps, run_colors = [], [], []
     for (run_dir, label), color in zip(TRAINING_RUN_DIRS, COLORS):
@@ -180,13 +248,14 @@ def plot_training_curves() -> None:
             c["coverage"] = [v / max_cov for v in c["coverage"]]
 
         n_runs  = len(run_names)
-        n_comp  = len(comp_keys)
+        n_comp  = len(comp_labels)
         width   = 0.8 / n_runs
         offsets = np.linspace(-(n_runs - 1) / 2, (n_runs - 1) / 2, n_runs) * width
         xs      = np.arange(n_comp)
 
         for run_name, comps, color, offset in zip(run_names, all_comps, run_colors, offsets):
-            for i, key in enumerate(comp_keys):
+            # Boxplots for coverage and jitter_factor
+            for i, key in enumerate(boxplot_keys):
                 bp = ax_comp.boxplot(
                     comps[key],
                     positions=[xs[i] + offset],
@@ -199,12 +268,16 @@ def plot_training_curves() -> None:
                     capprops=dict(color=color),
                     flierprops=dict(marker="o", color=color, ms=3),
                 )
-            # One legend handle per run (use the last box patch)
-            bp["boxes"][0].set_label(run_name)
+            # Bar for collision-free rate
+            bar = ax_comp.bar(
+                xs[-1] + offset, comps[bar_key],
+                width=width * 0.9, color=color, alpha=0.7,
+                label=run_name,
+            )
 
         ax_comp.set_xticks(xs)
         ax_comp.set_xticklabels(comp_labels, fontsize=9)
-        ax_comp.set_ylim(0, 1.15)
+        ax_comp.set_ylim(FITNESS_RANGE[0], FITNESS_RANGE[1])
         ax_comp.set_ylabel("Score (0–1)")
         ax_comp.legend(fontsize=8, loc="lower right")
         ax_comp.grid(axis="y", alpha=0.3)
@@ -213,7 +286,7 @@ def plot_training_curves() -> None:
         ax_comp.text(0.5, 0.5, "No episodes CSVs found\n(run SCRIPT_AssessPolicies.py first)",
                      ha="center", va="center", transform=ax_comp.transAxes, fontsize=9)
 
-    out_path = os.path.join(PLOTS_DIR, "training_curves.png")
+    out_path = os.path.join(PLOTS_DIR, "performance.png")
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out_path}")
@@ -302,21 +375,11 @@ def plot_rotation_strategy() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #
 # Rows = sessions, columns = history conditions.
-# Each cell: one episode from a fixed central start in that arena.
-
-PATH_SESSIONS = [
-    ("sessionB01", (150.0,  -300.0, 0.0)),
-    ("sessionB02", (  0.0,  -300.0, 0.0)),
-    ("sessionB03", (-100.0, -900.0, 0.0)),
-    ("sessionB04", (750.0,  -600.0, 0.0)),
-    ("sessionB05", (-850.0, -650.0, 0.0)),
-]
-
-PATH_START = PATH_SESSIONS[0][1]   # kept for _run_single_episode default
+# Each cell: PATH_N_EPISODES episodes from a fixed central start in that arena.
 
 
 def _run_single_episode(
-    policy, cfg, simulator, start=None
+    policy, cfg, simulator, start: tuple[float, float, float]
 ) -> tuple[list[tuple[float, float]], list[float]]:
     """
     Run one episode from start (defaults to PATH_START).
@@ -326,7 +389,7 @@ def _run_single_episode(
     import collections as _col
     from SCRIPT_TrainPolicy import build_input
 
-    x, y, yaw         = start if start is not None else PATH_START
+    x, y, yaw         = start
     history            = _col.deque([(0.0, 0.0, 0.0, 0.0)] * cfg.history_len,
                                     maxlen=cfg.history_len)
     last_physical_iid  = 0.0
@@ -377,8 +440,18 @@ def _run_single_episode(
     return path, look_yaws
 
 
+def _load_valid_starts(session: str) -> list[tuple[float, float, float]]:
+    """Return list of (x, y, yaw_deg) from ValidStarts/<session>_valid_starts.json."""
+    path = os.path.join("ValidStarts", f"{session}_valid_starts.json")
+    with open(path) as f:
+        data = json.load(f)
+    return [(s["x"], s["y"], s["yaw_deg"]) for s in data["starts"]]
+
+
 def plot_paths() -> None:
     from SCRIPT_AssessPolicies import load_cfg, load_hof, build_simulator
+
+    rng = np.random.default_rng(PATH_RANDOM_SEED)
 
     runs = [
         (run_dir, label, color)
@@ -405,40 +478,57 @@ def plot_paths() -> None:
         hof    = load_hof(run_dir, cfg, n=1)
         policies.append((cfg, hof[0]["policy"], label, color))
 
-    for row, (session, start) in enumerate(PATH_SESSIONS):
+    for row, session in enumerate(PATH_SESSIONS):
         print(f"  {session}...")
-        simulator = build_simulator(session)
-        arena     = simulator.arena
+        simulator     = build_simulator(session)
+        arena         = simulator.arena
+        valid_starts  = _load_valid_starts(session)
+        chosen_starts = [
+            valid_starts[i]
+            for i in rng.choice(len(valid_starts), size=PATH_N_EPISODES, replace=False)
+        ]
 
         for col, (cfg, policy, label, color) in enumerate(policies):
             ax = axes[row, col]
 
-            path, look_yaws = _run_single_episode(policy, cfg, simulator, start)
-            xs, ys = zip(*path)
+            effective_cfg = cfg
+            if PATH_MAX_STEPS is not None:
+                effective_cfg = copy.copy(cfg)
+                effective_cfg.max_steps = PATH_MAX_STEPS
+
+            all_paths = [
+                _run_single_episode(policy, effective_cfg, simulator, start)
+                for start in chosen_starts
+            ]
 
             # Arena walls
             if len(arena.walls) > 0:
                 ax.scatter(arena.walls[:, 0], arena.walls[:, 1],
                            s=0.3, color="0.6", linewidths=0, zorder=1)
 
-            # Path
-            ax.plot(xs, ys, color=color, lw=1.2, alpha=0.9, zorder=2)
+            alpha_step = 0.9 / max(len(all_paths), 1)
+            for ep_idx, (path, look_yaws) in enumerate(all_paths):
+                xs, ys  = zip(*path)
+                ep_alpha = 0.9 - ep_idx * alpha_step * 0.3  # fade slightly per episode
 
-            # Look direction lines (every 5 steps); omit for baseline (always aligned with path)
-            if not cfg.force_aligned:
-                line_len = 200
-                for i in range(0, len(look_yaws), 5):
-                    angle_rad = np.deg2rad(look_yaws[i])
-                    ax.plot([xs[i], xs[i] + line_len * np.cos(angle_rad)],
-                            [ys[i], ys[i] + line_len * np.sin(angle_rad)],
-                            color="black", lw=0.8, alpha=0.7, zorder=3)
-                    ax.plot(xs[i], ys[i], "o", color="black", ms=2, zorder=4)
+                # Path
+                ax.plot(xs, ys, color=color, lw=1.2, alpha=ep_alpha, zorder=2)
 
-            # Start / end markers
-            ax.plot(xs[0], ys[0], "o", color=color, ms=4, zorder=4)
-            crashed    = len(path) < cfg.max_steps + 1
-            ax.plot(xs[-1], ys[-1], "s" if crashed else "o", color=color,
-                    ms=4, markerfacecolor=color if crashed else "white", zorder=4)
+                # Look direction lines (every 5 steps); omit for baseline (always aligned with path)
+                if not effective_cfg.force_aligned:
+                    line_len = 200
+                    for i in range(0, len(look_yaws), 5):
+                        angle_rad = np.deg2rad(look_yaws[i])
+                        ax.plot([xs[i], xs[i] + line_len * np.cos(angle_rad)],
+                                [ys[i], ys[i] + line_len * np.sin(angle_rad)],
+                                color="black", lw=0.8, alpha=0.7 * ep_alpha, zorder=3)
+                        ax.plot(xs[i], ys[i], "o", color="black", ms=2, zorder=4)
+
+                # Start / end markers
+                ax.plot(xs[0], ys[0], "o", color=color, ms=4, zorder=4)
+                crashed = len(path) < effective_cfg.max_steps + 1
+                ax.plot(xs[-1], ys[-1], "s" if crashed else "o", color=color,
+                        ms=4, markerfacecolor=color if crashed else "white", zorder=4)
 
             ax.set_aspect("equal")
             ax.set_xticks([])
@@ -466,9 +556,6 @@ def plot_paths() -> None:
 #
 # Reads PolicyAssessment/{run_name}_history_sensitivity.csv and plots
 # sensitivity fraction vs input age for each channel, one line per run.
-
-CHANNELS = ["dist", "iid", "r1", "r2"]
-CHANNEL_LABELS = {"dist": "Distance", "iid": "IID", "r1": "Rotate1", "r2": "Rotate2"}
 
 
 def plot_history_usage() -> None:
@@ -543,6 +630,74 @@ def plot_history_usage() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Section 5: Baseline policy map
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Only runs for force_aligned policies (input = (dist, iid) only).
+# Sweeps the full 2-D input space analytically — no simulation needed.
+# Mean across the top POLICY_MAP_N_POLICIES HOF policies, one panel per run.
+
+def plot_policy_map() -> None:
+    from SCRIPT_AssessPolicies import load_cfg, load_hof
+
+    # Collect force_aligned runs
+    runs = [
+        (run_dir, label, color)
+        for (run_dir, label), color in zip(TRAINING_RUN_DIRS, COLORS)
+        if os.path.exists(run_dir)
+        and json.load(open(os.path.join(run_dir, "config.json"))).get("force_aligned", False)
+    ]
+    if not runs:
+        print("  ⚠ No force_aligned runs found — skipping policy map.")
+        return
+
+    dist_vals = np.linspace(*POLICY_MAP_DIST_RANGE, POLICY_MAP_RESOLUTION)
+    iid_vals  = np.linspace(*POLICY_MAP_IID_RANGE,  POLICY_MAP_RESOLUTION)
+    DD, II    = np.meshgrid(dist_vals, iid_vals)
+    grid_pts  = np.stack([DD.ravel(), II.ravel()], axis=1)  # (res², 2)
+
+    fig, axes = plt.subplots(1, len(runs), figsize=(4.5 * len(runs), 4),
+                             squeeze=False)
+    axes = axes[0]
+
+    for ax, (run_dir, label, color) in zip(axes, runs):
+        cfg      = load_cfg(run_dir)
+        hof      = load_hof(run_dir, cfg, n=POLICY_MAP_N_POLICIES)
+        norm_pts = (grid_pts / np.array([cfg.max_dist_mm, cfg.max_iid_db],
+                                        dtype=np.float32)).astype(np.float32)
+
+        maps = [
+            np.array([
+                entry["policy"].forward(pt, cfg.max_rotate2_deg) for pt in norm_pts
+            ]).reshape(POLICY_MAP_RESOLUTION, POLICY_MAP_RESOLUTION)
+            for entry in hof
+        ]
+        mean_map = np.mean(maps, axis=0)
+
+        vmax = cfg.max_rotate2_deg
+        im   = ax.imshow(mean_map, origin="lower", aspect="auto", cmap="RdBu_r",
+                         vmin=-vmax, vmax=vmax,
+                         extent=[*POLICY_MAP_DIST_RANGE, *POLICY_MAP_IID_RANGE])
+        ax.contour(dist_vals, iid_vals, mean_map, levels=[0],
+                   colors="black", linewidths=1.0, linestyles="--")
+        fig.colorbar(im, ax=ax, label="rotate2 (°)", shrink=0.85)
+        ax.set_xlabel("Distance (mm)")
+        ax.set_ylabel("IID (dB)")
+        ax.set_title(f"{label}  (mean of top {len(hof)} policies)", fontsize=10)
+
+    fig.suptitle(
+        "Baseline policy map: dist × IID → rotate2\n"
+        "[red = toward wall, blue = away, dashed = zero boundary]",
+        fontsize=10,
+    )
+    plt.tight_layout()
+    out_path = os.path.join(PLOTS_DIR, "policy_map.png")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {out_path}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -555,6 +710,8 @@ def main() -> None:
     plot_paths()
     print("=== Section 4: History usage ===")
     plot_history_usage()
+    print("=== Section 5: Baseline policy map ===")
+    plot_policy_map()
 
 
 if __name__ == "__main__":

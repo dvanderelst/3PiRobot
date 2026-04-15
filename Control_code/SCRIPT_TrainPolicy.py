@@ -50,8 +50,8 @@ from Library import CodeLogger
 
 
 # ── Condition ────────────────────────────────────────────────────────────────────
-CONDITION = "policy1"          # base name; output goes to PolicyTraining/<CONDITION>_hNN/
-HISTORY_LENGTHS = [10, 5, 1, 0]  # train one run per history length, in order
+CONDITION = "test"          # base name; output goes to PolicyTraining/<CONDITION>_hNN/
+HISTORY_LENGTHS = [10]  # train one run per history length, in order
 IID_NOISE_DB = 1         # Gaussian noise std injected into emulator IID during training (dB); 0 = disabled
 
 # ── Pushover ─────────────────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ class Config:
     seed: int = 42
 
     # Evaluation
-    episodes_per_policy: int = 240
+    episodes_per_policy: int = 50
     max_steps: int = 75
     max_crash_starts_per_session: int = 20  # cap on the per-session crash-start pool
     crash_backtrack_steps: int = 15         # how many steps before the crash to place the backtrack start
@@ -124,7 +124,7 @@ class Config:
         default_factory=lambda: ["starts_headon", "starts_wall_left", "starts_wall_right"] #"starts_wall_left", "starts_wall_right",
     )
     train_session_names: List[str] = field(
-        default_factory=lambda: ["sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"]
+        default_factory=lambda: ["sessionB02"] #"sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"
     )
     validation_session_name: Optional[str] = None
     validation_episodes: int = 16

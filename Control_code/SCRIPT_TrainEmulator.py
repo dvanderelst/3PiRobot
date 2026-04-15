@@ -38,6 +38,53 @@ from Library import CodeLogger
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Settings  ← change these before running
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Data
+SESSION_PATHS   = ["sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"]
+CACHE_DIR       = "Cache"
+FORCE_RECOMPUTE = False   # set True when changing PROFILE_STEPS / OPENING_ANGLE /
+                          # PROFILE_METHOD to bypass the per-session profile cache
+
+# Profile geometry
+OPENING_ANGLE  = 220.0     # degrees — total angular span of the profile
+PROFILE_STEPS  = 111        # number of azimuth bins
+PROFILE_METHOD = "min_bin" # "min_bin" or "ray_center"
+MAX_DIST_MM    = 3000.0    # echo-presence threshold and normalisation scale
+
+# IID → azimuth calibration
+AZ_FIT_CONE_HALF_DEG = 30.0  # only wall points within ±this of forward are used
+                              # as echo-source ground truth
+AZ_FIT_DIST_MIN_MM   = 300.0  # exclude very close distances (IID saturation)
+AZ_FIT_DIST_MAX_MM   = 2000.0 # exclude very far distances (weak/noisy echoes)
+
+# CNN architecture
+CONV_CHANNELS = [32, 64]
+CONV_KERNEL   = 3
+FC_HIDDEN     = 64
+HEAD_HIDDEN   = 32
+
+# Training
+LR               = 1e-3
+BATCH_SIZE       = 64
+EPOCHS           = 100
+DIST_LOSS_WEIGHT = 1.0
+
+# Train / validation split
+VALIDATION_QUADRANTS = {
+    "sessionB01": [1],
+    "sessionB02": [3],
+    "sessionB03": [2],
+    "sessionB04": [4],
+    "sessionB05": [1],
+}
+
+# Output
+OUTPUT_DIR = "Emulator"
+SEED       = 42
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Config
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -55,7 +102,7 @@ class Config:
 
     # Profile
     opening_angle: float = 220.0
-    profile_steps: int = 22
+    profile_steps: int = 100
     profile_method: str = "min_bin"
 
     # Maximum distance in mm — two roles:
@@ -87,6 +134,18 @@ class Config:
         "sessionB04": [4],
         "sessionB05": [1],
     })
+
+    # Cache
+    force_recompute: bool = True   # bypass per-session profile cache
+
+    # IID → azimuth calibration
+    # OLS fit:  az_deg = slope * IID_dB + intercept
+    # Only wall points within ±az_fit_cone_half_deg of forward are used as
+    # ground-truth echo sources (points outside this cone are too peripheral
+    # to be first-echo candidates in a realistic sonar beam).
+    az_fit_cone_half_deg: float = 30.0
+    az_fit_dist_min_mm:   float = 300.0   # exclude very close (IID saturation)
+    az_fit_dist_max_mm:   float = 2000.0  # exclude very far (weak/noisy echoes)
 
     # Output
     output_dir: str = "Emulator"
@@ -164,11 +223,13 @@ def load_dataset(cfg: Config):
     per_proc : list of dicts, one per processor, each with keys:
         session_name, profiles, iid, distance, crossed, quadrants
     """
-    dc = DataCollection(cfg.session_paths, cache_dir=cfg.cache_dir)
+    dc = DataCollection(cfg.session_paths, cache_dir=cfg.cache_dir,
+                        force_recompute=cfg.force_recompute)
     dc.load_profiles(
         opening_angle=cfg.opening_angle,
         steps=cfg.profile_steps,
         profile_method=cfg.profile_method,
+        force_recompute=cfg.force_recompute,
     )
 
     per_proc = []
@@ -290,6 +351,84 @@ def normalise(vals: np.ndarray, mean: float, std: float) -> np.ndarray:
 
 def denormalise(vals: np.ndarray, mean: float, std: float) -> np.ndarray:
     return vals * std + mean
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IID → azimuth calibration
+# ══════════════════════════════════════════════════════════════════════════════
+
+def profile_bin_centers(opening_angle: float, profile_steps: int) -> np.ndarray:
+    """
+    Return the azimuth (degrees) of each profile bin centre.
+
+    Matches the convention in DataProcessor.get_profile:
+        edges   = np.linspace(-opening_angle/2, opening_angle/2, profile_steps + 1)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+
+    For opening_angle=220, profile_steps=22 this gives
+    [-105, -95, …, -5, +5, …, +105] in 10° steps.
+    """
+    edges = np.linspace(-opening_angle / 2, opening_angle / 2, profile_steps + 1)
+    return 0.5 * (edges[:-1] + edges[1:])
+
+
+def fit_iid_to_azimuth(
+    all_profiles: np.ndarray,
+    all_iid: np.ndarray,
+    all_crossed: np.ndarray,
+    all_distance: np.ndarray,
+    opening_angle: float,
+    profile_steps: int,
+    cone_half_deg: float,
+    dist_min_mm: float = 0.0,
+    dist_max_mm: float = np.inf,
+) -> Tuple[float, float, np.ndarray, np.ndarray]:
+    """
+    Fit  az_deg = slope * IID_dB + intercept  using echo-present samples.
+
+    Ground-truth azimuth for each sample = centre of the profile bin with the
+    minimum distance within the central ±cone_half_deg of the opening angle.
+    Points outside this cone are unlikely to produce first detectable echoes.
+
+    dist_min_mm / dist_max_mm: distance range filter applied before fitting.
+    Very close distances saturate IID; very far distances are noisy.
+
+    Returns
+    -------
+    slope, intercept : OLS coefficients
+    iid_ep, true_az  : arrays used for the fit (for diagnostic plots)
+    """
+    centers   = profile_bin_centers(opening_angle, profile_steps)
+    cone_mask = np.abs(centers) <= cone_half_deg
+    cone_centers = centers[cone_mask]
+
+    ep = all_crossed.astype(bool)
+    profiles_ep = all_profiles[ep]          # (N_ep, profile_steps)
+    iid_ep      = all_iid[ep]               # (N_ep,)
+    dist_ep     = all_distance[ep]          # (N_ep,)
+
+    # Distance filter: remove saturation-prone close distances and noisy far ones
+    dist_mask   = (dist_ep >= dist_min_mm) & (dist_ep <= dist_max_mm)
+    profiles_ep = profiles_ep[dist_mask]
+    iid_ep      = iid_ep[dist_mask]
+
+    # Azimuth of the closest wall point within the cone (argmin).
+    cone_dists  = profiles_ep[:, cone_mask]                     # (N_ep, n_cone)
+    argmin_cone = np.argmin(cone_dists, axis=1)                 # (N_ep,)
+    true_az     = cone_centers[argmin_cone]                     # (N_ep,)
+
+    # Exclude samples where argmin lands on the cone boundary — those are
+    # cases where the actual closest wall is outside the cone and the edge
+    # bin is returned as a spurious minimum.
+    n_cone   = cone_dists.shape[1]
+    interior = (argmin_cone > 0) & (argmin_cone < n_cone - 1)
+    iid_ep   = iid_ep[interior]
+    true_az  = true_az[interior]
+
+    X      = np.column_stack([iid_ep, np.ones(len(iid_ep))])
+    coeffs, _, _, _ = np.linalg.lstsq(X, true_az, rcond=None)
+
+    return float(coeffs[0]), float(coeffs[1]), iid_ep, true_az
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -469,11 +608,46 @@ def train(cfg: Config):
     print(f"\n  Best epoch: {best_epoch}  val combined={best_val_loss:.4f}")
 
     # ── Save artifacts ────────────────────────────────────────────────────────
-    print("\n[5/5] Saving artifacts")
+    print("\n[6/6] Saving artifacts")
 
     checkpoint = torch.load(model_save_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+
+    # ── IID → azimuth calibration ─────────────────────────────────────────────
+    print("\n[5/6] Fitting IID → azimuth calibration")
+    all_profiles = np.concatenate([train_data["profiles"], val_data["profiles"]])
+    all_iid_raw  = np.concatenate([train_data["iid"],      val_data["iid"]])
+    all_crossed  = np.concatenate([train_data["crossed"],  val_data["crossed"]])
+    all_distance = np.concatenate([train_data["distance"], val_data["distance"]])
+
+    az_slope, az_intercept, iid_fit, true_az_fit = fit_iid_to_azimuth(
+        all_profiles, all_iid_raw, all_crossed, all_distance,
+        cfg.opening_angle, cfg.profile_steps, cfg.az_fit_cone_half_deg,
+        dist_min_mm=cfg.az_fit_dist_min_mm,
+        dist_max_mm=cfg.az_fit_dist_max_mm,
+    )
+    print(f"  az_deg = {az_slope:.4f} * IID_dB + {az_intercept:.4f}")
+    print(f"  (fitted on {len(iid_fit):,} echo-present samples, "
+          f"cone ±{cfg.az_fit_cone_half_deg}°, "
+          f"dist {cfg.az_fit_dist_min_mm:.0f}–{cfg.az_fit_dist_max_mm:.0f} mm)")
+
+    # Scatter plot: IID vs true azimuth + fit line
+    fig_az, ax_az = plt.subplots(figsize=(6, 5))
+    ax_az.scatter(iid_fit, true_az_fit, s=8, alpha=0.3, color="steelblue",
+                  label=f"n={len(iid_fit):,}")
+    iid_line = np.array([iid_fit.min(), iid_fit.max()])
+    ax_az.plot(iid_line, az_slope * iid_line + az_intercept,
+               color="red", lw=2, label=f"OLS  slope={az_slope:.3f}  b={az_intercept:.3f}")
+    ax_az.set_xlabel("Measured IID (dB)")
+    ax_az.set_ylabel("Azimuth of closest wall point (°)")
+    ax_az.set_title(f"IID → azimuth calibration  (cone ±{cfg.az_fit_cone_half_deg}°)")
+    ax_az.legend(markerscale=5)
+    az_plot_path = os.path.join(cfg.output_dir, "iid_azimuth_calibration.png")
+    fig_az.tight_layout()
+    fig_az.savefig(az_plot_path, dpi=120)
+    plt.close(fig_az)
+    print(f"  Saved {az_plot_path}")
 
     # training_params.json -- fields read by Emulator.load() are marked
     training_params = {
@@ -504,6 +678,14 @@ def train(cfg: Config):
         },
         # Echo threshold (used at inference to gate outputs)
         "no_echo_min_distance_mm": cfg.max_dist_mm,
+        # IID → azimuth calibration (loaded downstream for echo-source projection)
+        "iid_to_az": {
+            "slope":          az_slope,
+            "intercept":      az_intercept,
+            "cone_half_deg":  cfg.az_fit_cone_half_deg,
+            "dist_min_mm":    cfg.az_fit_dist_min_mm,
+            "dist_max_mm":    cfg.az_fit_dist_max_mm,
+        },
         # Config
         "dist_loss_weight": cfg.dist_loss_weight,
         "config":           asdict(cfg),
@@ -666,5 +848,27 @@ def train(cfg: Config):
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    cfg = Config()
+    cfg = Config(
+        session_paths         = SESSION_PATHS,
+        cache_dir             = CACHE_DIR,
+        force_recompute       = FORCE_RECOMPUTE,
+        opening_angle         = OPENING_ANGLE,
+        profile_steps         = PROFILE_STEPS,
+        profile_method        = PROFILE_METHOD,
+        max_dist_mm           = MAX_DIST_MM,
+        az_fit_cone_half_deg  = AZ_FIT_CONE_HALF_DEG,
+        az_fit_dist_min_mm    = AZ_FIT_DIST_MIN_MM,
+        az_fit_dist_max_mm    = AZ_FIT_DIST_MAX_MM,
+        conv_channels         = CONV_CHANNELS,
+        conv_kernel           = CONV_KERNEL,
+        fc_hidden             = FC_HIDDEN,
+        head_hidden           = HEAD_HIDDEN,
+        lr                    = LR,
+        batch_size            = BATCH_SIZE,
+        epochs                = EPOCHS,
+        dist_loss_weight      = DIST_LOSS_WEIGHT,
+        validation_quadrants  = VALIDATION_QUADRANTS,
+        output_dir            = OUTPUT_DIR,
+        seed                  = SEED,
+    )
     train(cfg)
