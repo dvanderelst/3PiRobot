@@ -183,6 +183,44 @@ def _resample(particles, weights, rng):
     return particles[idx], np.ones_like(weights) / len(weights)
 
 
+def umeyama_align(src: np.ndarray, dst: np.ndarray, with_scale: bool = True):
+    """
+    Similarity (or rigid) alignment of 2D point cloud `src` onto `dst`
+    (Umeyama 1991). Finds the (scale c, rotation R, translation t) that
+    minimises Σ‖c·R·src_i + t − dst_i‖².
+
+    Parameters
+    ----------
+    src : (N, 2) array — points to be aligned (e.g. SLAM output)
+    dst : (N, 2) array — reference points (e.g. ground truth)
+    with_scale : if False, solve rigid alignment (c = 1)
+
+    Returns
+    -------
+    aligned : (N, 2) — src mapped into dst's frame
+    params  : dict with 'scale', 'R' (2×2), 't' (2,)
+    """
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+    n, d = src.shape
+    mu_src, mu_dst = src.mean(0), dst.mean(0)
+    sx, sy = src - mu_src, dst - mu_dst
+    cov = (sy.T @ sx) / n                              # (d, d)
+    U, D, Vt = np.linalg.svd(cov)
+    S = np.eye(d)
+    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+        S[-1, -1] = -1.0
+    R = U @ S @ Vt
+    if with_scale:
+        var_src = float((sx * sx).sum() / n)
+        c = float(np.trace(np.diag(D) @ S)) / var_src if var_src > 0 else 1.0
+    else:
+        c = 1.0
+    t = mu_dst - c * R @ mu_src
+    aligned = c * (src @ R.T) + t
+    return aligned, {"scale": c, "R": R, "t": t}
+
+
 def run_pf(feats: np.ndarray, rng, beta: float):
     """
     Online particle filter over a growing experience map.

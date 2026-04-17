@@ -27,19 +27,19 @@ import matplotlib.lines as mlines
 import scipy.sparse
 import scipy.sparse.linalg
 
-from Library.SlamCore import load_run, collect_data, build_windows, run_pf
+from Library.SlamCore import load_run, collect_data, build_windows, run_pf, umeyama_align
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RUN_DIR             = "PolicyTraining/test_burst_h01"
-SESSION_NAME        = "sessionB02"
+RUN_DIR             = "PolicyTraining/sonar_h01"
+SESSION_NAME        = "sessionB05"
 MAX_STEPS           = 500
-WINDOW_LEN          = 7
-SEED                = 0
+WINDOW_LEN          = 5
+SEED                = 1
 
 # Realistic body-frame odometry noise
-SIGMA_DRIVE_MM      = 5.0        # per-step drive-distance noise (σ)
-SIGMA_ROT_DEG       = 2.0        # per-step rotation noise (σ)
+SIGMA_DRIVE_MM      = 10.0        # per-step drive-distance noise (σ)
+SIGMA_ROT_DEG       = 5.0        # per-step rotation noise (σ)
 
 # Particle filter
 PF_BETA             = 30.0
@@ -332,7 +332,7 @@ def solve_pose_graph_se2(noisy_pos, noisy_yaw, dθ_m, dr_m, loop_closures):
 # Plotting
 # ══════════════════════════════════════════════════════════════════════════════
 
-def plot_results(true_pos, noisy_pos, relaxed_pos, loop_closures,
+def plot_results(true_pos, noisy_pos, aligned_pos, loop_closures,
                  walls, run_name, output_dir, errors):
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle(
@@ -364,20 +364,21 @@ def plot_results(true_pos, noisy_pos, relaxed_pos, loop_closures,
     ); _fmt(ax)
 
     ax = axes[0, 2]; _walls(ax)
-    ax.plot(relaxed_pos[:, 0], relaxed_pos[:, 1], "-", color="#2ca02c", linewidth=1.0)
+    ax.plot(aligned_pos[:, 0], aligned_pos[:, 1], "-", color="#2ca02c", linewidth=1.0)
     for s, t in loop_closures:
-        ax.plot([relaxed_pos[s, 0], relaxed_pos[t, 0]],
-                [relaxed_pos[s, 1], relaxed_pos[t, 1]],
+        ax.plot([aligned_pos[s, 0], aligned_pos[t, 0]],
+                [aligned_pos[s, 1], aligned_pos[t, 1]],
                 color="#ff7f0e", linewidth=0.4, alpha=0.4, zorder=2)
-    ax.set_title("SE(2) relaxed map", fontsize=9); _fmt(ax)
+    ax.set_title("Aligned SE(2) relaxed map (similarity-aligned to true)",
+                 fontsize=9); _fmt(ax)
 
     ax = axes[1, 0]; _walls(ax)
     ax.plot(true_pos[:, 0],    true_pos[:, 1],    "-",  color="#1f77b4",
             linewidth=1.0, label="true")
     ax.plot(noisy_pos[:, 0],   noisy_pos[:, 1],   "--", color="#d62728",
             linewidth=0.9, alpha=0.8, label="odometry")
-    ax.plot(relaxed_pos[:, 0], relaxed_pos[:, 1], "-",  color="#2ca02c",
-            linewidth=1.0, alpha=0.9, label="relaxed")
+    ax.plot(aligned_pos[:, 0], aligned_pos[:, 1], "-",  color="#2ca02c",
+            linewidth=1.0, alpha=0.9, label="relaxed (aligned)")
     ax.legend(fontsize=8, loc="best")
     ax.set_title("Overlay", fontsize=9); _fmt(ax)
 
@@ -399,7 +400,8 @@ def plot_results(true_pos, noisy_pos, relaxed_pos, loop_closures,
 
     ax = axes[1, 2]
     ax.plot(errors["odom"],    "--", color="#d62728", label="odometry drift")
-    ax.plot(errors["relaxed"], "-",  color="#2ca02c", label="relaxed error")
+    ax.plot(errors["relaxed"], ":",  color="#888888", label="raw relaxed error")
+    ax.plot(errors["aligned"], "-",  color="#2ca02c", label="aligned relaxed error")
     ax.set_xlabel("Step"); ax.set_ylabel("Position error vs. true (mm)")
     ax.set_title("Drift over time", fontsize=9)
     ax.legend(fontsize=8, loc="best")
@@ -470,18 +472,27 @@ def main():
         noisy_pos, noisy_yaw, dθ_meas, dr_meas, loop_closures,
     )
 
+    # Align relaxed map to true via similarity transform (the SLAM map is
+    # only recoverable up to rotation / translation / uniform scale).
+    aligned_pos, align_params = umeyama_align(relaxed_pos, positions, with_scale=True)
+    print(f"\n  Alignment: scale={align_params['scale']:.4f}  "
+          f"translation=({align_params['t'][0]:.0f}, {align_params['t'][1]:.0f})")
+
     errors = {
         "odom":    np.linalg.norm(noisy_pos   - positions, axis=1),
         "relaxed": np.linalg.norm(relaxed_pos - positions, axis=1),
+        "aligned": np.linalg.norm(aligned_pos - positions, axis=1),
     }
-    print(f"  Final odom drift   : {errors['odom'][-1]:.0f} mm")
-    print(f"  Final relaxed error: {errors['relaxed'][-1]:.0f} mm")
-    print(f"  Mean  odom drift   : {errors['odom'].mean():.0f} mm")
-    print(f"  Mean  relaxed error: {errors['relaxed'].mean():.0f} mm")
+    print(f"  Final odom drift      : {errors['odom'][-1]:.0f} mm")
+    print(f"  Final raw-relaxed err : {errors['relaxed'][-1]:.0f} mm")
+    print(f"  Final aligned err     : {errors['aligned'][-1]:.0f} mm")
+    print(f"  Mean  odom drift      : {errors['odom'].mean():.0f} mm")
+    print(f"  Mean  raw-relaxed err : {errors['relaxed'].mean():.0f} mm")
+    print(f"  Mean  aligned err     : {errors['aligned'].mean():.0f} mm")
 
     print("\nPlotting...")
     walls = next(iter(simulators.values())).arena.walls
-    plot_results(positions, noisy_pos, relaxed_pos, loop_closures,
+    plot_results(positions, noisy_pos, aligned_pos, loop_closures,
                  walls, run_name, output_dir, errors)
 
     print("\nDone.")
