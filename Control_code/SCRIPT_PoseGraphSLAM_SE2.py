@@ -54,20 +54,21 @@ DRIVE_MM_PER_STEP   = 50.0       # used by the drift-gate bound
 W_ODOM_POS          = 1.0 / SIGMA_DRIVE_MM                # per-coord
 W_ODOM_ROT          = 1.0 / np.radians(SIGMA_ROT_DEG)     # rad⁻¹
 W_LC_POS            = 1.0 / 50.0                          # σ_LC ≈ 50 mm
+W_LC_ROT            = 1.0 / np.radians(15.0)              # σ_LC_θ ≈ 15° (same-direction revisits)
 W_SMOOTH_POS        = 0.02
 W_SMOOTH_ROT        = 0.05
 ANCHOR_WEIGHT       = 1e3
 
 # Gauss-Newton with step damping
-GN_MAX_ITERS        = 40
+GN_MAX_ITERS        = 60
 GN_TOL              = 1e-3
-GN_MAX_STEP_XY_MM   = 100.0     # cap per-node position update per iteration
-GN_MAX_STEP_ROT_RAD = 0.2       # cap per-node rotation update per iteration
+GN_MAX_STEP_XY_MM   = 200.0     # cap per-node position update per iteration
+GN_MAX_STEP_ROT_RAD = 0.3       # cap per-node rotation update per iteration
 
 # Huber robust loss on loop-closure residuals (outlier rejection via IRLS).
 # δ is in σ-units of the LC residual (weighted magnitude). Residuals with
 # weighted 2D magnitude > δ get progressively demoted in subsequent GN iters.
-HUBER_DELTA_LC      = 3.0
+HUBER_DELTA_LC      = 5.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -182,7 +183,7 @@ def build_residuals_and_jacobian(x, y, θ, dθ_m, dr_m, loop_closures, anchor):
     M = N - 1
     L = len(loop_closures)
     S = max(0, N - 2)
-    n_rows = 3 + 3 * M + 2 * L + 3 * S
+    n_rows = 3 + 3 * M + 3 * L + 3 * S   # LC: 2 pos + 1 heading per closure
     n_vars = 3 * N
 
     r = np.zeros(n_rows)
@@ -225,15 +226,18 @@ def build_residuals_and_jacobian(x, y, θ, dθ_m, dr_m, loop_closures, anchor):
 
         row += 3
 
-    # ── Loop closures (position only) ─────────────────────────────────────────
+    # ── Loop closures (position + heading; assume same-direction revisits) ────
     for s_idx, t_idx in loop_closures:
         r[row + 0] = W_LC_POS * (x[t_idx] - x[s_idx])
         r[row + 1] = W_LC_POS * (y[t_idx] - y[s_idx])
+        r[row + 2] = W_LC_ROT * wrap_rad(θ[t_idx] - θ[s_idx])
         add(row + 0, 3 * s_idx + 0, -W_LC_POS)
         add(row + 0, 3 * t_idx + 0, +W_LC_POS)
         add(row + 1, 3 * s_idx + 1, -W_LC_POS)
         add(row + 1, 3 * t_idx + 1, +W_LC_POS)
-        row += 2
+        add(row + 2, 3 * s_idx + 2, -W_LC_ROT)
+        add(row + 2, 3 * t_idx + 2, +W_LC_ROT)
+        row += 3
 
     # ── Smoothness on (x, y, θ) ───────────────────────────────────────────────
     for i in range(1, N - 1):
@@ -250,30 +254,29 @@ def build_residuals_and_jacobian(x, y, θ, dθ_m, dr_m, loop_closures, anchor):
 
     J = scipy.sparse.coo_matrix((dj, (rj, cj)), shape=(n_rows, n_vars)).tocsr()
     lc_row_start = 3 + 3 * M                 # first LC residual row
-    lc_row_end   = lc_row_start + 2 * L      # first post-LC row
+    lc_row_end   = lc_row_start + 3 * L      # first post-LC row  (3 rows per LC)
     return r, J, lc_row_start, lc_row_end
 
 
 def _apply_huber_reweighting(r, J, lc_row_start, lc_row_end, δ):
     """
-    IRLS reweighting: for each LC (two consecutive rows), if the 2D residual
-    magnitude exceeds δ, scale both its rows (in r and J) by √w where
-    w = δ / |r_lc|. Returns the number of LCs demoted and their mean weight.
+    IRLS reweighting: for each LC (3 consecutive rows = Δx, Δy, Δθ), if the
+    2D *position* residual magnitude exceeds δ, scale all three rows by √w
+    where w = δ / |r_lc_pos|. Heading is demoted alongside position so a
+    position-outlier LC doesn't retain rotational pull.
     """
     n_demoted, weight_sum = 0, 0.0
-    # Work on r as a mutable copy; J is re-scaled row-wise.
     r = r.copy()
     J = J.tolil(copy=True)
-    for k in range(lc_row_start, lc_row_end, 2):
+    for k in range(lc_row_start, lc_row_end, 3):
         mag = float(np.hypot(r[k], r[k + 1]))
         if mag <= δ:
             continue
         w = δ / max(mag, 1e-12)
         sqw = np.sqrt(w)
-        r[k]     *= sqw
-        r[k + 1] *= sqw
-        J[k]     *= sqw
-        J[k + 1] *= sqw
+        for off in (0, 1, 2):
+            r[k + off] *= sqw
+            J[k + off] *= sqw
         n_demoted += 1
         weight_sum += w
     avg_w = (weight_sum / n_demoted) if n_demoted else 1.0
