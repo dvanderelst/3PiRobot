@@ -41,7 +41,10 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-from SCRIPT_TopologicalMap import load_run, collect_data, build_windows
+from Library.SlamCore import (
+    load_run, collect_data, build_windows, run_pf,
+    N_PARTICLES, P_ADVANCE, P_STAY, P_JUMP,
+)
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -50,79 +53,9 @@ SESSION_NAME   = "sessionB02"
 MAX_STEPS      = 500
 WINDOW_LEN     = 5
 
-N_PARTICLES    = 1000
-P_ADVANCE      = 0.60      # s → s+1
-P_STAY         = 0.25      # s → s
-P_JUMP         = 0.15      # s → uniform({0, ..., t-1}) — recovery + injection
 BETA           = 30.0      # measurement-likelihood sharpness
 MIN_LC_GAP     = 15        # heat-map: mask diagonal band of ±this half-width
 SNAPSHOT_STEPS = [20, 80, 160, 240, 320, 400]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Particle filter
-# ══════════════════════════════════════════════════════════════════════════════
-
-def propagate(particles: np.ndarray, t: int, rng) -> np.ndarray:
-    """Advance each particle by one of: s→s+1, s→s, or s→uniform random."""
-    n = len(particles)
-    r = rng.random(n)
-    advance = r < P_ADVANCE
-    jump    = r >= (P_ADVANCE + P_STAY)
-
-    new = particles.copy()
-    new[advance] = np.minimum(particles[advance] + 1, t - 1)
-    if jump.any():
-        new[jump] = rng.integers(0, t, size=int(jump.sum()))
-    return new
-
-
-def resample(particles, weights, rng):
-    idx = rng.choice(len(particles), size=len(particles), p=weights)
-    return particles[idx], np.ones_like(weights) / len(weights)
-
-
-def run_pf(feats: np.ndarray, rng, beta: float):
-    """
-    Online particle filter over a growing experience map.
-
-    Returns
-    -------
-    history : list of (particles, weights) per step
-    heatmap : (N, N) array — heatmap[s, t] = total particle weight at past
-              index s during step t
-    """
-    N = len(feats)
-    particles = np.zeros(N_PARTICLES, dtype=np.int32)
-    weights   = np.ones(N_PARTICLES, dtype=np.float64) / N_PARTICLES
-
-    history = [(particles.copy(), weights.copy())]
-    heatmap = np.zeros((N, N), dtype=np.float32)
-
-    for t in range(1, N):
-        # Predict
-        particles = propagate(particles, t, rng)
-
-        # Update
-        diff = feats[particles] - feats[t]
-        ll   = np.exp(-beta * np.sum(diff ** 2, axis=1))
-        weights = weights * ll
-        total = weights.sum()
-        if total < 1e-20:
-            particles = rng.integers(0, t, size=N_PARTICLES)
-            weights   = np.ones(N_PARTICLES, dtype=np.float64) / N_PARTICLES
-        else:
-            weights = weights / total
-
-        # Resample on low ESS
-        ess = 1.0 / float(np.sum(weights ** 2))
-        if ess < N_PARTICLES / 2:
-            particles, weights = resample(particles, weights, rng)
-
-        history.append((particles.copy(), weights.copy()))
-        np.add.at(heatmap[:, t], particles, weights.astype(np.float32))
-
-    return history, heatmap
 
 
 # ══════════════════════════════════════════════════════════════════════════════

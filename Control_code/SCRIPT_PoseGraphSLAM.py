@@ -35,8 +35,9 @@ import matplotlib.lines as mlines
 import scipy.sparse
 import scipy.sparse.linalg
 
-from SCRIPT_TopologicalMap import load_run, collect_data, build_windows, simulate_odometry
-from SCRIPT_ParticleSLAM    import run_pf
+from Library.SlamCore import (
+    load_run, collect_data, build_windows, simulate_odometry, run_pf,
+)
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
