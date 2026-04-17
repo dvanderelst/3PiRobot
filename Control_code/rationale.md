@@ -239,6 +239,33 @@ The top-N genomes seen across all generations are retained in a **hall of fame**
 
 ---
 
+## Policy: Burst Variant (exploratory)
+
+Implemented in `SCRIPT_TrainPolicy_Burst.py`. The motivation is bat echolocation, where calls are grouped into bursts — a rapid volley of pulses fired in quick succession. The inter-pulse interval within a burst is too short for meaningful movement between calls, so the entire burst is best modelled as multiple measurements taken at the same position.
+
+### Step sequence (burst)
+
+Each step takes `N_LOOKS` sonar measurements before committing to a drive direction:
+
+1. **Look planning:** Build input from history only (current slots zeroed) → MLP → `N_LOOKS` look angles + 1 drive output. The look angles are all planned simultaneously before any measurement is taken, modelling the pre-programming of a burst volley.
+2. **Measurement:** Take `N_LOOKS` sonar measurements at the planned look directions (all from the same position).
+3. **Drive planning:** Build input from history + all `N_LOOKS` measurements → same MLP → drive rotation r2.
+4. **Execute:** Body rotates by r2, drives forward fixed distance.
+
+### IID symmetry (two flips)
+
+Because look angles are planned before measurement, the canonical frame for look planning must use the previous step's final IID sign (`flip_look`). The drive rotation uses the current step's final measured IID sign (`flip_drive`), matching the original policy's behaviour for r2. History stores canonical values throughout.
+
+### Architecture
+
+The MLP has `N_LOOKS + 1` outputs (one per look angle plus r2). Input dimension: `3 * N_LOOKS * (history_len + 1) + history_len`. This is larger than the single-policy input, making GA search harder for the same population size and generation count.
+
+### Status
+
+Exploratory. Early results suggest the burst policy converges more slowly than the single-look policy (larger genome) and reaches a slightly higher final collision rate. Whether the richer within-step information from multiple looks translates to better coverage or collision avoidance at longer training budgets is an open question.
+
+---
+
 ## Deployment on the Real Robot
 
 After training, the policy is applied on the real robot using a script similar to `SCRIPT_DataAcquisition.py`. The same sonar data collection and processing pipeline is used, yielding a `sonar_package` per step; `corrected_iid` and `corrected_distance` from that package are fed into the trained policy.
