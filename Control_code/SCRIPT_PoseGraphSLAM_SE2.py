@@ -33,9 +33,9 @@ from SCRIPT_ParticleSLAM    import run_pf
 
 # ── Config ────────────────────────────────────────────────────────────────────
 RUN_DIR             = "PolicyTraining/test_burst_h01"
-SESSION_NAME        = "sessionB01"
+SESSION_NAME        = "sessionB02"
 MAX_STEPS           = 500
-WINDOW_LEN          = 5
+WINDOW_LEN          = 7
 SEED                = 0
 
 # Realistic body-frame odometry noise
@@ -63,6 +63,11 @@ GN_MAX_ITERS        = 40
 GN_TOL              = 1e-3
 GN_MAX_STEP_XY_MM   = 100.0     # cap per-node position update per iteration
 GN_MAX_STEP_ROT_RAD = 0.2       # cap per-node rotation update per iteration
+
+# Huber robust loss on loop-closure residuals (outlier rejection via IRLS).
+# δ is in σ-units of the LC residual (weighted magnitude). Residuals with
+# weighted 2D magnitude > δ get progressively demoted in subsequent GN iters.
+HUBER_DELTA_LC      = 3.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -244,7 +249,35 @@ def build_residuals_and_jacobian(x, y, θ, dθ_m, dr_m, loop_closures, anchor):
             row += 1
 
     J = scipy.sparse.coo_matrix((dj, (rj, cj)), shape=(n_rows, n_vars)).tocsr()
-    return r, J
+    lc_row_start = 3 + 3 * M                 # first LC residual row
+    lc_row_end   = lc_row_start + 2 * L      # first post-LC row
+    return r, J, lc_row_start, lc_row_end
+
+
+def _apply_huber_reweighting(r, J, lc_row_start, lc_row_end, δ):
+    """
+    IRLS reweighting: for each LC (two consecutive rows), if the 2D residual
+    magnitude exceeds δ, scale both its rows (in r and J) by √w where
+    w = δ / |r_lc|. Returns the number of LCs demoted and their mean weight.
+    """
+    n_demoted, weight_sum = 0, 0.0
+    # Work on r as a mutable copy; J is re-scaled row-wise.
+    r = r.copy()
+    J = J.tolil(copy=True)
+    for k in range(lc_row_start, lc_row_end, 2):
+        mag = float(np.hypot(r[k], r[k + 1]))
+        if mag <= δ:
+            continue
+        w = δ / max(mag, 1e-12)
+        sqw = np.sqrt(w)
+        r[k]     *= sqw
+        r[k + 1] *= sqw
+        J[k]     *= sqw
+        J[k + 1] *= sqw
+        n_demoted += 1
+        weight_sum += w
+    avg_w = (weight_sum / n_demoted) if n_demoted else 1.0
+    return r, J.tocsr(), n_demoted, avg_w
 
 
 def solve_pose_graph_se2(noisy_pos, noisy_yaw, dθ_m, dr_m, loop_closures):
@@ -258,8 +291,14 @@ def solve_pose_graph_se2(noisy_pos, noisy_yaw, dθ_m, dr_m, loop_closures):
           f"{N - 1} odom + {len(loop_closures)} LC + {N - 2} smooth edges")
     prev_r = np.inf
     for it in range(GN_MAX_ITERS):
-        r, J = build_residuals_and_jacobian(x, y, θ, dθ_m, dr_m, loop_closures, anchor)
+        r, J, lc_lo, lc_hi = build_residuals_and_jacobian(
+            x, y, θ, dθ_m, dr_m, loop_closures, anchor,
+        )
         total_r = float(np.linalg.norm(r))
+
+        # Huber IRLS on LC rows
+        r, J, n_dem, avg_w = _apply_huber_reweighting(r, J, lc_lo, lc_hi, HUBER_DELTA_LC)
+
         dx, *_ = scipy.sparse.linalg.lsqr(
             J, -r, atol=1e-10, btol=1e-10, iter_lim=3000,
         )
@@ -278,7 +317,8 @@ def solve_pose_graph_se2(noisy_pos, noisy_yaw, dθ_m, dr_m, loop_closures):
         θ = wrap_rad(θ + step[:, 2])
 
         norm_dx = float(np.linalg.norm(step))
-        print(f"    it {it:2d}: ||r||={total_r:>10.2f}  ||step||={norm_dx:>8.2f}  scale={scale:.3f}")
+        print(f"    it {it:2d}: ||r||={total_r:>10.2f}  ||step||={norm_dx:>8.2f}  "
+              f"scale={scale:.3f}  huber_demoted={n_dem}")
         if abs(prev_r - total_r) < GN_TOL:
             break
         prev_r = total_r
