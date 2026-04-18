@@ -31,7 +31,7 @@ from Library.EnvironmentSimulator import EnvironmentSimulator
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-OUTPUT_DIR   = "PolicyTraining/test_burst_h01"  # path to training output directory
+OUTPUT_DIR   = "PolicyTraining/burst_h03"  # path to training output directory
 SESSION_NAME = None   # None = use first session from config.json
 N_EPISODES   = 300    # number of analysis episodes to run
 SEED         = 0

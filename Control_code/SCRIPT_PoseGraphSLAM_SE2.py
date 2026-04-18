@@ -31,7 +31,7 @@ from Library.SlamCore import load_run, collect_data, build_windows, run_pf, umey
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RUN_DIR             = "PolicyTraining/sonar_h01"
+RUN_DIR             = "PolicyTraining/burst_h03"
 SESSION_NAME        = "sessionB05"
 MAX_STEPS           = 500
 WINDOW_LEN          = 5
