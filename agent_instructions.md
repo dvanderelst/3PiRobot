@@ -8,7 +8,7 @@ MB1360 Datasheet: https://maxbotix.com/products/mb1360
 
 The folder Robot_code/upload contains code that runs on the robot. 
 
-The folder Robot_code/upload/lib/pololu_3pi_2040_robot contains the Pololu library for working with the robot. Other files in the lib folder (Robot_code/upload/lib/) were developed by me to make working with the robot easier. The main.py file is run at boot time and calls the default_algorithm.py code.
+The folder Robot_code/upload/lib/pololu_3pi_2040_robot contains the Pololu library for working with the robot. Other files in the lib folder (Robot_code/upload/lib/) were developed by me to make working with the robot easier. The main.py file is run at boot time and calls the robot_main.py code.
 
 Rules for working with the code in the Robot_code folder:
 

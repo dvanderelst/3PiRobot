@@ -38,22 +38,6 @@ def set_free_run(val_ms, state):
         state['display'].write(4, 'Free: off')
 
 
-def send_command_acknowledgment(bridge, acquire_id, verbose=True):
-    """
-    Send immediate acknowledgment for a received command.
-    
-    Args:
-        bridge: The WiFi bridge instance
-        acquire_id: The command ID to acknowledge
-        verbose: Whether to print debug messages
-    """
-    ack_msg = {'ack_id': acquire_id, 'status': 'received'}
-    bridge.send_data(ack_msg)
-    if verbose:
-        print(f"[Main] Sent ACK for: {acquire_id}")
-
-
-
 def main(selected_ssid=None):
     beeper = beeps.Beeper()
     # ───────────────────── Initialization ─────────────────────
@@ -119,11 +103,15 @@ def main(selected_ssid=None):
         bump_left, bump_right = bump.read()
         if bump_left or bump_right:
             print(f"[Main] Stopping robot because of bumper")
-            drive.stop()
+            aborted_id = drive.abort('bumper')
+            if aborted_id is not None:
+                bridge.send_data({'id': aborted_id, 'status': 'error', 'reason': 'bumper'})
 
         # -- Safety: Auto-stop if no command received for a while
         if ticks_diff(now, last_cmd_received) > 2500:
-            drive.stop()
+            aborted_id = drive.abort('timeout')
+            if aborted_id is not None:
+                bridge.send_data({'id': aborted_id, 'status': 'error', 'reason': 'timeout'})
             last_cmd_received = now
             if verbose: print("[Main] Auto-stop: no commands received for >2.5s")
 
@@ -132,7 +120,7 @@ def main(selected_ssid=None):
             last_cmd_received = ticks_ms()
             if verbose: print(f"[Main] Received: {cmd}")
 
-            cmd_id = cmd.get('id') or cmd.get('acquire_id')
+            cmd_id = cmd.get('id')
             def send_reply(status, **extra):
                 if cmd_id is None:
                     return
@@ -141,8 +129,11 @@ def main(selected_ssid=None):
                 bridge.send_data(resp)
 
             action = cmd.get('action')
+            # Reject commands that would conflict with an in-progress motion
+            if drive.is_busy() and action in ('kinematics', 'step', 'ping', 'listen', 'parameter'):
+                send_reply('error', reason='busy')
             # Drive continuously (teleop-style)
-            if action == 'kinematics':
+            elif action == 'kinematics':
                 display.write(0, 'kinematics')
                 rotation_speed = cmd.get('rotation_speed')
                 linear_speed = cmd.get('linear_speed')
@@ -167,21 +158,20 @@ def main(selected_ssid=None):
                     set_free_run(new_free_ping_period, state)
                 send_reply('ok')
 
-                # Discrete move/turn steps
+                # Discrete move/turn steps (non-blocking; 'done' sent when tick() completes plan)
             elif action == 'step':
                 display.write(0, 'step')
-                rotation_speed = cmd.get('rotation_speed', 0)
-                linear_speed = cmd.get('linear_speed', 0)
                 distance = cmd.get('distance', 0)
                 angle = cmd.get('angle', 0)
-
-                if abs(angle) > 0 and rotation_speed == 0: rotation_speed = 90
-                if abs(distance) > 0 and linear_speed == 0: linear_speed = 0.1
-
-                if abs(angle) > 0: drive.turn_angle(angle, rotation_speed)
-                if abs(angle) > 0 and abs(distance) > 0: time.sleep(0.1)
-                if abs(distance) > 0: drive.drive_distance(distance, linear_speed)
-                send_reply('done')
+                if abs(distance) <= 0 and abs(angle) <= 0:
+                    send_reply('done')  # no-op
+                else:
+                    drive.begin_step(
+                        distance=distance, angle=angle,
+                        linear_speed=cmd.get('linear_speed', 0),
+                        rotation_speed=cmd.get('rotation_speed', 0),
+                        cmd_id=cmd_id,
+                    )
 
                 # Acoustic actions: 'ping' (emit→gate→capture) or 'listen' (capture only)
             elif action in ['ping', 'listen']:
@@ -209,13 +199,15 @@ def main(selected_ssid=None):
                 packed = bytes(buf0) + bytes(buf1) + bytes(buf2)
                 send_reply('ok', data=packed, timing_info=timing_info, mode=action)
 
-            elif action == 'acknowledge':
-                if verbose: print('[Main] Acknowledgment received')
-
             else:
                 send_reply('error', reason='unknown_action', action=action)
 
             if verbose: print(f'[Main] Processed command {cmd}')
+
+        # ── Advance cooperative motion; reply 'done' when a step plan finishes ──
+        done_id = drive.tick()
+        if done_id is not None:
+            bridge.send_data({'id': done_id, 'status': 'done'})
 
         # ── Free-running pulsing (drift-free absolute schedule) ──
         if state['next_due'] is not None and ticks_diff(now, state['next_due']) >= 0:

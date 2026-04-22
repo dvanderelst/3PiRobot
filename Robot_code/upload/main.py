@@ -1,7 +1,7 @@
 import menu
 import testing
 import beeps
-import default_algorithm
+import robot_main
 
 b = beeps.Beeper()
 b.play("robot_start")
@@ -14,7 +14,7 @@ if key_pressed == 'B':
     selected = m.show()
     selected_nr = int(selected[0])
     print(selected, selected_nr)
-    if selected_nr == 0: default_algorithm.main(['batnet'])
+    if selected_nr == 0: robot_main.main(['batnet'])
     if selected_nr == 1: testing.wifi_test()
     if selected_nr == 2: testing.motors_test()
     if selected_nr == 3: testing.bumpers_test()
@@ -22,4 +22,4 @@ if key_pressed == 'B':
 else:
     print('No button pressed, skipping test menu.')
     ssids = ['batnet_robotlab', 'ZyXEL39940']
-    default_algorithm.main(ssids)
+    robot_main.main(ssids)
