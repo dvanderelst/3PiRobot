@@ -203,22 +203,43 @@ def read_path_mask(image_path, ref_rgb=(220, 40, 40), tol=80):  # distance thres
     return center_mask
 
 
-def read_npy_mask(npy_path):
-    mask = np.load(npy_path)
-    return mask
-
-
 def load_arena_masks(data_reader):
+    """Return (wall_x, wall_y, path_mask, meta) for the env folder.
+
+    Wall geometry comes from ``arena_walls.npz`` when present (produced by
+    SCRIPT_BuildArenaGeometry.py from per-camera annotations, avoiding the
+    stitching-ghost problem of the legacy single-image annotation). Falls
+    back to extracting green pixels from ``arena_annotated.png`` otherwise.
+    The path mask is read from ``arena_annotated.png`` when that file exists
+    and is used only by trajectory plotting; if the file is missing the path
+    mask is empty.
+    """
     base_folder = data_reader.base_folder if is_data_reader(data_reader) else str(data_reader)
     base_folder = Path(base_folder)
     if not base_folder.is_dir(): raise ValueError(f"{base_folder} is not a directory")
     env_dir = get_env_dir(data_reader)
-    annotation_path = env_dir / "arena_annotated.png"
-    wall_mask = read_wall_mask(annotation_path)
-    path_mask = read_path_mask(annotation_path)
     meta_path = env_dir / "meta.json"
     meta = json.load(open(meta_path))
-    return wall_mask, path_mask, meta
+
+    walls_npz = env_dir / "arena_walls.npz"
+    annotation_path = env_dir / "arena_annotated.png"
+    if walls_npz.exists():
+        data = np.load(walls_npz)
+        wall_x = data["x_mm"].astype(float)
+        wall_y = data["y_mm"].astype(float)
+    else:
+        wall_mask = read_wall_mask(annotation_path)
+        wall_x, wall_y = mask2coordinates(wall_mask, meta)
+
+    if annotation_path.exists():
+        path_mask = read_path_mask(annotation_path)
+    else:
+        mm_per_px = float(meta["map_mm_per_px"])
+        bounds = meta["arena_bounds_mm"]
+        height_px = int(np.floor((bounds["max_y"] - bounds["min_y"]) / mm_per_px)) + 1
+        width_px = int(np.floor((bounds["max_x"] - bounds["min_x"]) / mm_per_px)) + 1
+        path_mask = np.zeros((height_px, width_px), dtype=bool)
+    return wall_x, wall_y, path_mask, meta
 
 
 def world2robot(x_coords, y_coords, rob_x, rob_y, rob_yaw_deg):
@@ -860,7 +881,7 @@ class DataProcessor:
         self.session = data_reader.base_folder
         self.data_reader = data_reader
         self.env_dir = get_env_dir(data_reader)
-        self.wall_mask, self.path_mask, self.meta = None, None, None
+        self.path_mask, self.meta = None, None
         self.wall_x, self.wall_y = None, None
         self.path_x, self.path_y = None, None
         self.arena_loaded = False
@@ -1059,8 +1080,7 @@ class DataProcessor:
         by load_arena_image() for view extraction.
         """
         try:
-            self.wall_mask, self.path_mask, self.meta = load_arena_masks(self.data_reader)
-            self.wall_x, self.wall_y = mask2coordinates(self.wall_mask, self.meta)
+            self.wall_x, self.wall_y, self.path_mask, self.meta = load_arena_masks(self.data_reader)
             self.path_x, self.path_y = mask2coordinates(self.path_mask, self.meta)
             self.arena_metadata_loaded = True
             print("✅ Arena metadata loaded successfully")

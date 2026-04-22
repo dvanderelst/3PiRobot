@@ -4,6 +4,12 @@ SCRIPT_PoseGraphSLAM_SE2.py
 
 Full SE(2) pose-graph SLAM with realistic body-frame odometry noise.
 
+Runs on either simulated policy rollouts (DATA_SOURCE="sim") or recorded
+real-robot data from PolicyRuns/ (DATA_SOURCE="real"). The SLAM core —
+PF place recognition, LC extraction, SE(2) Gauss-Newton, Umeyama alignment,
+plotting — is identical in both modes; only the ingestion and the odometry
+source differ.
+
 Differences vs. SCRIPT_PoseGraphSLAM.py:
   - Odometry noise is applied in the body frame: per-step rotation and drive
     distance each get Gaussian noise, then integrated through the estimated
@@ -17,10 +23,12 @@ Differences vs. SCRIPT_PoseGraphSLAM.py:
 Output: SpatialInfo/<run>/posegraph_slam_se2.png
 """
 
-import argparse
 import dataclasses
+import glob
+import json
 import os
 
+import dill
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
@@ -30,24 +38,64 @@ import scipy.sparse.linalg
 from Library.SlamCore import load_run, collect_data, build_windows, run_pf, umeyama_align
 
 
-# ── Config ────────────────────────────────────────────────────────────────────
-RUN_DIR             = "PolicyTraining/burst_h03"
-SESSION_NAME        = "sessionB05"
-MAX_STEPS           = 500
+# ── Data source ───────────────────────────────────────────────────────────────
+DATA_SOURCE         = "real"      # "sim" | "real"
+
+# Sim-mode inputs (ignored if DATA_SOURCE == "real")
+SIM_RUN_DIR         = "PolicyTraining/sonar_h01"
+SIM_SESSION_NAME    = "sessionB01"
+SIM_MAX_STEPS       = 500
+
+# Real-mode inputs (ignored if DATA_SOURCE == "sim")
+REAL_RUN_DIR        = "PolicyRuns/session5_h10_arena1_03"
+#   "commanded" uses the robot's own motion commands as dead-reckoning — the
+#       honest test: residual error between commanded and executed motion is
+#       the odometry drift the SLAM must cancel. Real mode only.
+#   "synthetic" applies Gaussian noise to ground truth (same as sim mode).
+#       Useful as a plumbing sanity check; not a real test of real-data SLAM.
+ODOM_SOURCE         = "synthetic"     # "commanded" | "synthetic"
+
+# Feature normalisation for real data (matches the training-config defaults;
+# only affects the PF feature space — change only if the deployed policy
+# used different caps).
+REAL_MAX_DIST_MM    = 2000.0
+REAL_MAX_IID_DB     = 12.0
+REAL_MAX_R1_DEG     = 90.0
+REAL_MAX_R2_DEG     = 90.0
+
+# ── SLAM parameters ───────────────────────────────────────────────────────────
 WINDOW_LEN          = 5
 SEED                = 1
 
-# Realistic body-frame odometry noise
+# Body-frame odometry noise (used by ODOM_SOURCE="synthetic")
 SIGMA_DRIVE_MM      = 10.0        # per-step drive-distance noise (σ)
-SIGMA_ROT_DEG       = 5.0        # per-step rotation noise (σ)
+SIGMA_ROT_DEG       = 3.0        # per-step rotation noise (σ)
 
 # Particle filter
-PF_BETA             = 30.0
-MIN_LC_GAP          = 30
+# PF_BETA: sharpness of the likelihood weighting — higher = more selective matches.
+#   Particle weight ∝ exp(−β · feature_distance). Raise if too many false LCs;
+#   lower if genuine revisits are not recognised.
+PF_BETA             = 2.0
+
+# MIN_LC_GAP: minimum step separation between the two ends of a loop closure.
+#   Prevents the PF from "recognising" a place it just left (features are trivially
+#   similar between consecutive steps). Scale with step size: at 160 mm/step,
+#   10 steps ≈ 1600 mm exclusion zone.
+MIN_LC_GAP          = 10
+
+# LC_WEIGHT_THRESHOLD: minimum PF weight a candidate step must accumulate before
+#   it is accepted as a loop-closure partner. Higher = fewer but more confident LCs.
 LC_WEIGHT_THRESHOLD = 0.35
-LC_DEDUP_BUCKET     = 8
-LC_ODOM_GATE_K      = 3.0        # reject LC if d_odom(s,t) > K · expected_drift
-DRIVE_MM_PER_STEP   = 50.0       # used by the drift-gate bound
+
+# LC_DEDUP_BUCKET: two loop closures that map to the same (s//bucket, t//bucket)
+#   cell are merged into one. Avoids flooding the pose graph with near-duplicate
+#   edges for the same physical revisit. At 160 mm/step, 3 steps ≈ 480 mm cell size.
+LC_DEDUP_BUCKET     = 3
+
+# LC_ODOM_GATE_K: a candidate LC (s→t) is rejected if the odometry distance between
+#   s and t exceeds K × expected_drift(|t−s|). Guards against false matches when
+#   the odometry is still close to ground truth early in the trajectory.
+LC_ODOM_GATE_K      = 1.5
 
 # Pose graph: edge weights (1/σ)
 W_ODOM_POS          = 1.0 / SIGMA_DRIVE_MM                # per-coord
@@ -68,6 +116,12 @@ GN_MAX_STEP_ROT_RAD = 0.3       # cap per-node rotation update per iteration
 # δ is in σ-units of the LC residual (weighted magnitude). Residuals with
 # weighted 2D magnitude > δ get progressively demoted in subsequent GN iters.
 HUBER_DELTA_LC      = 5.0
+
+# Hard outlier pruning after the main GN loop.
+# LCs whose 2D position residual (in mm) exceeds this threshold are removed
+# and a short clean re-solve is run without Huber.
+LC_PRUNE_DIST_MM    = 150.0   # ~3× W_LC_POS σ of 50 mm
+GN_CLEAN_ITERS      = 20
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -120,18 +174,18 @@ def simulate_odometry_se2(positions, yaws_rad, σ_drive, σ_rot_rad, rng):
 # Loop-closure extraction (PF weight threshold only — no odom gate here)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _expected_drift_mm(n_steps):
+def _expected_drift_mm(n_steps, drive_mm):
     """
     Expected position drift between two poses n_steps apart under the
     current (realistic) odometry noise. Drive-noise component scales as
     √n, rotation-noise component scales as n (dominant).
     """
     drive_component = SIGMA_DRIVE_MM * np.sqrt(max(n_steps, 1))
-    rot_component   = n_steps * np.radians(SIGMA_ROT_DEG) * DRIVE_MM_PER_STEP
+    rot_component   = n_steps * np.radians(SIGMA_ROT_DEG) * drive_mm
     return drive_component + rot_component
 
 
-def extract_loop_closures(history, N, noisy_pos=None):
+def extract_loop_closures(history, N, noisy_pos=None, drive_mm_per_step=None):
     seen, closures = set(), []
     rejected_by_gate = 0
     for t, (particles, weights) in enumerate(history):
@@ -148,7 +202,7 @@ def extract_loop_closures(history, N, noisy_pos=None):
 
         if noisy_pos is not None:
             d_odom   = float(np.hypot(*(noisy_pos[s] - noisy_pos[t])))
-            max_drift = LC_ODOM_GATE_K * _expected_drift_mm(abs(t - s))
+            max_drift = LC_ODOM_GATE_K * _expected_drift_mm(abs(t - s), drive_mm=drive_mm_per_step)
             if d_odom > max_drift:
                 rejected_by_gate += 1
                 continue
@@ -161,6 +215,205 @@ def extract_loop_closures(history, N, noisy_pos=None):
     if rejected_by_gate:
         print(f"  {rejected_by_gate} candidate LCs rejected by drift gate")
     return closures
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Real-data ingestion
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _interpolate_gaps(arr: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Linear interpolation through NaN/None gaps, flat-extrapolation at edges."""
+    out = arr.astype(np.float64).copy()
+    if valid.all():
+        return out
+    idx = np.arange(len(out))
+    if not valid.any():
+        raise ValueError("no valid samples to interpolate from")
+    out[~valid] = np.interp(idx[~valid], idx[valid], out[valid])
+    return out
+
+
+def _unwrap_and_interp_yaw_deg(yaws_deg: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Unwrap valid yaw samples, interpolate through gaps, return wrapped degrees."""
+    y = np.asarray(yaws_deg, dtype=np.float64).copy()
+    if not valid.any():
+        raise ValueError("no valid yaw samples")
+    unwrapped = np.degrees(np.unwrap(np.radians(y[valid])))
+    y[valid] = unwrapped
+    y = _interpolate_gaps(y, valid)
+    return ((y + 180.0) % 360.0) - 180.0
+
+
+def _arena_rect_walls(bounds_mm: dict, spacing_mm: float = 20.0) -> np.ndarray:
+    """Densely-sampled rectangle outline of the arena bounds (for plotting only)."""
+    x0, x1 = bounds_mm["min_x"], bounds_mm["max_x"]
+    y0, y1 = bounds_mm["min_y"], bounds_mm["max_y"]
+    xs_h = np.arange(x0, x1 + spacing_mm, spacing_mm)
+    ys_v = np.arange(y0, y1 + spacing_mm, spacing_mm)
+    top    = np.column_stack([xs_h, np.full_like(xs_h, y1)])
+    bottom = np.column_stack([xs_h, np.full_like(xs_h, y0)])
+    left   = np.column_stack([np.full_like(ys_v, x0), ys_v])
+    right  = np.column_stack([np.full_like(ys_v, x1), ys_v])
+    return np.vstack([top, bottom, left, right]).astype(np.float32)
+
+
+def ingest_real(run_dir: str):
+    """
+    Load per-step (GT pose, commanded motion, sonar feature) from a PolicyRuns/
+    directory of dill files. Returns:
+        positions    (N, 2) float64  — GT x,y (gaps interpolated)
+        yaws_rad     (N,)  float64   — GT yaw in radians, wrapped to [-π,π]
+        meas_seq     (N, 4) float32  — [dist, iid, r1, r2] normalised
+        walls        (W, 2) float32  — arena-bounds rectangle for plotting
+        run_name     str
+        commanded    dict with "dθ_rad" (N-1,) and "dr_mm" (N-1,) from motion commands
+    """
+    files = sorted(glob.glob(os.path.join(run_dir, "data*.dill")))
+    if not files:
+        raise FileNotFoundError(f"No data*.dill files in {run_dir}")
+    print(f"  Loading {len(files)} .dill steps from {run_dir}")
+
+    xs, ys, yaws_deg, valid = [], [], [], []
+    drive_mm = []
+    dist_mm, iid_db, r1_deg, r2_deg = [], [], [], []
+
+    for p in files:
+        with open(p, "rb") as f:
+            d = dill.load(f)
+        pos = d["data"]["position"]
+        mot = d["data"]["motion"]
+        sp  = d["data"]["sonar_package"]
+
+        x, y, yaw = pos.get("x"), pos.get("y"), pos.get("yaw_deg")
+        ok = (x is not None and y is not None
+              and yaw is not None and np.isfinite(float(yaw)))
+        xs.append(np.nan if x is None else float(x))
+        ys.append(np.nan if y is None else float(y))
+        yaws_deg.append(np.nan if (yaw is None) else float(yaw))
+        valid.append(ok)
+
+        drive_mm.append(float(mot["drive_mm"]))
+        dist_mm.append(float(sp["corrected_distance"]) * 1000.0)   # m → mm
+        iid_db.append(float(sp["corrected_iid"]))                  # signed
+        r1_deg.append(float(mot["rotate1"]))
+        r2_deg.append(float(mot["rotate2"]))
+
+    valid_arr = np.array(valid, dtype=bool)
+    n_gaps = int((~valid_arr).sum())
+    if n_gaps:
+        print(f"  Interpolating {n_gaps}/{len(files)} GT gaps")
+
+    positions = np.column_stack([
+        _interpolate_gaps(np.asarray(xs, dtype=np.float64), valid_arr),
+        _interpolate_gaps(np.asarray(ys, dtype=np.float64), valid_arr),
+    ])
+    yaws_rad = np.radians(_unwrap_and_interp_yaw_deg(
+        np.asarray(yaws_deg, dtype=np.float64), valid_arr
+    ))
+
+    # Feature vector (matches SlamCore.collect_data sonar branch)
+    d  = np.clip(np.asarray(dist_mm), 0.0, REAL_MAX_DIST_MM) / REAL_MAX_DIST_MM
+    i  = np.asarray(iid_db)  / REAL_MAX_IID_DB
+    l1 = np.asarray(r1_deg)  / REAL_MAX_R1_DEG
+    l2 = np.asarray(r2_deg)  / REAL_MAX_R2_DEG
+    meas_seq = np.column_stack([d, i, l1, l2]).astype(np.float32)
+
+    # Commanded body-frame motion: dθ, dr between consecutive recorded poses.
+    # Per SCRIPT_RunPolicy, pose[k] is read AFTER rotate1[k], BEFORE rotate2[k]
+    # + drive[k].  So the body-frame edge from pose[k] to pose[k+1] is:
+    #     rotate2[k]  →  drive[k]  →  rotate1[k+1]
+    # In the solver's rotate-then-drive convention this collapses to
+    #     dθ[k] = rotate2[k] + rotate1[k+1]
+    #     dr[k] = drive[k]
+    # (the drive's actual heading is yaw[k]+rotate2[k] vs. the solver's
+    #  assumed yaw[k]+dθ[k]; the rotate1[k+1] mis-attribution is small when
+    #  rotations are small per step.)
+    #
+    # Sign flip: per rotation_conventions.md §2, commanded rotations are
+    # CW-positive, but overhead-camera yaw (and the solver's trig) are
+    # CCW-positive. Negate commanded dθ here so both odometry sources feed
+    # the GN solver in a consistent CCW-positive frame.
+    r1 = np.asarray(r1_deg, dtype=np.float64)
+    r2 = np.asarray(r2_deg, dtype=np.float64)
+    dθ_rad = -np.radians(r2[:-1] + r1[1:])
+    dr_mm_ = np.asarray(drive_mm[:-1], dtype=np.float64)
+    commanded = {"dθ_rad": dθ_rad, "dr_mm": dr_mm_}
+
+    # Walls for plotting — prefer arena_walls.npz (new per-camera extraction,
+    # matches the emulator training convention); otherwise fall back to the
+    # arena-bounds rectangle from meta.json.
+    env_dirs = sorted(p for p in os.listdir(run_dir)
+                      if p.startswith("env_") and os.path.isdir(os.path.join(run_dir, p)))
+    walls = None
+    if env_dirs:
+        npz_path = os.path.join(run_dir, env_dirs[0], "arena_walls.npz")
+        if os.path.isfile(npz_path):
+            data = np.load(npz_path)
+            walls = np.column_stack([data["x_mm"], data["y_mm"]]).astype(np.float32)
+    if walls is None:
+        bounds = None
+        if env_dirs:
+            meta_path = os.path.join(run_dir, env_dirs[0], "meta.json")
+            if os.path.isfile(meta_path):
+                with open(meta_path) as f:
+                    bounds = json.load(f).get("arena_bounds_mm")
+        if bounds is None:
+            pad = 500.0
+            bounds = {"min_x": float(positions[:, 0].min() - pad),
+                      "max_x": float(positions[:, 0].max() + pad),
+                      "min_y": float(positions[:, 1].min() - pad),
+                      "max_y": float(positions[:, 1].max() + pad)}
+        walls = _arena_rect_walls(bounds)
+
+    run_name = os.path.basename(run_dir.rstrip("/"))
+    return positions, yaws_rad, meas_seq, walls, run_name, commanded
+
+
+def ingest_sim(run_dir: str, session_name: str, max_steps: int, rng):
+    """Thin wrapper around SlamCore.collect_data for the sim path."""
+    mod, cfg, policy, is_burst = load_run(run_dir)
+    print(f"  Type: {'burst' if is_burst else 'sonar'}")
+    cfg_one = dataclasses.replace(cfg, train_session_names=[session_name])
+    positions, yaws_deg, meas_seq, traj_ids, simulators = collect_data(
+        mod, cfg_one, policy, n_traj=1, max_steps=max_steps, rng=rng,
+    )
+    positions = positions.astype(np.float64)
+    yaws_rad  = np.radians(yaws_deg.astype(np.float64))
+    walls     = next(iter(simulators.values())).arena.walls
+    run_name  = os.path.basename(run_dir.rstrip("/"))
+
+    if is_burst:
+        drive_mm_per_step = cfg.intra_burst_drive_mm + cfg.inter_burst_drive_mm
+    else:
+        drive_mm_per_step = cfg.fixed_drive_mm
+    print(f"  Drive per step: {drive_mm_per_step:.0f} mm")
+
+    return positions, yaws_rad, meas_seq, walls, run_name, drive_mm_per_step
+
+
+def odom_from_commanded(positions, yaws_rad, commanded):
+    """
+    Integrate the robot's commanded motion forward from the first GT pose.
+    Returns (noisy_pos, noisy_yaw, dθ_meas, dr_meas) in the same layout as
+    simulate_odometry_se2. This is the *real* dead-reckoning: any drift
+    between the commanded and the executed motion is the odometry error
+    that the pose graph will try to cancel via loop closures.
+    """
+    N = len(positions)
+    dθ = np.asarray(commanded["dθ_rad"], dtype=np.float64)
+    dr = np.asarray(commanded["dr_mm"],  dtype=np.float64)
+    assert len(dθ) == N - 1 and len(dr) == N - 1
+
+    noisy_pos = np.zeros_like(positions, dtype=np.float64)
+    noisy_yaw = np.zeros(N, dtype=np.float64)
+    noisy_pos[0] = positions[0]
+    noisy_yaw[0] = yaws_rad[0]
+    for k in range(1, N):
+        noisy_yaw[k] = noisy_yaw[k - 1] + dθ[k - 1]
+        h = noisy_yaw[k]
+        noisy_pos[k] = noisy_pos[k - 1] + dr[k - 1] * np.array([np.cos(h), np.sin(h)])
+    noisy_yaw = wrap_rad(noisy_yaw)
+    return noisy_pos, noisy_yaw, dθ, dr
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -325,7 +578,43 @@ def solve_pose_graph_se2(noisy_pos, noisy_yaw, dθ_m, dr_m, loop_closures):
             break
         prev_r = total_r
 
-    return np.stack([x, y], axis=1), θ
+    # ── Hard prune: remove LCs with large final residuals, re-solve clean ─────
+    r_final, _, lc_lo, _ = build_residuals_and_jacobian(
+        x, y, θ, dθ_m, dr_m, loop_closures, anchor,
+    )
+    pruned = []
+    for k, (s_idx, t_idx) in enumerate(loop_closures):
+        row = lc_lo + 3 * k
+        mag = float(np.hypot(r_final[row] / W_LC_POS, r_final[row + 1] / W_LC_POS))
+        if mag <= LC_PRUNE_DIST_MM:
+            pruned.append((s_idx, t_idx))
+    n_pruned = len(loop_closures) - len(pruned)
+    print(f"  Pruned {n_pruned} outlier LCs (>{LC_PRUNE_DIST_MM:.0f} mm residual); "
+          f"{len(pruned)} remain — re-solving clean...")
+    prev_r = np.inf
+    for it in range(GN_CLEAN_ITERS):
+        r, J, _, _ = build_residuals_and_jacobian(
+            x, y, θ, dθ_m, dr_m, pruned, anchor,
+        )
+        total_r = float(np.linalg.norm(r))
+        dx, *_ = scipy.sparse.linalg.lsqr(J, -r, atol=1e-10, btol=1e-10, iter_lim=3000)
+        step = dx.reshape(N, 3)
+        max_xy  = float(np.max(np.hypot(step[:, 0], step[:, 1])))
+        max_rot = float(np.max(np.abs(step[:, 2])))
+        scale   = min(1.0,
+                      GN_MAX_STEP_XY_MM  / max(max_xy,  1e-9),
+                      GN_MAX_STEP_ROT_RAD / max(max_rot, 1e-9))
+        step *= scale
+        x += step[:, 0]
+        y += step[:, 1]
+        θ = wrap_rad(θ + step[:, 2])
+        norm_dx = float(np.linalg.norm(step))
+        print(f"    clean it {it:2d}: ||r||={total_r:>10.2f}  ||step||={norm_dx:>8.2f}  scale={scale:.3f}")
+        if abs(prev_r - total_r) < GN_TOL:
+            break
+        prev_r = total_r
+
+    return np.stack([x, y], axis=1), θ, pruned
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -419,47 +708,53 @@ def plot_results(true_pos, noisy_pos, aligned_pos, loop_closures,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("run_dir",    nargs="?",  default=RUN_DIR)
-    parser.add_argument("--session",              default=SESSION_NAME)
-    parser.add_argument("--beta",     type=float, default=PF_BETA)
-    parser.add_argument("--max_steps", type=int,  default=MAX_STEPS)
-    parser.add_argument("--seed",     type=int,   default=SEED)
-    args = parser.parse_args()
+    rng = np.random.default_rng(SEED)
 
-    rng        = np.random.default_rng(args.seed)
-    run_name   = os.path.basename(args.run_dir.rstrip("/"))
+    # ── Ingest ──────────────────────────────────────────────────────────────
+    if DATA_SOURCE == "sim":
+        run_dir = SIM_RUN_DIR
+        print(f"\nRun: {os.path.basename(run_dir.rstrip('/'))}  (sim)")
+        positions, yaws_rad, meas_seq, walls, run_name, drive_mm_per_step = ingest_sim(
+            run_dir, SIM_SESSION_NAME, SIM_MAX_STEPS, rng,
+        )
+        commanded = None
+    elif DATA_SOURCE == "real":
+        run_dir = REAL_RUN_DIR
+        print(f"\nRun: {os.path.basename(run_dir.rstrip('/'))}  (real)")
+        positions, yaws_rad, meas_seq, walls, run_name, commanded = ingest_real(run_dir)
+        drive_mm_per_step = float(np.mean(commanded["dr_mm"])) if len(commanded["dr_mm"]) else 0.0
+        print(f"  Mean commanded drive per step: {drive_mm_per_step:.0f} mm")
+    else:
+        raise ValueError(f"unknown DATA_SOURCE={DATA_SOURCE!r}")
+
+    N = len(positions)
     output_dir = os.path.join("SpatialInfo", run_name)
     os.makedirs(output_dir, exist_ok=True)
-
-    print(f"\nRun: {run_name}")
-    mod, cfg, policy, is_burst = load_run(args.run_dir)
-    print(f"  Type: {'burst' if is_burst else 'sonar'}")
-
-    cfg_one = dataclasses.replace(cfg, train_session_names=[args.session])
-
-    print(f"\nCollecting 1 long trajectory in {args.session}...")
-    positions, yaws_deg, meas_seq, traj_ids, simulators = collect_data(
-        mod, cfg_one, policy, n_traj=1, max_steps=args.max_steps, rng=rng,
-    )
-    N = len(positions)
-    positions = positions.astype(np.float64)
-    yaws_rad  = np.radians(yaws_deg.astype(np.float64))
     print(f"  Trajectory length: {N} steps")
 
-    print(f"\nSimulating realistic body-frame odometry "
-          f"(σ_drive={SIGMA_DRIVE_MM} mm, σ_rot={SIGMA_ROT_DEG}°)...")
-    noisy_pos, noisy_yaw, dθ_meas, dr_meas = simulate_odometry_se2(
-        positions, yaws_rad, SIGMA_DRIVE_MM, np.radians(SIGMA_ROT_DEG), rng,
-    )
+    # ── Odometry ────────────────────────────────────────────────────────────
+    use_commanded = (DATA_SOURCE == "real" and ODOM_SOURCE == "commanded")
+    if use_commanded:
+        print("\nUsing commanded-motion odometry (real dead-reckoning)...")
+        noisy_pos, noisy_yaw, dθ_meas, dr_meas = odom_from_commanded(
+            positions, yaws_rad, commanded,
+        )
+    else:
+        print(f"\nSimulating body-frame odometry "
+              f"(σ_drive={SIGMA_DRIVE_MM} mm, σ_rot={SIGMA_ROT_DEG}°)...")
+        noisy_pos, noisy_yaw, dθ_meas, dr_meas = simulate_odometry_se2(
+            positions, yaws_rad, SIGMA_DRIVE_MM, np.radians(SIGMA_ROT_DEG), rng,
+        )
 
+    # ── PF place recognition ────────────────────────────────────────────────
     feats = build_windows(meas_seq, np.zeros(N, dtype=np.int32), WINDOW_LEN)
 
-    print(f"\nRunning particle filter (β={args.beta:g})...")
-    history, _ = run_pf(feats, rng, args.beta)
+    print(f"\nRunning particle filter (β={PF_BETA:g})...")
+    history, _ = run_pf(feats, rng, PF_BETA)
 
     print("\nExtracting loop closures...")
-    loop_closures = extract_loop_closures(history, N, noisy_pos=noisy_pos)
+    loop_closures = extract_loop_closures(history, N, noisy_pos=noisy_pos,
+                                          drive_mm_per_step=drive_mm_per_step)
     n_tp = sum(1 for s, t in loop_closures
                if np.hypot(*(positions[s] - positions[t])) < 300)
     n_fp = len(loop_closures) - n_tp
@@ -467,10 +762,15 @@ def main():
     print(f"  Found {len(loop_closures)} LCs  "
           f"(TP {n_tp}, FP {n_fp}, precision {prec:.3f})")
 
+    # ── SE(2) pose-graph solve ──────────────────────────────────────────────
     print("\nSolving SE(2) pose graph (Gauss-Newton)...")
-    relaxed_pos, relaxed_yaw = solve_pose_graph_se2(
+    relaxed_pos, relaxed_yaw, pruned_closures = solve_pose_graph_se2(
         noisy_pos, noisy_yaw, dθ_meas, dr_meas, loop_closures,
     )
+    n_pruned_tp = sum(1 for s, t in pruned_closures
+                      if np.hypot(*(positions[s] - positions[t])) < 300)
+    print(f"  Final LC set: {len(pruned_closures)} "
+          f"(TP {n_pruned_tp}, FP {len(pruned_closures) - n_pruned_tp})")
 
     # Align relaxed map to true via similarity transform (the SLAM map is
     # only recoverable up to rotation / translation / uniform scale).
@@ -491,8 +791,7 @@ def main():
     print(f"  Mean  aligned err     : {errors['aligned'].mean():.0f} mm")
 
     print("\nPlotting...")
-    walls = next(iter(simulators.values())).arena.walls
-    plot_results(positions, noisy_pos, aligned_pos, loop_closures,
+    plot_results(positions, noisy_pos, aligned_pos, pruned_closures,
                  walls, run_name, output_dir, errors)
 
     print("\nDone.")

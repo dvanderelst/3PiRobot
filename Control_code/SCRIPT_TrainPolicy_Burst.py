@@ -5,19 +5,29 @@ SCRIPT_TrainPolicy_Burst.py
 GA-based policy training with burst scanning: the robot takes N_LOOKS sonar
 measurements at each location before committing to a drive direction.
 
-Motivation: bat echolocation calls are often grouped in bursts.  Approximating
-this as N_LOOKS measurements taken at the same position (no inter-call movement)
-gives the GA richer within-step evidence to exploit.  Cross-step memory may help
-refine scan strategy ("I already checked right last step"), but even without
-memory the main question is whether any non-trivial scan pattern emerges.
+Motivation: bat echolocation calls are often grouped in bursts — a rapid volley
+fired while the bat is moving.  The robot takes N_LOOKS sonar measurements per
+step, moving straight (no rotation) by intra_burst_drive_mm between consecutive
+calls.  Look directions are planned simultaneously before any measurement is
+taken; the spread is bounded by max_burst_spread_deg (~30°, matching ~30 ms at
+~400 °/s head-rotation speed).  After the burst the robot rotates by r2 and
+drives inter_burst_drive_mm forward to begin the next step.
 
 Step sequence per step t:
   1. Build input (history only, zeros for current measurements) → MLP →
-       [look1, look2, look3]  (all N_LOOKS angles planned simultaneously, flip_look)
-  2. For k = 1..N_LOOKS: measure at look_yaw_k = original_yaw + look_k_physical
+       [centre, offset_1..offset_{N-1}, r2].  All N_LOOKS look directions are
+       derived as [centre, centre+offset_1, ..., centre+offset_{N-1}].
+       Spread is bounded by max_burst_spread_deg.  (flip_look applied)
+  2. For k = 1..N_LOOKS:
+       a. Measure at look_yaw_k = original_yaw + look_k_physical (at current call position).
+       b. If k < N_LOOKS: robot moves straight intra_burst_drive_mm/(N_LOOKS-1)
+          with no rotation; a wall collision terminates the episode.
   3. Build input (history + all N_LOOKS measurements) → MLP → r2  (flip_drive)
-  4. Execute: body rotates by r2, drives forward fixed_drive_mm
+  4. Execute: body rotates by r2, drives forward inter_burst_drive_mm
        New heading = original_yaw + r2
+
+Look angles in history are stored in network output order (raw[0]=centre,
+raw[1..N-1]=offsets). Slot k corresponds to network output k.
 
 IID symmetry uses two flips per step:
   flip_look  = sign of last step's final IID — used for look angle canonicalisation
@@ -40,6 +50,12 @@ import dataclasses
 import glob
 import json
 import os
+
+# Limit BLAS/OpenMP threads per worker process before numpy is imported.
+# Workers are forked copies of this process, so these take effect in children too.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, dataclass, field
@@ -58,10 +74,10 @@ from Library import CodeLogger
 
 
 # ── Burst size ────────────────────────────────────────────────────────────────
-N_LOOKS = 3   # sonar measurements per step; all taken at same position (virtual)
+N_LOOKS = 2   # sonar measurements per step; spaced intra_burst_drive_mm/(N_LOOKS-1) apart along heading
 
 # ── Condition ─────────────────────────────────────────────────────────────────
-CONDITION = "test"
+CONDITION = "new"
 HISTORY_LENGTHS = [1,3]
 IID_NOISE_DB = 1
 
@@ -94,7 +110,9 @@ class Config:
     max_rotate1_deg: float = 90.0   # max virtual look rotation per look
     max_rotate2_deg: float = 90.0   # max drive rotation
     max_net_rotation_deg: float = 90.0  # hard cap on |r2| per step
-    fixed_drive_mm: float = 100.0
+    max_burst_spread_deg: float = 20.0  # max angular span across N_LOOKS look angles
+    intra_burst_drive_mm: float = 50.0  # total straight distance driven during burst
+    inter_burst_drive_mm: float = 100.0 # straight distance driven after burst
 
     # Input normalisation
     max_dist_mm: float = 2000.0
@@ -115,7 +133,7 @@ class Config:
     collision_discount: float = 0.1
 
     # GA
-    population_size: int = 100
+    population_size: int = 200
     generations: int = 50
     elitism_count: int = 5
     mutation_rate: float = 0.05
@@ -124,7 +142,7 @@ class Config:
     seed: int = 42
 
     # Evaluation
-    episodes_per_policy: int = 240
+    episodes_per_policy: int = 250
     max_steps: int = 75
     max_crash_starts_per_session: int = 20
     crash_backtrack_steps: int = 15
@@ -133,7 +151,7 @@ class Config:
         default_factory=lambda: ["starts_headon", "starts_wall_left", "starts_wall_right"]
     )
     train_session_names: List[str] = field(
-        default_factory=lambda: ["sessionB01","sessionB02","sessionB03","sessionB04","sessionB05"]
+        default_factory=lambda: ["sessionB01", "sessionB02","sessionB03","sessionB04","sessionB05"]
     )
     validation_session_name: Optional[str] = None
     validation_episodes: int = 16
@@ -206,11 +224,10 @@ class MLPPolicy:
         Forward pass. Returns all N_LOOKS+1 outputs as a (N_LOOKS+1,) array in [-1, 1].
         Caller scales: outputs[0..N_LOOKS-1] by max_rotate1_deg, outputs[N_LOOKS] by max_rotate2_deg.
         """
-        v = x.reshape(-1, 1)
         w1, b1, w2, b2, w3, b3 = self.params
-        h = np.tanh(w1 @ v + b1.reshape(-1, 1))
-        h = np.tanh(w2 @ h + b2.reshape(-1, 1))
-        return np.tanh(w3 @ h + b3.reshape(-1, 1)).ravel()
+        h = np.tanh(w1 @ x + b1)
+        h = np.tanh(w2 @ h + b2)
+        return np.tanh(w3 @ h + b3)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -235,7 +252,7 @@ def build_input(
     """
     md  = cfg.max_dist_mm
     mi  = cfg.max_iid_db
-    mr1 = cfg.max_rotate1_deg
+    mr1 = cfg.max_rotate1_deg + cfg.max_burst_spread_deg / 2  # look angles span up to this
     mr2 = cfg.max_rotate2_deg
 
     parts: List[float] = []
@@ -439,19 +456,65 @@ def run_episode(
         flip_look = last_physical_iid < 0.0
         inp  = build_input(history, [], cfg)
         raw  = policy.forward(inp)   # (N_LOOKS+1,) in [-1, 1]
-        look_canonicals = [float(raw[k]) * cfg.max_rotate1_deg for k in range(N_LOOKS)]
-        look_physicals  = [-lc if flip_look else lc for lc in look_canonicals]
+        # output[0] = burst centre; outputs[1..N_LOOKS-1] = offsets within burst
+        center_canonical = float(raw[0]) * cfg.max_rotate1_deg
+        look_canonicals  = (
+            [center_canonical] + [
+                center_canonical + float(raw[k]) * (cfg.max_burst_spread_deg / 2)
+                for k in range(1, N_LOOKS)
+            ]
+        )
+        look_physicals = [-lc if flip_look else lc for lc in look_canonicals]
 
-        # ── Measure at all planned look directions ────────────────────────────
-        last_meas_iid = last_physical_iid
-        for k in range(N_LOOKS):
-            look_yaw = original_yaw + look_physicals[k]
-            dist_mm, physical_iid = _get_measurement(simulator, x, y, look_yaw, cfg)
-            if cfg.iid_noise_db > 0.0:
-                physical_iid += float(rng.normal(0.0, cfg.iid_noise_db))
-            iid_canonical = abs(physical_iid)
-            current_measurements.append((dist_mm, iid_canonical, look_canonicals[k]))
-            last_meas_iid = physical_iid
+        # ── Measure at all planned look directions (with intra-burst movement) ─
+        step_drive     = cfg.intra_burst_drive_mm / (N_LOOKS - 1) if N_LOOKS > 1 else 0.0
+        call_x, call_y = x, y
+        last_meas_iid  = last_physical_iid
+        burst_collided = False
+        _no_overrides  = not cfg.override_emulator_distance and not cfg.override_emulator_iid
+
+        if step_drive == 0.0 and _no_overrides:
+            # Fast path: all looks from same position — one batched CNN forward pass.
+            look_yaws = [original_yaw + look_physicals[k] for k in range(N_LOOKS)]
+            batch = simulator.get_sonar_measurements_batch(
+                [(call_x, call_y, ly) for ly in look_yaws]
+            )
+            for k in range(N_LOOKS):
+                dist_mm     = max(cfg.min_dist_mm, min(float(batch[k]["distance_mm"]), cfg.max_dist_mm))
+                physical_iid = float(batch[k]["iid_db"])
+                if cfg.iid_noise_db > 0.0:
+                    physical_iid += float(rng.normal(0.0, cfg.iid_noise_db))
+                iid_canonical = abs(physical_iid)
+                current_measurements.append((dist_mm, iid_canonical, look_canonicals[k]))
+                last_meas_iid = physical_iid
+        else:
+            for k in range(N_LOOKS):
+                look_yaw = original_yaw + look_physicals[k]
+                dist_mm, physical_iid = _get_measurement(simulator, call_x, call_y, look_yaw, cfg)
+                if cfg.iid_noise_db > 0.0:
+                    physical_iid += float(rng.normal(0.0, cfg.iid_noise_db))
+                iid_canonical = abs(physical_iid)
+                current_measurements.append((dist_mm, iid_canonical, look_canonicals[k]))
+                last_meas_iid = physical_iid
+
+                if k < N_LOOKS - 1 and step_drive > 0.0:
+                    burst_result = simulator.simulate_robot_movement(
+                        call_x, call_y, original_yaw,
+                        [{"rotate1_deg": 0.0, "rotate2_deg": 0.0, "drive_mm": step_drive}],
+                        compute_sonar=False,
+                    )[0]
+                    call_x = float(burst_result["position"]["x"])
+                    call_y = float(burst_result["position"]["y"])
+                    if burst_result["collision"]["drive_blocked"]:
+                        burst_collided = True
+                        break
+
+        if burst_collided:
+            positions.append((call_x, call_y))
+            collided = True
+            break
+
+        x, y = call_x, call_y
 
         # ── Drive phase: second forward pass with current measurements ────────
         flip_drive = last_meas_iid < 0.0
@@ -461,8 +524,8 @@ def run_episode(
         r2_physical  = -r2_canonical if flip_drive else r2_canonical
         r2_physical, r2_canonical = _apply_r2_clamp(r2_physical, flip_drive, cfg)
 
-        # ── Execute movement (body rotates by r2, drives forward) ─────────────
-        action = {"rotate1_deg": 0.0, "rotate2_deg": r2_physical, "drive_mm": cfg.fixed_drive_mm}
+        # ── Execute movement (body rotates by r2, drives inter_burst_drive_mm) ─
+        action = {"rotate1_deg": 0.0, "rotate2_deg": r2_physical, "drive_mm": cfg.inter_burst_drive_mm}
         result = simulator.simulate_robot_movement(
             x, y, original_yaw, [action], compute_sonar=False
         )[0]
@@ -565,8 +628,8 @@ def next_generation(
     rng: np.random.Generator,
 ) -> List[np.ndarray]:
     sorted_idx = np.argsort(fitnesses)[::-1]
-    elites  = [population[i] for i in sorted_idx[:cfg.elitism_count]]
-    new_pop = [e.copy() for e in elites]
+    elites   = [population[i] for i in sorted_idx[:cfg.elitism_count]]
+    new_pop  = [e.copy() for e in elites]
 
     while len(new_pop) < cfg.population_size:
         if len(elites) >= 2 and rng.random() < cfg.crossover_prob:
@@ -595,7 +658,9 @@ def save_policy(policy: MLPPolicy, fitness: float, generation: int, path: str) -
         "max_rotate1_deg":    policy.cfg.max_rotate1_deg,
         "max_rotate2_deg":    policy.cfg.max_rotate2_deg,
         "max_net_rotation_deg": policy.cfg.max_net_rotation_deg,
-        "fixed_drive_mm":     policy.cfg.fixed_drive_mm,
+        "max_burst_spread_deg": policy.cfg.max_burst_spread_deg,
+        "intra_burst_drive_mm": policy.cfg.intra_burst_drive_mm,
+        "inter_burst_drive_mm": policy.cfg.inter_burst_drive_mm,
         "max_dist_mm":        policy.cfg.max_dist_mm,
         "max_iid_db":         policy.cfg.max_iid_db,
         "genome_size":        policy.genome_size(),
@@ -677,6 +742,7 @@ a:hover { text-decoration: underline; }
 def _bb_step_table(steps: List[Dict]) -> str:
     """Render step list as HTML table.  Each step has N_LOOKS look sub-rows + 1 drive row."""
     look_headers = "".join(
+        f"<th>x_{k+1}(mm)</th><th>y_{k+1}(mm)</th>"
         f"<th>r1_{k+1}(&deg;)</th><th>dist_{k+1}(mm)</th><th>iid_{k+1}(dB)</th>"
         for k in range(N_LOOKS)
     )
@@ -692,6 +758,8 @@ def _bb_step_table(steps: List[Dict]) -> str:
     for i, s in enumerate(steps):
         cls = ' class="crash"' if i == len(steps) - 1 else ""
         look_cells = "".join(
+            f'<td>{lk["call_x_mm"]:.0f}</td>'
+            f'<td>{lk["call_y_mm"]:.0f}</td>'
             f'<td>{lk["r1_deg"]:+.1f}</td>'
             f'<td>{lk["emu_dist_mm"]:.1f}</td>'
             f'<td>{lk["emu_iid_db"]:+.2f}</td>'
@@ -868,7 +936,9 @@ def save_hof(hof: List[HofEntry], cfg: Config, hof_dir: str) -> None:
             "max_rotate1_deg":    pol.cfg.max_rotate1_deg,
             "max_rotate2_deg":    pol.cfg.max_rotate2_deg,
             "max_net_rotation_deg": pol.cfg.max_net_rotation_deg,
-            "fixed_drive_mm":     pol.cfg.fixed_drive_mm,
+            "max_burst_spread_deg": pol.cfg.max_burst_spread_deg,
+            "intra_burst_drive_mm": pol.cfg.intra_burst_drive_mm,
+            "inter_burst_drive_mm": pol.cfg.inter_burst_drive_mm,
             "max_dist_mm":        pol.cfg.max_dist_mm,
             "max_iid_db":         pol.cfg.max_iid_db,
             "genome_size":        pol.genome_size(),
@@ -939,33 +1009,66 @@ def record_trajectories(
             flip_look = last_physical_iid < 0.0
             inp  = build_input(history, [], cfg)
             raw  = policy.forward(inp)
-            look_canonicals = [float(raw[k]) * cfg.max_rotate1_deg for k in range(N_LOOKS)]
-            look_physicals  = [-lc if flip_look else lc for lc in look_canonicals]
+            center_canonical = float(raw[0]) * cfg.max_rotate1_deg
+            look_canonicals  = (
+                [center_canonical] + [
+                    center_canonical + float(raw[k]) * (cfg.max_burst_spread_deg / 2)
+                    for k in range(1, N_LOOKS)
+                ]
+            )
+            look_physicals = [-lc if flip_look else lc for lc in look_canonicals]
 
-            # ── Measure at all planned look directions ────────────────────────
-            last_meas_iid = last_physical_iid
+            # ── Measure at all planned look directions (with intra-burst movement) ─
+            step_drive     = cfg.intra_burst_drive_mm / (N_LOOKS - 1) if N_LOOKS > 1 else 0.0
+            call_x, call_y = x, y
+            last_meas_iid  = last_physical_iid
+            burst_collided = False
+
             for k in range(N_LOOKS):
                 look_yaw = original_yaw + look_physicals[k]
                 step_look_yaws.append(look_yaw)
 
-                dist_mm, physical_iid = _get_measurement(simulator, x, y, look_yaw, cfg)
+                dist_mm, physical_iid = _get_measurement(simulator, call_x, call_y, look_yaw, cfg)
                 emu_dist = dist_mm
                 emu_iid  = physical_iid
                 if cfg.iid_noise_db > 0.0:
                     physical_iid += float(rng.normal(0.0, cfg.iid_noise_db))
 
-                geo_dist, geo_iid = _get_measurement(simulator, x, y, look_yaw, geo_cfg)
+                geo_dist, geo_iid = _get_measurement(simulator, call_x, call_y, look_yaw, geo_cfg)
                 iid_canonical = abs(physical_iid)
                 current_measurements.append((dist_mm, iid_canonical, look_canonicals[k]))
                 last_meas_iid = physical_iid
 
                 step_looks.append({
+                    "call_x_mm":   round(float(call_x), 1),
+                    "call_y_mm":   round(float(call_y), 1),
                     "r1_deg":      round(look_physicals[k], 1),
                     "emu_dist_mm": round(emu_dist, 1),
                     "emu_iid_db":  round(emu_iid, 2),
                     "geo_dist_mm": round(geo_dist, 1),
                     "geo_iid_db":  round(geo_iid, 2),
                 })
+
+                if k < N_LOOKS - 1 and step_drive > 0.0:
+                    burst_result = simulator.simulate_robot_movement(
+                        call_x, call_y, original_yaw,
+                        [{"rotate1_deg": 0.0, "rotate2_deg": 0.0, "drive_mm": step_drive}],
+                        compute_sonar=False,
+                    )[0]
+                    call_x = float(burst_result["position"]["x"])
+                    call_y = float(burst_result["position"]["y"])
+                    if burst_result["collision"]["drive_blocked"]:
+                        burst_collided = True
+                        break
+
+            if burst_collided:
+                positions.append((call_x, call_y))
+                body_yaws.append(original_yaw)
+                look_yaws_per_step.append(step_look_yaws)
+                collided = True
+                break
+
+            x, y = call_x, call_y
 
             # ── Drive phase ───────────────────────────────────────────────────
             flip_drive = last_meas_iid < 0.0
@@ -975,7 +1078,7 @@ def record_trajectories(
             r2_physical  = -r2_canonical if flip_drive else r2_canonical
             r2_physical, r2_canonical = _apply_r2_clamp(r2_physical, flip_drive, cfg)
 
-            action = {"rotate1_deg": 0.0, "rotate2_deg": r2_physical, "drive_mm": cfg.fixed_drive_mm}
+            action = {"rotate1_deg": 0.0, "rotate2_deg": r2_physical, "drive_mm": cfg.inter_burst_drive_mm}
             result = simulator.simulate_robot_movement(x, y, original_yaw, [action], compute_sonar=False)[0]
             x   = float(result["position"]["x"])
             y   = float(result["position"]["y"])
@@ -1232,7 +1335,7 @@ def train(cfg: Config) -> None:
 
     executor = None
     if cfg.parallel_eval:
-        n_workers = cfg.num_workers or os.cpu_count()
+        n_workers = cfg.num_workers or max(1, (os.cpu_count() or 2) - 2)
         executor  = ProcessPoolExecutor(
             max_workers=n_workers,
             initializer=_init_worker,

@@ -50,9 +50,9 @@ from Library import CodeLogger
 
 
 # ── Condition ────────────────────────────────────────────────────────────────────
-CONDITION = "test"          # base name; output goes to PolicyTraining/<CONDITION>_hNN/
-HISTORY_LENGTHS = [10]  # train one run per history length, in order
-IID_NOISE_DB = 1         # Gaussian noise std injected into emulator IID during training (dB); 0 = disabled
+CONDITION = "test2"          # base name; output goes to PolicyTraining/<CONDITION>_hNN/
+HISTORY_LENGTHS = [1,3]  # train one run per history length, in order
+IID_NOISE_DB = 3         # Gaussian noise std injected into emulator IID during training (dB); 0 = disabled
 
 # ── Pushover ─────────────────────────────────────────────────────────────────────
 try:
@@ -85,7 +85,7 @@ class Config:
     max_rotate1_deg: float = 90.0
     max_rotate2_deg: float = 90.0
     max_net_rotation_deg: float = 90.0  # hard cap on |rotate1 + rotate2| per step
-    fixed_drive_mm: float = 100.0
+    fixed_drive_mm: float = 150.0
 
     # Input normalisation constants
     max_dist_mm: float = 2000.0     # distances divided by this before entering network
@@ -115,7 +115,7 @@ class Config:
     seed: int = 42
 
     # Evaluation
-    episodes_per_policy: int = 50
+    episodes_per_policy: int = 250
     max_steps: int = 75
     max_crash_starts_per_session: int = 20  # cap on the per-session crash-start pool
     crash_backtrack_steps: int = 15         # how many steps before the crash to place the backtrack start
@@ -124,7 +124,7 @@ class Config:
         default_factory=lambda: ["starts_headon", "starts_wall_left", "starts_wall_right"] #"starts_wall_left", "starts_wall_right",
     )
     train_session_names: List[str] = field(
-        default_factory=lambda: ["sessionB02"] #"sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"
+        default_factory=lambda: ["sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"]
     )
     validation_session_name: Optional[str] = None
     validation_episodes: int = 16

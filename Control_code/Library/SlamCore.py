@@ -97,15 +97,19 @@ def collect_data(mod, cfg, policy, n_traj: int, max_steps: int, rng):
                 pos = traj["positions"][step["step"]]
                 yaw = traj["body_yaws"][step["step"]]
                 if "looks" in step:   # burst
-                    raw = [(lk["emu_dist_mm"], lk["emu_iid_db"], lk["r1_deg"])
-                           for lk in step["looks"]]
+                    raw = sorted(
+                        [(lk["emu_dist_mm"], lk["emu_iid_db"], lk["r1_deg"])
+                         for lk in step["looks"]],
+                        key=lambda t: t[2],  # sort by look angle: leftmost first
+                    )
                 else:                 # sonar
                     raw = [(step["emu_dist_mm"], step["emu_iid_db"], step["rotate1_deg"])]
                 meas = []
+                max_r1 = cfg.max_rotate1_deg + getattr(cfg, "max_burst_spread_deg", 0.0) / 2
                 for d, i, r1 in raw:
                     meas.append(d / cfg.max_dist_mm)
                     meas.append(i / cfg.max_iid_db)
-                    meas.append(r1 / cfg.max_rotate1_deg)
+                    meas.append(r1 / max_r1)
                 meas.append(step["rotate2_deg"] / cfg.max_rotate2_deg)
                 all_pos.append(pos)
                 all_yaw.append(yaw)

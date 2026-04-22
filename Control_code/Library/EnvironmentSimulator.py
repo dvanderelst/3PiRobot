@@ -351,6 +351,13 @@ class EnvironmentSimulator:
             blocked = (not self._is_in_bounds(start_x, start_y))
             return float(start_x), float(start_y), blocked
 
+        # Fast path: if the full segment is clear and the endpoint is in bounds,
+        # skip the step-by-step march (the common case — no collision).
+        if (self._is_in_bounds(target_x, target_y) and
+                not self._segment_collides_with_walls(
+                    start_x, start_y, target_x, target_y, self.robot_radius_mm)):
+            return float(target_x), float(target_y), False
+
         n_steps = max(1, int(np.ceil(travel / self.collision_step_mm)))
         prev_x, prev_y = float(start_x), float(start_y)
         blocked = False

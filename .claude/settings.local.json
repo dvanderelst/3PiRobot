@@ -9,7 +9,16 @@
       "Bash(/home/dieter/miniforge3/envs/default/bin/python3 -c \":*)",
       "Bash(/home/dieter/miniforge3/envs/default/bin/python3 -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nfrom Library.DataStorage import DataReader\nfrom Library import Settings\ndr = DataReader\\('policy_memory06'\\)\nfiles = dr.get_all_filenames\\(\\)\nprint\\('Number of files:', len\\(files\\)\\)\nprint\\('First 3:', files[:3]\\)\nprint\\('Last 3:', files[-3:]\\)\n\")",
       "Bash(/home/dieter/miniforge3/envs/default/bin/python3 -c \"\nfrom Library import Settings\nprint\\('data_folder:', Settings.data_folder\\)\nimport os\nfolder = os.path.join\\(Settings.data_folder, 'policy_memory06'\\)\nprint\\('full path:', folder\\)\nprint\\('exists:', os.path.exists\\(folder\\)\\)\nfiles = [f for f in os.listdir\\(folder\\) if f.startswith\\('data'\\) and f.endswith\\('.dill'\\)]\nprint\\('file count:', len\\(files\\)\\)\n\")",
-      "Bash(/home/dieter/miniforge3/envs/default/bin/python3 -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nfrom Library.DataStorage import DataReader\ndr = DataReader\\('policy_memory05c'\\)\nprint\\('policy_memory05c files:', len\\(dr.get_all_filenames\\(\\)\\)\\)\n\" 2>&1)"
+      "Bash(/home/dieter/miniforge3/envs/default/bin/python3 -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nfrom Library.DataStorage import DataReader\ndr = DataReader\\('policy_memory05c'\\)\nprint\\('policy_memory05c files:', len\\(dr.get_all_filenames\\(\\)\\)\\)\n\" 2>&1)",
+      "Bash(python -c \"from Library.DataProcessor import load_arena_masks; print\\('import ok'\\)\")",
+      "Bash(python -c \"from LorexLib.Environment import capture_environment_layout; print\\('env import ok'\\)\")",
+      "Bash(/home/dieter/Dropbox/PythonRepos/3PiRobot/Control_code/.venv/bin/python *)",
+      "WebFetch(domain:www.osc.edu)",
+      "WebSearch",
+      "Read(//proc/**)"
+    ],
+    "additionalDirectories": [
+      "/home/dieter/Dropbox/PythonRepos/PyLorex"
     ]
   }
 }
