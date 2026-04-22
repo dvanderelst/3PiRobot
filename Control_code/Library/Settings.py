@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-
+from dataclasses import dataclass, field
 calibration_folder = 'Library/RobotCalibration'
 calibration_plot_folder = 'Library/RobotCalibration/Plots'
 data_folder = 'TrainingData'
@@ -28,8 +27,10 @@ class ClientConfig:
     baseline_shift_right_m: int = 0.05   # in raw distance, meters
     baseline_shift_up_a: int = 5000   # in amplitude units
     integration_window_m: int = 0.17       # in raw distance, meters
+    rotation_desired: list = field(default_factory=lambda: [-40, -30, -20, -10, 0, 10, 20, 30, 40])
+    rotation_obtained: list = field(default_factory=lambda: [-40, -30, -20, -10, 0, 10, 20, 30, 40])
 
-client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101", aruco_id=0)
+client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101", aruco_id=0, rotation_obtained=[-40,-29,-20,-10,0,12.5,21,30,40])
 client2 = ClientConfig(robot_name="Robot02", ip="192.168.0.102", aruco_id=1)
 client3 = ClientConfig(robot_name="Robot03", ip="192.168.0.103", aruco_id=2)
 client_list = [client1, client2, client3]

@@ -14,6 +14,24 @@ from Library import Logging
 from rich.console import Console
 from rich.table import Table
 
+def get_correction(target, desired, obtained):
+    """
+    Return the extra rotation to add to your command so the robot actually
+    rotates by `target` degrees.
+
+    Command to send = target + get_correction(target).
+
+    Interpolates linearly inside the calibrated range; outside, np.interp
+    clamps to the nearest endpoint's correction.
+    """
+    desired  = np.asarray(desired,  dtype=float)
+    obtained = np.asarray(obtained, dtype=float)
+    order = np.argsort(obtained)                      # ensure monotonic x
+    # Invert the map: given a desired *actual* rotation, find the command
+    # that (per the calibration) produces it.
+    command = np.interp(target, obtained[order], desired[order])
+    return command - target
+
 def print_robot_timing(package, compare_ID=None):
     console = Console()
     acquire_id = package.get('acquire_id', None)
@@ -85,31 +103,11 @@ class Client:
             got += rcvd
         return mv, wait_s, read_s
 
-    def _send_dict(self, dct, require_ack=False):
-        """
-        Prefix-frame a msgpack dict and send it.
-        
-        Args:
-            dct: Dictionary to send
-            require_ack: If True, wait for acknowledgment before returning
-            
-        Returns:
-            str: The acquire_id if require_ack=True and ACK received
-            None: If require_ack=False or no ACK expected
-        """
+    def _send_dict(self, dct):
+        """Prefix-frame a msgpack dict and send it."""
         packed = msgpack.packb(dct)
         prefix = struct.pack(">H", len(packed))
         self.sock.sendall(prefix + packed)
-        
-        # If acknowledgment is required, wait for it
-        if require_ack:
-            acquire_id = dct.get('acquire_id')
-            if acquire_id:
-                ack = self._wait_for_acknowledgment(acquire_id)
-                if not ack:
-                    raise TimeoutError(f"No acknowledgment received for command {acquire_id}")
-                return acquire_id
-        return None
 
     def _wait_for_message(self, predicate, timeout=10.0):
         end_time = time.time() + timeout
@@ -208,6 +206,7 @@ class Client:
             wait_for_response=True,
             timeout=5.0
         )
+        time.sleep(0.25)
         msg = f"Changed settings in {time.time() - start:.4f}s"
         self.print_message(msg, category='INFO')
 
@@ -217,7 +216,12 @@ class Client:
 
     def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0, wait_for_completion=True, timeout=30.0, post_delay_s=0.05):
         start = time.time()
-        angle = int(angle)
+        rotation_desired = self.configuration.rotation_desired
+        rotation_obtained = self.configuration.rotation_obtained
+        correction = get_correction(target=angle, desired=rotation_desired, obtained=rotation_obtained)
+        print(angle)
+        print(correction)
+        angle = int(angle + correction)
         params = {'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
         if wait_for_completion:
             resp = self._send_command('step', params=params, wait_for_response=True, timeout=timeout, max_retries=1)

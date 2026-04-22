@@ -8,9 +8,6 @@ ssid_list = {
     'ZyXEL39940': passwords.password2
 }
 
-split_char = ','
-end_char = '*'
-
 tx_pin = 4
 rx_pin = 5
 en_pin = 27
@@ -28,3 +25,6 @@ trigger_emitter = 22
 # These settings depend on the limits of the sonar sensor
 
 measure_guard_ms = 150 #wait at least this long after last free-run pulse before measuring in ping mode
+sonar_timeout_us = 100_000      # max wait for emission detection in ping mode
+post_emit_settle_us = 20        # settling delay after emission detected
+emit_pulse_us = 75              # emitter trigger pulse width

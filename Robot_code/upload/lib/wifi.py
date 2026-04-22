@@ -264,8 +264,7 @@ class WifiMgr:
         self.esp.ensure_clean_sta()
         found_all = []
         for attempt in range(retries + 1):
-            if self.log.level >= 1:
-                print(f"[ESP] CWLAP attempt {attempt+1}/{retries+1}")
+            self.log.info(f"[ESP] CWLAP attempt {attempt+1}/{retries+1}")
             self.io.write_cmd('AT+CWLAP')
             start = time.ticks_ms()
             buf = b""
@@ -275,8 +274,7 @@ class WifiMgr:
                     if b"\r\nOK\r\n" in buf or b"\r\nERROR\r\n" in buf:
                         break
                 if time.ticks_diff(time.ticks_ms(), start) > timeout_ms:
-                    if self.log.level >= 1:
-                        print("[ESP] CWLAP timeout (unfiltered)")
+                    self.log.info("[ESP] CWLAP timeout (unfiltered)")
                     break
             try:
                 txt = buf.decode()
@@ -296,8 +294,7 @@ class WifiMgr:
 
     def connect_wifi(self, ssid, password, join_timeout_ms=JOIN_TIMEOUT_MS):
         self.esp.ensure_clean_sta()
-        if self.log.level >= 1:
-            print(f"[WiFi] Joining {ssid} ...")
+        self.log.info(f"[WiFi] Joining {ssid} ...")
         # Proper CRLF
         self.io.write(('AT+CWJAP="%s","%s"\r\n' % (ssid, password)).encode())
         start = time.ticks_ms()
@@ -311,15 +308,13 @@ class WifiMgr:
                 if b"\r\nOK\r\n" in buf:
                     return self.esp.send_cmd('AT+CIFSR', wait_s=0.3)
                 if b"\r\nFAIL\r\n" in buf or b"\r\nERROR\r\n" in buf:
-                    if self.log.level >= 1:
-                        try:
-                            print("[WiFi] Join failed:\n", buf.decode())
-                        except Exception:
-                            print("[WiFi] Join failed (binary len:", len(buf), ")")
+                    try:
+                        self.log.info("[WiFi] Join failed:\n", buf.decode())
+                    except Exception:
+                        self.log.info("[WiFi] Join failed (binary len:", len(buf), ")")
                     return "ERROR"
             time.sleep_ms(20)
-        if self.log.level >= 1:
-            print("[WiFi] Join timeout")
+        self.log.info("[WiFi] Join timeout")
         return "ERROR"
 
     def start_server(self, port=1234):
@@ -507,8 +502,9 @@ class WifiServer:
         header, rest = chunk.split(b":", 1)
         try:
             length = int(header.split(b",")[-1])
-        except Exception:
-            self._buf = b""  # Clear buffer on parse error
+        except Exception as e:
+            self.log.debug("[ESP] IPD header parse error; clearing buffer:", e)
+            self._buf = b""
             return None
 
         # Check if we have complete message
@@ -565,22 +561,23 @@ class WifiServer:
 # -------------------- Module-level convenience --------------------
 def setup_wifi(ssids=None):
     """Return (bridge, ip, ssid) or (None, None, None) on failure."""
-    print("[WiFi] Preparing module...")
     bridge = WifiServer()
+    log = bridge.log
+    log.info("[WiFi] Preparing module...")
     bridge.setup()
 
     # 0) If caller provided explicit SSIDs, try direct joins first
     if ssids:
         for s in ssids:
             if s in settings.ssid_list:
-                print(f"[WiFi] Connecting to preset '{s}' (direct, no scan)...")
+                log.info(f"[WiFi] Connecting to preset '{s}' (direct, no scan)...")
                 join_response = bridge.connect_wifi(s, settings.ssid_list[s])
                 if "ERROR" not in join_response:
-                    print(f"[WiFi] [OK] Connected to '{s}'")
-                    print("        → IP info:")
-                    print(join_response)
+                    log.info(f"[WiFi] [OK] Connected to '{s}'")
+                    log.info("        → IP info:")
+                    log.info(join_response)
                     ip = bridge.get_ip()
-                    print('[WiFi] IP address:', ip)
+                    log.info('[WiFi] IP address:', ip)
                     bridge.start_server(1234)
                     return bridge, ip, s
 
@@ -588,32 +585,31 @@ def setup_wifi(ssids=None):
     nets = []
     for attempt in range(2):
         nets = bridge.scan_presets(ssids=ssids)
-        print("[WiFi] Available networks:", nets)
+        log.info("[WiFi] Available networks:", nets)
         if nets:
             break
         if attempt == 0:
-            if getattr(settings, 'verbose', 1):
-                print("[WiFi] Rescanning after short pause...")
+            log.info("[WiFi] Rescanning after short pause...")
             time.sleep(0.5)
 
     if not nets:
-        print("[WiFi] [FAIL] No known networks found")
+        log.info("[WiFi] [FAIL] No known networks found")
         return None, None, None
 
     selected_ssid = nets[0]
-    print("[WiFi] Connecting...")
+    log.info("[WiFi] Connecting...")
     password = settings.ssid_list[selected_ssid]
     join_response = bridge.connect_wifi(selected_ssid, password)
     if "ERROR" in join_response:
-        print(f"[WiFi] [FAIL] Could not join network '{selected_ssid}'")
+        log.info(f"[WiFi] [FAIL] Could not join network '{selected_ssid}'")
         return None, None, None
 
-    print(f"[WiFi] [OK] Connected to '{selected_ssid}'")
-    print("        → IP info:")
-    print(join_response)
+    log.info(f"[WiFi] [OK] Connected to '{selected_ssid}'")
+    log.info("        → IP info:")
+    log.info(join_response)
 
     ip = bridge.get_ip()
-    print('[WiFi] IP address:', ip)
+    log.info('[WiFi] IP address:', ip)
 
     bridge.start_server(1234)
     return bridge, ip, selected_ssid

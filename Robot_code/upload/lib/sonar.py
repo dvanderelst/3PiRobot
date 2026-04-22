@@ -29,8 +29,8 @@ class Sonar:
 
         self.tgr_emit.value(0); self.tgr_recv1.value(0); self.tgr_recv2.value(0)
 
-        self.timeout_us = 100_000
-        self.post_emit_settle_us = 20
+        self.timeout_us = settings.sonar_timeout_us
+        self.post_emit_settle_us = settings.post_emit_settle_us
 
         self.timing_info = {}
 
@@ -40,7 +40,7 @@ class Sonar:
         self.tgr_recv1.value(0)
         self.tgr_recv2.value(0)
         self.tgr_emit.value(execute)
-        time.sleep_us(75)
+        time.sleep_us(settings.emit_pulse_us)
         self.tgr_emit.value(0)
         if not execute or not wait_for_detection: return False
         start = now()

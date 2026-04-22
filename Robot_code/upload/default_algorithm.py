@@ -122,11 +122,10 @@ def main(selected_ssid=None):
             drive.stop()
 
         # -- Safety: Auto-stop if no command received for a while
-        now = ticks_ms()
         if ticks_diff(now, last_cmd_received) > 2500:
-            last_cmd_received = ticks_ms()
-            print(f"[Main] Received command: {cmd}")  # Always print for debugging
-            if verbose: print(f"[Main] Received: {cmd}")
+            drive.stop()
+            last_cmd_received = now
+            if verbose: print("[Main] Auto-stop: no commands received for >2.5s")
 
         # ── Command Processing ──
         if cmd:
@@ -212,6 +211,9 @@ def main(selected_ssid=None):
 
             elif action == 'acknowledge':
                 if verbose: print('[Main] Acknowledgment received')
+
+            else:
+                send_reply('error', reason='unknown_action', action=action)
 
             if verbose: print(f'[Main] Processed command {cmd}')
 

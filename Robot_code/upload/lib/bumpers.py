@@ -8,17 +8,21 @@ class Bumpers:
         self.leds = leds
         self.left_threshold = 250
         self.right_threshold = 250
+        self._last_left = None
+        self._last_right = None
 
-    def read(self,update_leds=True):
+    def read(self, update_leds=True):
         """Read the bump sensors and return a (left, right) tuple of booleans."""
         values = self._bump.read()
-        left_value = values[0]
-        right_value = values[1]
-        bump_left = left_value > self.left_threshold
-        bump_right = right_value > self.right_threshold
+        bump_left = values[0] > self.left_threshold
+        bump_right = values[1] > self.right_threshold
         if update_leds and self.leds is not None:
-            self.leds.set(5, 'red') if bump_left else self.leds.set(5, 'black')
-            self.leds.set(3, 'red') if bump_right else self.leds.set(3, 'black')
+            if bump_left != self._last_left:
+                self.leds.set(5, 'red' if bump_left else 'black')
+            if bump_right != self._last_right:
+                self.leds.set(3, 'red' if bump_right else 'black')
+        self._last_left = bump_left
+        self._last_right = bump_right
         return bump_left, bump_right
 
     def left(self):
