@@ -24,7 +24,6 @@ import os
 import time
 
 import numpy as np
-from scipy._lib.pyprima.common import history
 
 from Library import Client
 from Library import CodeLogger
