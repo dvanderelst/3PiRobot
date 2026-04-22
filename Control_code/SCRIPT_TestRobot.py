@@ -20,3 +20,4 @@ client.change_free_ping_period(0) #To ensure no free pings are done during calib
 
 robot_name = client.configuration.robot_name
 client.step(angle=int(angle))
+client.read_and_process(plot=True)

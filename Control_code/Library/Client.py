@@ -11,6 +11,8 @@ from Library import AcousticProcessing
 from Library import Utils
 from Library import FileOperations
 from Library import Logging
+
+
 def get_correction(target, desired, obtained):
     """
     Return the extra rotation to add to your command so the robot actually
@@ -187,8 +189,6 @@ class Client:
         rotation_desired = self.configuration.rotation_desired
         rotation_obtained = self.configuration.rotation_obtained
         correction = get_correction(target=angle, desired=rotation_desired, obtained=rotation_obtained)
-        print(angle)
-        print(correction)
         angle = int(angle + correction)
         params = {'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
         if wait_for_completion:
