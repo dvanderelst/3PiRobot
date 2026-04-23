@@ -2,6 +2,7 @@ from pololu_3pi_2040_robot import robot
 import math, time, settings
 
 _INTER_PHASE_DELAY_MS = 100  # pause between turn and drive within a step
+_PHASE_TIMEOUT_MS     = 5000 # max ms for a single turn or drive phase before force-stop
 
 
 class Motors:
@@ -104,7 +105,7 @@ class Motors:
             start_l, start_r = self.encoders.get_counts()
             sign = self._sgn(angle_deg)
             self._set_pwm(sign * wheel_mps, -sign * wheel_mps)
-            self._active = {'kind': 'turn', 'start_l': start_l, 'start_r': start_r, 'counts': counts}
+            self._active = {'kind': 'turn', 'start_l': start_l, 'start_r': start_r, 'counts': counts, 'start_ms': time.ticks_ms()}
         elif kind == 'drive':
             meters, speed = a, b
             speed = min(abs(speed), self.max_wheel_mps * 0.8)
@@ -112,7 +113,7 @@ class Motors:
             start_l, start_r = self.encoders.get_counts()
             direction = self._sgn(meters)
             self._set_pwm(direction * speed, direction * speed)
-            self._active = {'kind': 'drive', 'start_l': start_l, 'start_r': start_r, 'counts': counts}
+            self._active = {'kind': 'drive', 'start_l': start_l, 'start_r': start_r, 'counts': counts, 'start_ms': time.ticks_ms()}
         elif kind == 'wait':
             duration_ms = a
             self._active = {'kind': 'wait', 'end_ms': time.ticks_add(time.ticks_ms(), duration_ms)}
@@ -131,10 +132,16 @@ class Motors:
             cur_l, cur_r = self.encoders.get_counts()
             if abs(cur_l - a['start_l']) >= a['counts'] or abs(cur_r - a['start_r']) >= a['counts']:
                 self.stop(); done = True
+            elif time.ticks_diff(time.ticks_ms(), a['start_ms']) > _PHASE_TIMEOUT_MS:
+                print('[Motors] Turn phase timed out — stopping')
+                self.stop(); done = True
         elif kind == 'drive':
             cur_l, cur_r = self.encoders.get_counts()
             moved = ((cur_l - a['start_l']) + (cur_r - a['start_r'])) / 2
             if moved >= a['counts']:
+                self.stop(); done = True
+            elif time.ticks_diff(time.ticks_ms(), a['start_ms']) > _PHASE_TIMEOUT_MS:
+                print('[Motors] Drive phase timed out — stopping')
                 self.stop(); done = True
         elif kind == 'wait':
             if time.ticks_diff(time.ticks_ms(), a['end_ms']) >= 0:

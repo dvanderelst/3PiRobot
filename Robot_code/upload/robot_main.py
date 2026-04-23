@@ -205,9 +205,18 @@ def main(selected_ssid=None):
             if verbose: print(f'[Main] Processed command {cmd}')
 
         # ── Advance cooperative motion; reply 'done' when a step plan finishes ──
-        done_id = drive.tick()
+        try:
+            done_id = drive.tick()
+        except Exception as e:
+            print(f'[Main] tick() exception: {e}')
+            done_id = drive.abort('error')
         if done_id is not None:
-            bridge.send_data({'id': done_id, 'status': 'done'})
+            resp = {'id': done_id, 'status': 'done'}
+            for _attempt in range(3):
+                if bridge.send_data(resp):
+                    break
+                print(f'[Main] send_data failed (attempt {_attempt + 1}), retrying...')
+                time.sleep_ms(200)
 
         # ── Free-running pulsing (drift-free absolute schedule) ──
         if state['next_due'] is not None and ticks_diff(now, state['next_due']) >= 0:

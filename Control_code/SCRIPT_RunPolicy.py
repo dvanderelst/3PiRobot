@@ -32,6 +32,7 @@ from Library import Dialog
 from Library import LorexTracker
 from Library import PauseControl
 from Library import PushOver
+from matplotlib import pyplot as plt
 from LorexLib.Environment import capture_environment_layout
 from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input
 
@@ -39,19 +40,21 @@ from SCRIPT_TrainPolicy import Config, MLPPolicy, build_input
 # ══════════════════════════════════════════════════════════════════════════════
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
-POLICY   = 'policy5_h10' # sub-folder under PolicyTraining/
+POLICY   = 'test2_h01' # sub-folder under PolicyTraining/
 ARENA     = 'arena1'
-REPEAT    = '03'
-MAX_STEPS = 250
+REPEAT    = '01'
+MAX_STEPS = 500
 
 ROBOT_ID     = 1
 SHORT_POLICY = POLICY.replace('policy', '')
 POLICY_FILE  = "best_policy.json"
-SESSION      = f"session{SHORT_POLICY}_{ARENA}_{REPEAT}"
+SESSION      = f"session_{SHORT_POLICY}_{ARENA}_{REPEAT}"
 
 # Dry-run flags (set False to disable movement for debugging)
 do_rotation    = True
 do_translation = True
+
+PLOT_EVERY = 5          # save trajectory plot every N steps (0 = disable)
 
 wait_for_confirmation = False
 
@@ -126,6 +129,78 @@ writer  = DataStorage.DataWriter(SESSION, autoclear=True, verbose=False)
 writer.add_file("SCRIPT_RunPolicy.py")
 snapshot = capture_environment_layout(save_root=f"{DATA_FOLDER}/{SESSION}")
 CodeLogger.log_code(f"{DATA_FOLDER}/{SESSION}", [".", "Library"], label=SESSION)
+
+# Load arena walls from the env snapshot for live trajectory plotting
+_arena_walls_x = None
+_arena_walls_y = None
+_env_dir = snapshot.get("rundir")
+if _env_dir:
+    _walls_path = os.path.join(_env_dir, "arena_walls.npz")
+    if os.path.exists(_walls_path):
+        _w = np.load(_walls_path)
+        _arena_walls_x = _w["x_mm"]
+        _arena_walls_y = _w["y_mm"]
+        print(f"Arena walls loaded: {len(_arena_walls_x)} points from {_walls_path}")
+    else:
+        print("No arena_walls.npz found — trajectory plot will show path only")
+
+# Accumulate robot positions for the live plot
+_traj_x:   list = []
+_traj_y:   list = []
+_traj_yaw: list = []
+_traj_plot_path = f"{DATA_FOLDER}/{SESSION}/trajectory.png"
+
+
+def _interp_gaps(arr):
+    """Linear interpolation through NaN gaps; flat-extrapolation at edges."""
+    out = np.asarray(arr, dtype=np.float64)
+    valid = np.isfinite(out)
+    if valid.all() or not valid.any():
+        return out
+    idx = np.arange(len(out))
+    out[~valid] = np.interp(idx[~valid], idx[valid], out[valid])
+    return out
+
+
+def _interp_yaw_gaps(yaws_deg):
+    """Unwrap valid yaw samples, interpolate through NaN gaps, re-wrap to [-180, 180]."""
+    arr = np.asarray(yaws_deg, dtype=np.float64)
+    valid = np.isfinite(arr)
+    if not valid.any():
+        return arr
+    out = arr.copy()
+    out[valid] = np.degrees(np.unwrap(np.radians(arr[valid])))
+    out = _interp_gaps(out)
+    return ((out + 180.0) % 360.0) - 180.0
+
+
+def _save_trajectory_plot() -> None:
+    """Render the current trajectory (and optional arena walls) and overwrite trajectory.png."""
+    if not _traj_x:
+        return
+    xs_raw = np.asarray(_traj_x, dtype=np.float64)
+    ys_raw = np.asarray(_traj_y, dtype=np.float64)
+    if not (np.isfinite(xs_raw) & np.isfinite(ys_raw)).any():
+        return
+    xs = _interp_gaps(xs_raw)
+    ys = _interp_gaps(ys_raw)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    if _arena_walls_x is not None:
+        ax.scatter(_arena_walls_x, _arena_walls_y, color="green", s=2, alpha=0.3, label="Walls")
+    ax.plot(xs, ys, color="black", alpha=0.5, linewidth=1, label="Trajectory")
+    ax.scatter(xs, ys, color="blue", s=15, zorder=3)
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        if i % max(1, PLOT_EVERY) == 0:
+            ax.text(x, y, str(i), color="red", fontsize=7)
+    ax.set_title(f"{SESSION}  —  step {len(_traj_x) - 1}")
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(_traj_plot_path, dpi=100)
+    plt.close(fig)
 
 # Warm up sonar
 for _ in range(5):
@@ -206,8 +281,20 @@ for step in range(MAX_STEPS):
 
     # ── Drive forward ─────────────────────────────────────────────────────────
     if do_translation:
-        client.step(distance=cfg.fixed_drive_mm / 1000.0)
-        time.sleep(0.15)
+        try:
+            client.step(distance=cfg.fixed_drive_mm / 1000.0)
+            time.sleep(0.15)
+        except RuntimeError as e:
+            print(f"  *** Drive aborted (step {step}): {e} ***")
+            pos = position or {}
+            x, y, yaw = pos.get("x"), pos.get("y"), pos.get("yaw_deg")
+            write_header = not os.path.exists(crash_log_path)
+            with open(crash_log_path, "a") as _cf:
+                if write_header:
+                    _cf.write("step\tx\ty\tyaw_deg\n")
+                _cf.write(f"{step}\t{x}\t{y}\t{yaw}\n")
+            control.wait_if_paused()
+            continue
 
     # ── Update history (canonical frame) ─────────────────────────────────────
     history.append((dist_mm, canonical_iid, rotate1_canonical, rotate2_canonical))
@@ -239,6 +326,13 @@ for step in range(MAX_STEPS):
     )
     last_position = position
 
+    # ── Live trajectory plot ──────────────────────────────────────────────────
+    _traj_x.append(rob_x if rob_x is not None else np.nan)
+    _traj_y.append(rob_y if rob_y is not None else np.nan)
+    _traj_yaw.append(rob_yaw_deg if rob_yaw_deg is not None else np.nan)
+    if PLOT_EVERY > 0 and step % PLOT_EVERY == 0:
+        _save_trajectory_plot()
+
     if step % 100 == 0 and step > 0:
         PushOver.send(f"{SESSION}: {step}/{MAX_STEPS} steps")
 
@@ -249,4 +343,5 @@ for step in range(MAX_STEPS):
     else:
         time.sleep(0.25)
 
+_save_trajectory_plot()
 PushOver.send(f"Policy run completed: {SESSION}, {step + 1} steps.")

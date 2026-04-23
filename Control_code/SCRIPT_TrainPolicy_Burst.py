@@ -78,8 +78,8 @@ N_LOOKS = 2   # sonar measurements per step; spaced intra_burst_drive_mm/(N_LOOK
 
 # ── Condition ─────────────────────────────────────────────────────────────────
 CONDITION = "new"
-HISTORY_LENGTHS = [1,3]
-IID_NOISE_DB = 1
+HISTORY_LENGTHS = [3]
+IID_NOISE_DB = 3
 
 # ── Pushover ──────────────────────────────────────────────────────────────────
 try:

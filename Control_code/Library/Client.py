@@ -193,8 +193,11 @@ class Client:
         params = {'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
         if wait_for_completion:
             resp = self._send_command('step', params=params, wait_for_response=True, timeout=timeout, max_retries=1)
-            if not resp or resp.get('status') != 'done':
+            if resp is None:
                 raise TimeoutError("No completion response for step")
+            if resp.get('status') != 'done':
+                reason = resp.get('reason', 'unknown')
+                raise RuntimeError(f"Step aborted: {reason}")
             if post_delay_s and post_delay_s > 0:
                 time.sleep(post_delay_s)
         else:

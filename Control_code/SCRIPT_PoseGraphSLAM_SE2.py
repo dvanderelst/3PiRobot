@@ -47,7 +47,7 @@ SIM_SESSION_NAME    = "sessionB01"
 SIM_MAX_STEPS       = 500
 
 # Real-mode inputs (ignored if DATA_SOURCE == "sim")
-REAL_RUN_DIR        = "PolicyRuns/session5_h10_arena1_03"
+REAL_RUN_DIR        = "PolicyRuns/session_test2_h01_arena1_01"
 #   "commanded" uses the robot's own motion commands as dead-reckoning — the
 #       honest test: residual error between commanded and executed motion is
 #       the odometry drift the SLAM must cancel. Real mode only.
@@ -64,18 +64,18 @@ REAL_MAX_R1_DEG     = 90.0
 REAL_MAX_R2_DEG     = 90.0
 
 # ── SLAM parameters ───────────────────────────────────────────────────────────
-WINDOW_LEN          = 5
+WINDOW_LEN          = 8
 SEED                = 1
 
 # Body-frame odometry noise (used by ODOM_SOURCE="synthetic")
-SIGMA_DRIVE_MM      = 10.0        # per-step drive-distance noise (σ)
-SIGMA_ROT_DEG       = 3.0        # per-step rotation noise (σ)
+SIGMA_DRIVE_MM      = 5.0        # per-step drive-distance noise (σ)
+SIGMA_ROT_DEG       = 2.0        # per-step rotation noise (σ)
 
 # Particle filter
 # PF_BETA: sharpness of the likelihood weighting — higher = more selective matches.
 #   Particle weight ∝ exp(−β · feature_distance). Raise if too many false LCs;
 #   lower if genuine revisits are not recognised.
-PF_BETA             = 2.0
+PF_BETA             = 2
 
 # MIN_LC_GAP: minimum step separation between the two ends of a loop closure.
 #   Prevents the PF from "recognising" a place it just left (features are trivially
@@ -85,7 +85,7 @@ MIN_LC_GAP          = 10
 
 # LC_WEIGHT_THRESHOLD: minimum PF weight a candidate step must accumulate before
 #   it is accepted as a loop-closure partner. Higher = fewer but more confident LCs.
-LC_WEIGHT_THRESHOLD = 0.35
+LC_WEIGHT_THRESHOLD = 0.25
 
 # LC_DEDUP_BUCKET: two loop closures that map to the same (s//bucket, t//bucket)
 #   cell are merged into one. Avoids flooding the pose graph with near-duplicate
@@ -96,6 +96,20 @@ LC_DEDUP_BUCKET     = 3
 #   s and t exceeds K × expected_drift(|t−s|). Guards against false matches when
 #   the odometry is still close to ground truth early in the trajectory.
 LC_ODOM_GATE_K      = 1.5
+
+# LC_HEADING_GATE_K: reject an LC candidate if the odometry-estimated |Δyaw|
+#   between s and t exceeds K · σ_rot · √|t−s| degrees. Sonar features are
+#   directional — the spatial-info diagnostic showed feature distance is a
+#   (place, heading) descriptor, not a pure place descriptor — so a revisit
+#   from the opposite direction will have a different feature window and
+#   shouldn't be accepted even if the PF happens to vote for it.
+#
+#   The threshold scales with the accumulated odometry yaw error between
+#   s and t (≈ σ_rot·√|t−s|) so that the gate self-adjusts when σ_rot changes
+#   across behavioural conditions. A σ-sweep (K∈{1.0, 1.5, 2.0} × σ_rot∈1..4°)
+#   showed K=1.0 is robust from σ_rot=1° to σ_rot=4°: it's nearly as good as
+#   K=1.5 at low σ and avoids the FP blow-up seen at K≥1.5 when σ_rot≥3°.
+LC_HEADING_GATE_K   = 1.0
 
 # Pose graph: edge weights (1/σ)
 W_ODOM_POS          = 1.0 / SIGMA_DRIVE_MM                # per-coord
@@ -185,9 +199,11 @@ def _expected_drift_mm(n_steps, drive_mm):
     return drive_component + rot_component
 
 
-def extract_loop_closures(history, N, noisy_pos=None, drive_mm_per_step=None):
+def extract_loop_closures(history, N, noisy_pos=None, noisy_yaw=None,
+                          drive_mm_per_step=None):
     seen, closures = set(), []
-    rejected_by_gate = 0
+    rejected_by_drift   = 0
+    rejected_by_heading = 0
     for t, (particles, weights) in enumerate(history):
         if t <= MIN_LC_GAP:
             continue
@@ -204,7 +220,14 @@ def extract_loop_closures(history, N, noisy_pos=None, drive_mm_per_step=None):
             d_odom   = float(np.hypot(*(noisy_pos[s] - noisy_pos[t])))
             max_drift = LC_ODOM_GATE_K * _expected_drift_mm(abs(t - s), drive_mm=drive_mm_per_step)
             if d_odom > max_drift:
-                rejected_by_gate += 1
+                rejected_by_drift += 1
+                continue
+
+        if noisy_yaw is not None:
+            d_yaw_deg = float(abs(np.degrees(wrap_rad(noisy_yaw[s] - noisy_yaw[t]))))
+            max_yaw = LC_HEADING_GATE_K * SIGMA_ROT_DEG * np.sqrt(max(abs(t - s), 1))
+            if d_yaw_deg > max_yaw:
+                rejected_by_heading += 1
                 continue
 
         key = (s // LC_DEDUP_BUCKET, t // LC_DEDUP_BUCKET)
@@ -212,8 +235,11 @@ def extract_loop_closures(history, N, noisy_pos=None, drive_mm_per_step=None):
             continue
         seen.add(key)
         closures.append((s, t))
-    if rejected_by_gate:
-        print(f"  {rejected_by_gate} candidate LCs rejected by drift gate")
+    if rejected_by_drift:
+        print(f"  {rejected_by_drift} candidate LCs rejected by drift gate")
+    if rejected_by_heading:
+        print(f"  {rejected_by_heading} candidate LCs rejected by heading gate "
+              f"(K={LC_HEADING_GATE_K:g}·σ_rot·√|t−s|)")
     return closures
 
 
@@ -259,11 +285,19 @@ def _arena_rect_walls(bounds_mm: dict, spacing_mm: float = 20.0) -> np.ndarray:
 
 def ingest_real(run_dir: str):
     """
-    Load per-step (GT pose, commanded motion, sonar feature) from a PolicyRuns/
-    directory of dill files. Returns:
+    Load per-step (GT pose, commanded motion, sonar features) from a PolicyRuns/
+    directory of .dill files. Supports both schemas:
+
+      - sonar (legacy):  data.sonar_package (dict); motion has drive_mm, rotate1, rotate2
+      - burst:           data.sonar_packages (list of N_LOOKS dicts);
+                         motion has rotate2, net_rotation, intra_burst_drive_mm,
+                         inter_burst_drive_mm, look_physicals (N_LOOKS)
+
+    Returns:
         positions    (N, 2) float64  — GT x,y (gaps interpolated)
         yaws_rad     (N,)  float64   — GT yaw in radians, wrapped to [-π,π]
-        meas_seq     (N, 4) float32  — [dist, iid, r1, r2] normalised
+        meas_seq     (N, D) float32  — normalised features; sonar D=4,
+                                       burst D = 3·N_LOOKS + 1
         walls        (W, 2) float32  — arena-bounds rectangle for plotting
         run_name     str
         commanded    dict with "dθ_rad" (N-1,) and "dr_mm" (N-1,) from motion commands
@@ -273,16 +307,29 @@ def ingest_real(run_dir: str):
         raise FileNotFoundError(f"No data*.dill files in {run_dir}")
     print(f"  Loading {len(files)} .dill steps from {run_dir}")
 
+    # Detect schema from the first file. Burst runs emit a list of N_LOOKS
+    # sonar packages per step; legacy sonar runs emit a single package.
+    with open(files[0], "rb") as f:
+        first_keys = dill.load(f)["data"].keys()
+    is_burst = "sonar_packages" in first_keys
+    print(f"  Format: {'burst' if is_burst else 'sonar'}")
+
     xs, ys, yaws_deg, valid = [], [], [], []
+
+    # Sonar-specific per-step arrays
     drive_mm = []
-    dist_mm, iid_db, r1_deg, r2_deg = [], [], [], []
+    dist_mm, iid_db, r1_deg = [], [], []
+    # Shared / burst-specific
+    r2_deg = []
+    intra_mm, inter_mm = [], []
+    per_step_looks = []        # burst: list[ list[(dist_mm, iid_db, look_deg)] ] or None for skip
+    n_looks_seen = set()
 
     for p in files:
         with open(p, "rb") as f:
             d = dill.load(f)
         pos = d["data"]["position"]
         mot = d["data"]["motion"]
-        sp  = d["data"]["sonar_package"]
 
         x, y, yaw = pos.get("x"), pos.get("y"), pos.get("yaw_deg")
         ok = (x is not None and y is not None
@@ -292,11 +339,31 @@ def ingest_real(run_dir: str):
         yaws_deg.append(np.nan if (yaw is None) else float(yaw))
         valid.append(ok)
 
-        drive_mm.append(float(mot["drive_mm"]))
-        dist_mm.append(float(sp["corrected_distance"]) * 1000.0)   # m → mm
-        iid_db.append(float(sp["corrected_iid"]))                  # signed
-        r1_deg.append(float(mot["rotate1"]))
-        r2_deg.append(float(mot["rotate2"]))
+        if is_burst:
+            r2_deg.append(float(mot.get("rotate2", 0.0) or 0.0))
+            intra_mm.append(float(mot.get("intra_burst_drive_mm", 0.0) or 0.0))
+            inter_mm.append(float(mot.get("inter_burst_drive_mm", 0.0) or 0.0))
+            sps = d["data"].get("sonar_packages")
+            if sps:
+                look_angles = mot.get("look_physicals") or []
+                looks = []
+                for k, sp in enumerate(sps):
+                    looks.append((
+                        float(sp["corrected_distance"]) * 1000.0,   # m → mm
+                        float(sp["corrected_iid"]),                 # signed dB
+                        float(look_angles[k]) if k < len(look_angles) else 0.0,
+                    ))
+                n_looks_seen.add(len(looks))
+                per_step_looks.append(looks)
+            else:
+                per_step_looks.append(None)     # skip-step: no pings this step
+        else:
+            sp = d["data"]["sonar_package"]
+            drive_mm.append(float(mot["drive_mm"]))
+            dist_mm.append(float(sp["corrected_distance"]) * 1000.0)
+            iid_db.append(float(sp["corrected_iid"]))
+            r1_deg.append(float(mot["rotate1"]))
+            r2_deg.append(float(mot["rotate2"]))
 
     valid_arr = np.array(valid, dtype=bool)
     n_gaps = int((~valid_arr).sum())
@@ -311,32 +378,81 @@ def ingest_real(run_dir: str):
         np.asarray(yaws_deg, dtype=np.float64), valid_arr
     ))
 
-    # Feature vector (matches SlamCore.collect_data sonar branch)
-    d  = np.clip(np.asarray(dist_mm), 0.0, REAL_MAX_DIST_MM) / REAL_MAX_DIST_MM
-    i  = np.asarray(iid_db)  / REAL_MAX_IID_DB
-    l1 = np.asarray(r1_deg)  / REAL_MAX_R1_DEG
-    l2 = np.asarray(r2_deg)  / REAL_MAX_R2_DEG
-    meas_seq = np.column_stack([d, i, l1, l2]).astype(np.float32)
+    if is_burst:
+        if not n_looks_seen:
+            raise ValueError(f"no non-skip burst steps in {run_dir}")
+        if len(n_looks_seen) > 1:
+            print(f"  Warning: N_LOOKS varies across steps {sorted(n_looks_seen)}; "
+                  f"padding short bursts with zeros")
+        n_looks = max(n_looks_seen)
 
-    # Commanded body-frame motion: dθ, dr between consecutive recorded poses.
-    # Per SCRIPT_RunPolicy, pose[k] is read AFTER rotate1[k], BEFORE rotate2[k]
-    # + drive[k].  So the body-frame edge from pose[k] to pose[k+1] is:
-    #     rotate2[k]  →  drive[k]  →  rotate1[k+1]
-    # In the solver's rotate-then-drive convention this collapses to
-    #     dθ[k] = rotate2[k] + rotate1[k+1]
-    #     dr[k] = drive[k]
-    # (the drive's actual heading is yaw[k]+rotate2[k] vs. the solver's
-    #  assumed yaw[k]+dθ[k]; the rotate1[k+1] mis-attribution is small when
-    #  rotations are small per step.)
-    #
-    # Sign flip: per rotation_conventions.md §2, commanded rotations are
-    # CW-positive, but overhead-camera yaw (and the solver's trig) are
-    # CCW-positive. Negate commanded dθ here so both odometry sources feed
-    # the GN solver in a consistent CCW-positive frame.
-    r1 = np.asarray(r1_deg, dtype=np.float64)
-    r2 = np.asarray(r2_deg, dtype=np.float64)
-    dθ_rad = -np.radians(r2[:-1] + r1[1:])
-    dr_mm_ = np.asarray(drive_mm[:-1], dtype=np.float64)
+        # Feature vector (matches SlamCore.collect_data burst branch): per look
+        # sorted by angle ascending: [d/max_dist, iid/max_iid, r1/max_r1], then
+        # one trailing [r2/max_r2]. Skip-steps emit zeros; the PF will simply
+        # not match them.
+        meas_seq = np.zeros((len(files), 3 * n_looks + 1), dtype=np.float32)
+        for i, looks in enumerate(per_step_looks):
+            if looks is None:
+                continue
+            looks_sorted = sorted(looks, key=lambda t: t[2])
+            padded = looks_sorted + [(0.0, 0.0, 0.0)] * (n_looks - len(looks_sorted))
+            for k, (d_mm, i_db, r1) in enumerate(padded):
+                j = 3 * k
+                meas_seq[i, j    ] = np.clip(d_mm, 0.0, REAL_MAX_DIST_MM) / REAL_MAX_DIST_MM
+                meas_seq[i, j + 1] = i_db / REAL_MAX_IID_DB
+                meas_seq[i, j + 2] = r1   / REAL_MAX_R1_DEG
+            meas_seq[i, -1] = r2_deg[i] / REAL_MAX_R2_DEG
+
+        # Commanded body-frame motion in burst mode.
+        # pose[k] is the end-of-step GT for step k (recorded after r2 +
+        # inter_burst_drive). The transition pose[k] → pose[k+1] is driven
+        # entirely by the motion of step k+1:
+        #   1. Burst phase: N_LOOKS rotations with rotate-backs, net heading
+        #      change = 0; net drive = intra_burst_drive_mm along h_k.
+        #   2. rotate2 (net_rotation).
+        #   3. inter_burst_drive_mm along h_k + r2.
+        #
+        # The solver's edge model is "rotate then drive", so we lump:
+        #     dθ[k] = rotate2[k+1]
+        #     dr[k] = intra_burst_drive_mm[k+1] + inter_burst_drive_mm[k+1]
+        # This attributes the intra-burst drive to the post-r2 heading, a
+        # small bias on non-zero-r2 steps that SLAM absorbs as odom residual.
+        #
+        # Sign flip per rotation_conventions.md §2: commanded rotations are
+        # CW-positive, overhead-camera yaw is CCW-positive. Negate dθ.
+        r2 = np.asarray(r2_deg, dtype=np.float64)
+        intra = np.asarray(intra_mm, dtype=np.float64)
+        inter = np.asarray(inter_mm, dtype=np.float64)
+        dθ_rad = -np.radians(r2[1:])
+        dr_mm_ = intra[1:] + inter[1:]
+    else:
+        # Feature vector (matches SlamCore.collect_data sonar branch)
+        d_ = np.clip(np.asarray(dist_mm), 0.0, REAL_MAX_DIST_MM) / REAL_MAX_DIST_MM
+        i_ = np.asarray(iid_db)  / REAL_MAX_IID_DB
+        l1 = np.asarray(r1_deg)  / REAL_MAX_R1_DEG
+        l2 = np.asarray(r2_deg)  / REAL_MAX_R2_DEG
+        meas_seq = np.column_stack([d_, i_, l1, l2]).astype(np.float32)
+
+        # Commanded body-frame motion: dθ, dr between consecutive recorded poses.
+        # Per SCRIPT_RunPolicy, pose[k] is read AFTER rotate1[k], BEFORE rotate2[k]
+        # + drive[k].  So the body-frame edge from pose[k] to pose[k+1] is:
+        #     rotate2[k]  →  drive[k]  →  rotate1[k+1]
+        # In the solver's rotate-then-drive convention this collapses to
+        #     dθ[k] = rotate2[k] + rotate1[k+1]
+        #     dr[k] = drive[k]
+        # (the drive's actual heading is yaw[k]+rotate2[k] vs. the solver's
+        #  assumed yaw[k]+dθ[k]; the rotate1[k+1] mis-attribution is small when
+        #  rotations are small per step.)
+        #
+        # Sign flip: per rotation_conventions.md §2, commanded rotations are
+        # CW-positive, but overhead-camera yaw (and the solver's trig) are
+        # CCW-positive. Negate commanded dθ here so both odometry sources feed
+        # the GN solver in a consistent CCW-positive frame.
+        r1 = np.asarray(r1_deg, dtype=np.float64)
+        r2 = np.asarray(r2_deg, dtype=np.float64)
+        dθ_rad = -np.radians(r2[:-1] + r1[1:])
+        dr_mm_ = np.asarray(drive_mm[:-1], dtype=np.float64)
+
     commanded = {"dθ_rad": dθ_rad, "dr_mm": dr_mm_}
 
     # Walls for plotting — prefer arena_walls.npz (new per-camera extraction,
@@ -754,6 +870,7 @@ def main():
 
     print("\nExtracting loop closures...")
     loop_closures = extract_loop_closures(history, N, noisy_pos=noisy_pos,
+                                          noisy_yaw=noisy_yaw,
                                           drive_mm_per_step=drive_mm_per_step)
     n_tp = sum(1 for s, t in loop_closures
                if np.hypot(*(positions[s] - positions[t])) < 300)
