@@ -6,13 +6,26 @@
 
 # Project Overview
 
-Modelling a bat that learns to use its sonar system. Data was collected with a robot equipped with a body-fixed sonar system in various arenas, using `SCRIPT_DataAcquisition.py`.
+Modelling a bat that learns to use its sonar system, with a specific focus on **vicarious learning**: a single generic acoustic emulator, learned once from real sonar data, is used to mentally rehearse in any new arena so that a policy can be fit to that arena without the robot physically crashing in it.
+
+The pipeline has three stages:
+
+1. **Generic emulator.** Train a single emulator on pooled sonar data in `TrainingData/` (sessions B01–B05). This emulator is trained once and reused across all downstream arenas.
+2. **Arena specification.** For each target arena, extract its layout from an annotated overhead image in the same edge format used during emulator training.
+3. **Arena-specific policy.** Using the emulator as a simulator of that arena's geometry, train a policy dedicated to that arena. One policy per target arena.
+4. **Deployment + cross-arena control.** Each policy is deployed on the real robot in its matched arena. Policies are then cross-swapped (policy_A in arena_B, and vice versa) as the primary control.
+
+The central empirical claim is that the matched condition outperforms the swapped condition. A positive result simultaneously demonstrates (a) that policies are genuinely arena-specific and (b) that the emulator-based vicarious adaptation is doing real work.
+
+Data collection for the emulator sessions uses `SCRIPT_DataAcquisition.py`.
 
 ---
 
 ## Emulator
 
 The emulator predicts, from a geometric profile of the local arena, the sonar readings (IID and distance) the robot would receive at that position and heading. It is a single 1D CNN with two regression heads — one for IID and one for distance — both trained on echo-present samples only. Echo presence is not predicted explicitly.
+
+The emulator is trained **once** on pooled data from `TrainingData/` and is held fixed across all downstream policy-training runs. Its generality is what makes vicarious learning possible.
 
 ### Profile (input)
 
@@ -66,13 +79,11 @@ distance = (dist_normal + dist_flipped) / 2   # symmetric under flip
 
 This guarantees the physical constraints are satisfied regardless of any residual asymmetry in the trained weights, at the cost of doubling inference time.
 
-### Data and train/validation split
+### Data, split, and evaluation
 
-**Data source:** sessions B01–B05, loaded via `DataCollection`. Each data point pairs a profile (computed from the arena geometry at the robot's logged position and heading) with the `corrected_iid` and `corrected_distance` from the sonar package recorded at that step.
+**Data source:** all sessions in `TrainingData/` (B01–B05), loaded via `DataCollection`. Each data point pairs a profile (computed from the arena geometry at the robot's logged position and heading) with the `corrected_iid` and `corrected_distance` from the sonar package recorded at that step.
 
-**Train/validation split** is quadrant-based to test spatial generalisation: the emulator is trained on data from most spatial regions and validated on held-out regions it has not seen, simulating positions the policy will visit that were not covered during data collection.
-
-The split is specified as a dict mapping session name to a list of quadrant indices (0–3) to withhold for validation. All remaining data from all sessions goes to training. Example:
+**Train/validation split** is quadrant-based: the emulator is trained on data from most spatial regions and validated on held-out regions. The split is specified as a dict mapping session name to a list of quadrant indices (0–3) to withhold for validation. All remaining data from all sessions goes to training. Example:
 
 ```python
 validation_quadrants = {
@@ -81,17 +92,27 @@ validation_quadrants = {
 }
 ```
 
-This withholds ~12.5% of data per listed session while keeping all other sessions' data (including all quadrants of unlisted sessions) in training.
+This withholds ~12.5% of data per listed session while keeping all other sessions' data in training.
 
-**Evaluation:** report Pearson r and RMSE for IID and distance separately on (1) training data (echo-present) and (2) held-out validation quadrants (echo-present).
+**Role of this split.** Under the new scope, the emulator's ultimate test is **behavioural**: does a policy trained vicariously with it work in a real arena? If the behavioural test fails, the emulator is one of several possible culprits. The quadrant-held-out split is therefore retained as a **diagnostic** — a cheap, standalone measure of emulator quality that lets us distinguish "bad emulator" from "bad policy training" when a downstream run disappoints. It is not the primary validation.
+
+**Metrics:** report Pearson r and RMSE for IID and distance separately on (1) training data (echo-present) and (2) held-out validation quadrants (echo-present).
+
+---
+
+## Arena Specification
+
+Each target arena is specified by an **annotated overhead image**, processed into arena edges using the same pipeline as the `TrainingData/` sessions (see `SCRIPT_BuildArenaGeometry.py` and `EnvironmentSimulator`). The edge representation is what the simulator consumes when generating profiles for emulator queries during policy training, and is the only geometric information the policy-training pipeline needs about that arena.
+
+Target arenas are independent of the sessions in `TrainingData/` — the whole point of vicarious learning is that the emulator generalises to geometry it was not trained on.
 
 ---
 
 ## Policy: Architecture and Step Sequence
 
-Using the emulator, a policy is trained to control the robotic bat. The policy is a neural network that produces two rotations per step — **rotation 1** and **rotation 2**.
+For each target arena, a separate policy is trained inside a simulator instantiated with that arena's edges. The emulator is queried on profiles sampled from that geometry. Policies are not shared between arenas.
 
-This models a bat's ability to measure in a different direction (via head rotation) than the direction of flight.
+The policy is a neural network that produces two rotations per step — **rotation 1** and **rotation 2**. This models a bat's ability to measure in a different direction (via head rotation) than the direction of flight.
 
 ### Step sequence
 
@@ -143,7 +164,7 @@ The policy uses a history buffer of *n* steps. At episode start this buffer cont
 
 ## Policy: Training with a GA
 
-The policy is trained with a genetic algorithm (GA), assessed on two criteria: (1) paths should be smooth, and (2) crashing should be rare.
+The policy is trained with a genetic algorithm (GA), assessed on two criteria: (1) paths should be smooth, and (2) crashing should be rare. Training happens entirely inside the emulator-driven simulator of the target arena — the real robot is not involved until deployment.
 
 ### Fitness function
 
@@ -204,7 +225,7 @@ The network has a **single output neuron** used for both rotation 1 and rotation
 
 ## Policy: Variation of History Length
 
-To understand how much the policy benefits from memory, we train separate policies for several values of `history_len` (e.g. 1, 3, 5, 10). The goal is best performance at each history size, not a fair comparison between equally-sized networks, so the network is allowed to scale naturally with history.
+To understand how much the policy benefits from memory, we train separate policies for several values of `history_len` (e.g. 1, 3, 5, 10) — per arena. The goal is best performance at each history size, not a fair comparison between equally-sized networks, so the network is allowed to scale naturally with history.
 
 Memory and head–body separation are treated as a coupled pair: the baseline has neither, and all history policies (`history_len > 0`) have both. This coupling is principled — a decoupled head is only useful if the robot can remember where it looked and what it found across steps. Without memory, a free head simply collapses to a GA-optimised fixed look angle, which adds no adaptive value.
 
@@ -235,40 +256,13 @@ The top-N genomes seen across all generations are retained in a **hall of fame**
 
 ### Multi-run training
 
-`SCRIPT_TrainPolicy.py` loops over `HISTORY_LENGTHS`. A value of 0 trains the baseline (`PolicyTraining/<condition>_h00`); any other value trains the standard config for that history length (`PolicyTraining/<condition>_h01`, `PolicyTraining/<condition>_h10`, etc.). All other settings (GA parameters, fitness function, architecture hidden sizes) are identical across runs.
-
----
-
-## Policy: Burst Variant (exploratory)
-
-Implemented in `SCRIPT_TrainPolicy_Burst.py`. The motivation is bat echolocation, where calls are grouped into bursts — a rapid volley of pulses fired in quick succession. The inter-pulse interval within a burst is too short for meaningful movement between calls, so the entire burst is best modelled as multiple measurements taken at the same position.
-
-### Step sequence (burst)
-
-Each step takes `N_LOOKS` sonar measurements before committing to a drive direction:
-
-1. **Look planning:** Build input from history only (current slots zeroed) → MLP → `N_LOOKS` look angles + 1 drive output. The look angles are all planned simultaneously before any measurement is taken, modelling the pre-programming of a burst volley.
-2. **Measurement:** Take `N_LOOKS` sonar measurements at the planned look directions (all from the same position).
-3. **Drive planning:** Build input from history + all `N_LOOKS` measurements → same MLP → drive rotation r2.
-4. **Execute:** Body rotates by r2, drives forward fixed distance.
-
-### IID symmetry (two flips)
-
-Because look angles are planned before measurement, the canonical frame for look planning must use the previous step's final IID sign (`flip_look`). The drive rotation uses the current step's final measured IID sign (`flip_drive`), matching the original policy's behaviour for r2. History stores canonical values throughout.
-
-### Architecture
-
-The MLP has `N_LOOKS + 1` outputs (one per look angle plus r2). Input dimension: `3 * N_LOOKS * (history_len + 1) + history_len`. This is larger than the single-policy input, making GA search harder for the same population size and generation count.
-
-### Status
-
-Exploratory. Early results suggest the burst policy converges more slowly than the single-look policy (larger genome) and reaches a slightly higher final collision rate. Whether the richer within-step information from multiple looks translates to better coverage or collision avoidance at longer training budgets is an open question.
+`SCRIPT_TrainPolicy.py` loops over `HISTORY_LENGTHS` for a given target arena. A value of 0 trains the baseline (`PolicyTraining/<condition>_h00`); any other value trains the standard config for that history length (`PolicyTraining/<condition>_h01`, `PolicyTraining/<condition>_h10`, etc.). All other settings (GA parameters, fitness function, architecture hidden sizes) are identical across runs. The `<condition>` prefix is expected to encode the target arena so that policies trained for different arenas do not collide on disk.
 
 ---
 
 ## Deployment on the Real Robot
 
-After training, the policy is applied on the real robot using a script similar to `SCRIPT_DataAcquisition.py`. The same sonar data collection and processing pipeline is used, yielding a `sonar_package` per step; `corrected_iid` and `corrected_distance` from that package are fed into the trained policy.
+After training, each arena-specific policy is applied on the real robot in its matched arena using a script similar to `SCRIPT_DataAcquisition.py`. The same sonar data collection and processing pipeline is used, yielding a `sonar_package` per step; `corrected_iid` and `corrected_distance` from that package are fed into the trained policy.
 
 ### Physical rotation sequence (each step)
 
@@ -301,3 +295,27 @@ The robot runs for a fixed number of steps (`max_steps`, a configurable paramete
 - rotate1, rotate2, net rotation (rotate1 + rotate2)
 - drive distance
 - Additional fields can be added as needed.
+
+---
+
+## Cross-Arena Control
+
+The primary baseline against the matched (arena_X policy in arena_X) condition is a **cross-arena swap**: deploy policy_A in arena_B, and policy_B in arena_A. Run the same data-logging and metrics as the matched deployments, so the two conditions are directly comparable.
+
+If matched outperforms swapped, the experiment simultaneously supports two claims:
+
+1. Policies are arena-specific — there is real structure that a generic one-size-fits-all policy would miss.
+2. The emulator-driven vicarious training captures enough of that structure to produce the arena-specific tuning.
+
+If matched does **not** outperform swapped, the interpretation depends on the diagnostic: weak emulator (quadrant-held-out metrics are poor), insufficiently arena-specific fitness landscape, or GA training instability are the main candidates to check.
+
+With three or more target arenas, all off-diagonal swaps can be run to strengthen the design.
+
+---
+
+## Out of Scope (Parked)
+
+The following directions are parked for this phase of the project and are not covered by the pipeline above:
+
+- **Burst policy variant.** Previously implemented in `SCRIPT_TrainPolicy_Burst.py` (multiple within-burst measurements per step). Interesting biologically but shelved until the vicarious-learning story is established.
+- **Mapping / pose-graph SLAM / spatial-information analyses.** Scripts on the `new_ideas` branch (`SCRIPT_PoseGraphSLAM_SE2*.py`, `SCRIPT_SonarSpatialInfo.py`, `SCRIPT_TakeEnvSnapshot.py`, `SCRIPT_SweepSLAM.py`) target a later phase of the project where the robot builds its own spatial representation rather than receiving an annotated arena image.

@@ -69,13 +69,16 @@ SEED                = 1
 
 # Body-frame odometry noise (used by ODOM_SOURCE="synthetic")
 SIGMA_DRIVE_MM      = 5.0        # per-step drive-distance noise (σ)
-SIGMA_ROT_DEG       = 2.0        # per-step rotation noise (σ)
+SIGMA_ROT_DEG       = 3.0        # per-step rotation noise (σ)
 
 # Particle filter
 # PF_BETA: sharpness of the likelihood weighting — higher = more selective matches.
 #   Particle weight ∝ exp(−β · feature_distance). Raise if too many false LCs;
 #   lower if genuine revisits are not recognised.
-PF_BETA             = 2
+#   For z-scored features (real sonar mode): random-pair E[L2²] ≈ 112 (56-dim window),
+#   same-place E[L2²] ≈ 5–15. β=0.05 gives likelihood ratio ~100×.
+#   For fixed-normalisation features (sim / burst): β=2 worked well.
+PF_BETA             = 0.025
 
 # MIN_LC_GAP: minimum step separation between the two ends of a loop closure.
 #   Prevents the PF from "recognising" a place it just left (features are trivially
@@ -85,7 +88,7 @@ MIN_LC_GAP          = 10
 
 # LC_WEIGHT_THRESHOLD: minimum PF weight a candidate step must accumulate before
 #   it is accepted as a loop-closure partner. Higher = fewer but more confident LCs.
-LC_WEIGHT_THRESHOLD = 0.25
+LC_WEIGHT_THRESHOLD = 0.15
 
 # LC_DEDUP_BUCKET: two loop closures that map to the same (s//bucket, t//bucket)
 #   cell are merged into one. Avoids flooding the pose graph with near-duplicate
@@ -318,7 +321,9 @@ def ingest_real(run_dir: str):
 
     # Sonar-specific per-step arrays
     drive_mm = []
-    dist_mm, iid_db, r1_deg = [], [], []
+    dist_mm, r1_deg = [], []
+    log_L_list, log_R_list = [], []
+    prom_L_list, prom_R_list = [], []
     # Shared / burst-specific
     r2_deg = []
     intra_mm, inter_mm = [], []
@@ -361,9 +366,15 @@ def ingest_real(run_dir: str):
             sp = d["data"]["sonar_package"]
             drive_mm.append(float(mot["drive_mm"]))
             dist_mm.append(float(sp["corrected_distance"]) * 1000.0)
-            iid_db.append(float(sp["corrected_iid"]))
             r1_deg.append(float(mot["rotate1"]))
             r2_deg.append(float(mot["rotate2"]))
+            env       = sp["sonar_data"][:, :2].astype(np.float64)
+            integrals = np.array(sp["integrals"], dtype=np.float64) + 1.0
+            sum_total = env.sum(axis=0) + 1.0
+            log_L_list.append(float(sp["log_integrals"][0]))
+            log_R_list.append(float(sp["log_integrals"][1]))
+            prom_L_list.append(float(integrals[0] / sum_total[0]))
+            prom_R_list.append(float(integrals[1] / sum_total[1]))
 
     valid_arr = np.array(valid, dtype=bool)
     n_gaps = int((~valid_arr).sum())
@@ -426,12 +437,23 @@ def ingest_real(run_dir: str):
         dθ_rad = -np.radians(r2[1:])
         dr_mm_ = intra[1:] + inter[1:]
     else:
-        # Feature vector (matches SlamCore.collect_data sonar branch)
-        d_ = np.clip(np.asarray(dist_mm), 0.0, REAL_MAX_DIST_MM) / REAL_MAX_DIST_MM
-        i_ = np.asarray(iid_db)  / REAL_MAX_IID_DB
-        l1 = np.asarray(r1_deg)  / REAL_MAX_R1_DEG
-        l2 = np.asarray(r2_deg)  / REAL_MAX_R2_DEG
-        meas_seq = np.column_stack([d_, i_, l1, l2]).astype(np.float32)
+        # Feature set: dist_mm, log_L, log_R, prom_L, prom_R, r1_deg, r2_deg
+        # Best-performing scalar set from SCRIPT_SonarSpatialInfo (Precision@1=0.726 w=8).
+        # Z-scored across the run so all features have equal variance (~1) regardless
+        # of raw scale; this also makes PF_BETA independent of feature units.
+        raw = np.column_stack([
+            np.asarray(dist_mm),
+            np.asarray(log_L_list),
+            np.asarray(log_R_list),
+            np.asarray(prom_L_list),
+            np.asarray(prom_R_list),
+            np.asarray(r1_deg),
+            np.asarray(r2_deg),
+        ]).astype(np.float64)
+        means = raw.mean(axis=0)
+        stds  = raw.std(axis=0)
+        stds[stds < 1e-9] = 1.0
+        meas_seq = ((raw - means) / stds).astype(np.float32)
 
         # Commanded body-frame motion: dθ, dr between consecutive recorded poses.
         # Per SCRIPT_RunPolicy, pose[k] is read AFTER rotate1[k], BEFORE rotate2[k]
