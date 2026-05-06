@@ -107,7 +107,13 @@ def main(selected_ssid=None):
             if aborted_id is not None:
                 bridge.send_data({'id': aborted_id, 'status': 'error', 'reason': 'bumper'})
 
-        # -- Safety: Auto-stop if no command received for a while
+        # -- Safety: Auto-stop if no command received for a while.
+        # While a host-issued step is actively running we treat the host as
+        # alive: the host is just waiting on our reply, so refreshing the
+        # watchdog keeps long drives from being aborted mid-plan.
+        # Per-phase safety is still bounded by _PHASE_TIMEOUT_MS in motors.py.
+        if drive.is_busy():
+            last_cmd_received = now
         if ticks_diff(now, last_cmd_received) > 2500:
             aborted_id = drive.abort('timeout')
             if aborted_id is not None:

@@ -2,14 +2,19 @@
 Environment Simulator for robot navigation with sonar emulation.
 
 This module provides tools to simulate a robot moving through an arena and
-predict what sonar measurements (distance and IID) it would receive using
-the trained emulator.
+generate sonar-like measurements via the trained SonarModel:
+
+  geometry  →  profile  →  3 (distance, σ) pairs (left, center, right slice)
+
+Profile geometry parameters (opening_angle, profile_steps, profile_method)
+flow through from the SonarModel artifact, so retraining with different
+settings automatically updates what the simulator computes.
 """
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 
-from Library.Emulator import Emulator
+from Library.SonarModel import SonarModel
 from Library import DataProcessor
 
 
@@ -168,7 +173,7 @@ class ArenaLayout:
         dx = self.walls[:, 0] - rob_x
         dy = self.walls[:, 1] - rob_y
         rel_x_mm =  dx * cos_yaw + dy * sin_yaw
-        rel_y_mm =  dx * sin_yaw - dy * cos_yaw   # sign flip: image y-down → CCW-positive
+        rel_y_mm = -dx * sin_yaw + dy * cos_yaw   # matches DataProcessor.world2robot convention
         return rel_x_mm, rel_y_mm
     
     def compute_profile(self, rob_x: float, rob_y: float, rob_yaw_deg: float, 
@@ -251,41 +256,55 @@ class EnvironmentSimulator:
         robot_radius_mm: float = 85.0,
         boundary_margin_mm: Optional[float] = None,
         collision_step_mm: float = 20.0,
-        emulator_dir: str = "Emulator",
+        sonar_model_dir: str = "SonarModel",
+        seed: Optional[int] = None,
     ):
         """
-        Initialize simulator with arena layout and emulator.
+        Initialize simulator with arena layout and the trained sonar model.
 
         Args:
             session_name: Session to use for arena layout
             robot_radius_mm: Collision clearance radius around robot center
             boundary_margin_mm: Min distance from arena border (defaults to robot radius)
             collision_step_mm: Step size for drive-segment collision checking
-            emulator_dir: Directory containing emulator artifacts
+            sonar_model_dir: Directory containing the SonarModel artifacts
+                             (slices_best_model.pth + slices_feature_params.json)
+            seed: RNG seed for reproducible σ_sim noise. None → random.
         """
         # Load arena layout
         self.arena = ArenaLayout(session_name)
 
-        # Load emulator
-        self.emulator = Emulator.load(emulator_dir=emulator_dir, device="cpu")
+        # Load sonar model — single source of truth for cone/profile/σ_sim params.
+        self.sonar_model = SonarModel.load(model_dir=sonar_model_dir, device="cpu")
 
-        # Profile parameters — read from the emulator artifact so they are always
-        # consistent with what the model was trained on.
-        self.profile_params = self.emulator.get_profile_params()
-        self.opening_angle  = self.profile_params['profile_opening_angle']
+        # Profile parameters flow through from the trained model.
+        self.profile_params = self.sonar_model.get_profile_params()
+        self.opening_angle  = self.profile_params['opening_angle']
         self.profile_steps  = self.profile_params['profile_steps']
+        self.profile_method = self.profile_params['profile_method']
+        self.cone_half_deg  = self.sonar_model.get_cone_half_deg()
+
+        # Reproducible noise.
+        self.rng = np.random.default_rng(seed)
 
         self.robot_radius_mm    = float(robot_radius_mm)
         self.boundary_margin_mm = float(boundary_margin_mm) if boundary_margin_mm is not None else float(robot_radius_mm)
         self.collision_step_mm  = max(1.0, float(collision_step_mm))
 
         print(f"Simulator initialized with {session_name}")
-        print(f"Profile config: {self.opening_angle}° opening, {self.profile_steps} steps")
-        print(f"Arena size: {self.arena.arena_width:.0f}mm × {self.arena.arena_height:.0f}mm")
-        print(
-            f"Collision config: radius={self.robot_radius_mm:.1f}mm, "
-            f"boundary_margin={self.boundary_margin_mm:.1f}mm, step={self.collision_step_mm:.1f}mm"
-        )
+        print(f"  SonarModel: {self.sonar_model}")
+        print(f"  Profile:    {self.opening_angle}° opening, {self.profile_steps} steps,"
+              f" method={self.profile_method!r}")
+        print(f"  Cone:       ±{self.cone_half_deg:.0f}°  (3 slices)")
+        print(f"  Arena:      {self.arena.arena_width:.0f}mm × {self.arena.arena_height:.0f}mm")
+        print(f"  Collision:  radius={self.robot_radius_mm:.1f}mm, "
+              f"boundary_margin={self.boundary_margin_mm:.1f}mm, step={self.collision_step_mm:.1f}mm")
+
+    def reseed(self, seed: Optional[int]) -> None:
+        """Reset the σ_sim noise RNG. Call before a rollout that needs
+        deterministic noise from a given seed (so the same seed produces
+        identical sonar measurement noise)."""
+        self.rng = np.random.default_rng(seed)
 
     def _is_in_bounds(self, x: float, y: float) -> bool:
         """Check whether a position satisfies arena boundary clearance."""
@@ -395,20 +414,23 @@ class EnvironmentSimulator:
         min_az = -half_opening
         max_az = half_opening
         
-        # Compute profile
+        # Compute profile using the same method the model was trained with.
         centers, distances = self.arena.compute_profile(
             x, y, orientation_deg,
             min_az, max_az, self.profile_steps,
-            profile_method='min_bin'
+            profile_method=self.profile_method,
         )
-        
+
         return distances
     
     def get_sonar_measurement(self, x: float, y: float, orientation_deg: float) -> Dict[str, float]:
         """
-        Get predicted sonar measurement at position/orientation.
+        Get a simulated sonar measurement at position/orientation.
 
-        Both IID and distance are predicted by the emulator CNN.
+        Returns three (distance, σ) pairs for the left/center/right slices
+        of the trained sonar model's forward cone. Each distance is the
+        geometric truth for that slice plus N(0, σ_sim_slice(true_dist))
+        noise; each σ is the parametric σ_sim evaluation at the truth.
 
         Args:
             x, y: Position in mm
@@ -416,27 +438,28 @@ class EnvironmentSimulator:
 
         Returns:
             Dictionary with keys:
-            - 'iid_db':      Predicted IID in decibels
-            - 'distance_mm': Predicted sonar distance in mm
+              'distance_right_mm', 'distance_center_mm', 'distance_left_mm'
+              'sigma_right_mm',    'sigma_center_mm',    'sigma_left_mm'
         """
         profile = self.get_profile_at_position(x, y, orientation_deg)
-        return self.emulator.predict_single(profile)
-    
+        return self.sonar_model.predict_from_profile(profile, rng=self.rng)
+
     def get_sonar_measurements_batch(
         self,
         positions: List[Tuple[float, float, float]],
     ) -> List[Dict[str, float]]:
         """
-        Batch sonar measurements for N positions using a single CNN forward pass.
+        Batch sonar measurements for N positions.
 
-        Profile geometry is computed per-position (sequential), but all CNN
-        inference runs as one batched call — avoids N-fold PyTorch call overhead.
+        Profile geometry is computed per-position (sequential, geometry-bound),
+        and the SonarModel's predict_from_profile is called once on the batched
+        profiles to share noise sampling.
 
         Args:
             positions: List of (x, y, orientation_deg) tuples
 
         Returns:
-            List of measurement dicts (same keys as get_sonar_measurement)
+            List of measurement dicts (same keys as get_sonar_measurement).
         """
         if not positions:
             return []
@@ -446,14 +469,9 @@ class EnvironmentSimulator:
             dtype=np.float32,
         )  # (N, profile_steps)
 
-        # Single batched CNN inference for all positions
-        emulator_results = self.emulator.predict(profiles)
-
+        batch = self.sonar_model.predict_from_profile(profiles, rng=self.rng)
         return [
-            {
-                "iid_db":      float(emulator_results["iid_db"][k]),
-                "distance_mm": float(emulator_results["distance_mm"][k]),
-            }
+            {key: float(batch[key][k]) for key in batch}
             for k in range(len(positions))
         ]
 
@@ -480,6 +498,9 @@ class EnvironmentSimulator:
         current_orientation = start_orientation
 
         for step, action in enumerate(actions):
+            # CCW-positive everywhere: rotate{1,2}_deg, current_orientation,
+            # and the trig in get_relative_wall_coordinates all share the
+            # same convention, so plain addition composes correctly.
             # Apply rotate1
             current_orientation += action['rotate1_deg']
             current_orientation = current_orientation % 360

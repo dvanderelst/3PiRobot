@@ -1,9 +1,10 @@
 from Library import Client
-
+import time
 # ─── Baseline collection Settings ────
 robot_nr = 1
-ip='192.168.1.15'
-angle = 15
+ip=None
+angle = 10
+distance = 0
 # ─────────────────────────────────────
 
 client = Client.Client(robot_nr, ip=ip)
@@ -13,5 +14,12 @@ client.change_free_ping_period(0) #To ensure no free pings are done during calib
 #client.configuration.samples = 200
 
 robot_name = client.configuration.robot_name
-client.step(angle=int(angle))
+start = time.time()
+try:
+    client.step(angle=int(angle), distance=distance, linear_speed=0.1)
+except Exception as e:
+    print(f"Error during step command: {e}")
+
+end = time.time()
+print(end - start)
 client.read_and_process(plot=True)

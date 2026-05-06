@@ -228,7 +228,10 @@ class Client:
         else:
             curvature_inv_m = float(curvature_inv_mm) * 1000.0
             angle_rad = curvature_inv_m * float(step_distance_m)
-            angle_deg = -float(np.degrees(angle_rad))
+            # Both curvature and the firmware's `angle` argument are CCW-positive
+            # (positive = left turn), so this is a direct pass-through. Pre-May-2026
+            # firmware was CW-positive and required a sign flip here.
+            angle_deg = float(np.degrees(angle_rad))
         if max_angle_deg is not None:
             angle_deg = max(-float(max_angle_deg), min(float(max_angle_deg), float(angle_deg)))
         self.step(

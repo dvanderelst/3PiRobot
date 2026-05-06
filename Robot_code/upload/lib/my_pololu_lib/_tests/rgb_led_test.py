@@ -1,6 +1,6 @@
 # Run this test to verify that the LED functions work properly.
 
-from pololu_3pi_2040_robot import robot
+from my_pololu_lib import robot
 
 leds = robot.RGBLEDs()
 

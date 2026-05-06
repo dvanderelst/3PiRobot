@@ -1,12 +1,10 @@
 from Library import LorexTracker
 from Library import DataStorage
-from Library import Settings as _settings
 from LorexLib.Environment import capture_environment_layout
 
 DATA_FOLDER = 'TempOutput'
-_settings.data_folder = DATA_FOLDER
 
-session = 'temp'
+session = 'base'
 tracker = LorexTracker.LorexTracker()
 writer = DataStorage.DataWriter(session, autoclear=True, verbose=False)
 writer.add_file('Library/Settings.py')

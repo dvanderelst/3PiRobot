@@ -8,11 +8,12 @@ from Library import LorexTracker
 from Library import DataStorage
 from Library import PauseControl
 from Library import PushOver
+from Library import Settings as _settings
 from LorexLib.Environment import capture_environment_layout
 
 
 robot_number = 1
-session = 'sessionB05'
+session = 'sessionC01'
 wait_for_confirmation = False
 do_rotation = True
 do_translation = True
@@ -28,8 +29,8 @@ tracker = LorexTracker.LorexTracker()
 writer = DataStorage.DataWriter(session, autoclear=True, verbose=False)
 writer.add_file('Library/Settings.py')
 writer.add_file('Library/ControlParameters.py')
-snapshot = capture_environment_layout(save_root=f'TrainingData/{session}')
-CodeLogger.log_code(f'TrainingData/{session}', ['.', 'Library'], label=session)
+snapshot = capture_environment_layout(save_root=f'{_settings.data_folder}/{session}')
+CodeLogger.log_code(f'{_settings.data_folder}/{session}', ['.', 'Library'], label=session)
 parameters = ControlParameters.Parameters()
 parameters.plot(save_path=writer.files_folder())
 parameters.plot()
@@ -73,15 +74,29 @@ for step in range(max_steps):
     if do_half_turn: rotation_magnitude = 180
 
     if do_rotation:
-        if side_code == 'L': rotation = rotation_magnitude * 1
-        if side_code == 'R': rotation = rotation_magnitude * - 1
-        client.step(angle=rotation)
-        time.sleep(0.15)
+        # CCW-positive rotation convention: + = left turn. Wall on left → turn
+        # right (negative); wall on right → turn left (positive). See the
+        # convention block on the Notion "Lorex Camera System" page.
+        if side_code == 'L': rotation = rotation_magnitude * -1
+        if side_code == 'R': rotation = rotation_magnitude *  1
+        try:
+            client.step(angle=rotation)
+            time.sleep(0.5)
+        except RuntimeError as e:
+            # Robot likely stuck against a wall. Pause for the user to free it.
+            print(f"  *** Rotate aborted (step {step}): {e} — pausing")
+            control.wait_if_paused()
+            continue
     if do_translation:
         if corrected_distance < 0.75: step_distance = 0.10
         if corrected_distance < 0.3: step_distance = 0.05
-        client.step(distance=step_distance)
-        time.sleep(0.15)
+        try:
+            client.step(distance=step_distance)
+            time.sleep(0.5)
+        except RuntimeError as e:
+            print(f"  *** Drive aborted (step {step}): {e} — pausing")
+            control.wait_if_paused()
+            continue
 
     if wait_for_confirmation:
         response = Dialog.ask_yes_no("Continue", min_size=(400, 200))

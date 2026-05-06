@@ -1,4 +1,4 @@
-from pololu_3pi_2040_robot import robot
+from my_pololu_lib import robot
 
 class Screen:
     def __init__(self):

@@ -1,10 +1,10 @@
 def splash_loader(*, default_program, splash_delay_s, run_file_delay_ms):
-    from pololu_3pi_2040_robot.display import Display
+    from my_pololu_lib.display import Display
     display = Display()
     splash = None
     if splash_delay_s:
         # Display the splash screen ASAP.
-        splash = display.load_pbm("pololu_3pi_2040_robot/extras/splash.pbm")
+        splash = display.load_pbm("my_pololu_lib/extras/splash.pbm")
         display.blit(splash, 0, 0)
         display.show()
 
@@ -13,11 +13,11 @@ def splash_loader(*, default_program, splash_delay_s, run_file_delay_ms):
     button_b_beep = "!e32"
     button_c_beep = "!g32"
 
-    from pololu_3pi_2040_robot.buttons import ButtonA, ButtonB, ButtonC
-    from pololu_3pi_2040_robot.buzzer import Buzzer
-    from pololu_3pi_2040_robot.battery import Battery
-    from pololu_3pi_2040_robot.rgb_leds import RGBLEDs
-    from pololu_3pi_2040_robot.yellow_led import YellowLED
+    from my_pololu_lib.buttons import ButtonA, ButtonB, ButtonC
+    from my_pololu_lib.buzzer import Buzzer
+    from my_pololu_lib.battery import Battery
+    from my_pololu_lib.rgb_leds import RGBLEDs
+    from my_pololu_lib.yellow_led import YellowLED
     import time
     from machine import PWM
 
@@ -153,7 +153,7 @@ def splash_loader(*, default_program, splash_delay_s, run_file_delay_ms):
     def menu():
         rgb_leds.off()
 
-        from pololu_3pi_2040_robot.extras.menu import Menu
+        from my_pololu_lib.extras.menu import Menu
         import os
         from math import exp
 

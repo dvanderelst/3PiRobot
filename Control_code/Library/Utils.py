@@ -1,22 +1,9 @@
-import ipaddress
 import math
 from matplotlib import pyplot as plt
-import matplotlib.patches as patches
 
 import time
 import string
 import numpy as np
-
-def profiledist2sonarsample(dists, samples):
-    if len(dists) != 2 or len(samples) != 2:raise ValueError("x and y must each contain exactly 2 values")
-    x1, x2 = dists
-    y1, y2 = samples
-    # Calculate the slope (m)
-    m = (y2 - y1) / (x2 - x1)
-    # Calculate the y-intercept (b)
-    b = y1 - m * x1
-    return b, m
-
 
 
 def wrap_angle(angle, mode='deg180'):
@@ -106,39 +93,11 @@ def find_closest_value_index(array, target):
     #value = array[idx]
     return idx
 
-def is_valid_ip(s):
-    if not isinstance(s, str):
-        return False
-    try:
-        ipaddress.IPv4Address(s)
-        return True
-    except ipaddress.AddressValueError:
-        return False
-
-def compare_configurations(config1, config2):
-        sample_rate1 = config1.sample_rate
-        samples1 = config1.samples
-        sample_rate2 = config2.sample_rate
-        samples2 = config2.samples
-
-        sample_rate_same = sample_rate1 == sample_rate2
-        samples_same = samples1 == samples2
-        matches = sample_rate_same and samples_same
-        return matches
-
-
 def distance2samples(sample_rate, distance_m):
     speed_of_sound = 343.0
     t = 2.0 * distance_m / speed_of_sound  # seconds (round trip)
     n = int(round(t * float(sample_rate)))  # samples
     return n
-
-def samples2distance(sample_rate, n_samples):
-    speed_of_sound = 343.0
-    t = float(n_samples) / float(sample_rate)
-    distance_m = 0.5 * speed_of_sound * t
-    return distance_m
-
 
 def get_distance_axis(sample_rate, samples):
     speed_of_sound = 343.0
@@ -164,32 +123,6 @@ def fit_linear_calibration(real_distance1, raw_distances1, real_distance2, raw_d
     b = y_mean - a * x_mean
 
     return a, b
-
-
-def draw_integration_box(ax, bounds, color='gray', alpha=0.3, onset_color='red'):
-    if not 2 <= len(bounds) <= 4:
-        raise ValueError("bounds must have 2 to 4 elements: (x_min, x_max[, y_min, y_max])")
-    x_min, x_max = bounds[0], bounds[1]
-    # Handle y bounds
-    if len(bounds) >= 4:
-        y_min, y_max = bounds[2], bounds[3]
-    else:
-        ymin, ymax = ax.get_ylim()
-        y_min = bounds[2] if len(bounds) == 3 else ymin
-        y_max = ymax
-    # Draw shaded rectangle
-    rect = patches.Rectangle(
-        (x_min, y_min),
-        x_max - x_min,  # width
-        y_max - y_min,  # height
-        linewidth=0,
-        facecolor=color,
-        alpha=alpha,
-        label='Integration Extent'
-    )
-    ax.add_patch(rect)
-    # Draw onset line
-    ax.axvline(x_min, color=onset_color, linestyle='--', label='Onset')
 
 
 def none2nan(array):
@@ -243,42 +176,6 @@ def chip(array, n):
     if array.ndim == 1: return chip1d(array, n)
     if array.ndim == 2: return chip2d(array, n)
     raise ValueError("array of wrong shape")
-
-def get_extrema_positions(array, extrema='max'):
-    if array.ndim == 1:
-        if extrema == 'min': return np.nanargmin(array)
-        if extrema == 'max': return np.nanargmax(array)
-    if array.ndim == 2:
-        if extrema == 'min': return np.nanargmin(array, axis=1)
-        if extrema == 'max': return np.nanargmax(array, axis=1)
-
-def get_side_average(array):
-    # returns +1 if closest distances at right
-    # return - 1 if closest distances at left
-    if array.ndim == 1:
-        length = len(array)
-        middle = length // 2
-        left_side_of_robot = np.nansum(array[middle + 1:])              #from middle + 1 to end
-        right_side_of_robot = np.nansum(array[:middle])                 #from start to middle - 1
-        side = np.sign(left_side_of_robot - right_side_of_robot)        #left farther => positive or obstacle at RIGHT
-        return side
-    if array.ndim == 2:
-        width = array.shape[1]
-        middle = width // 2
-        left_side_of_robot = array[:, middle + 1:]  #from middle + 1 to end
-        right_side_of_robot = array[:, :middle]     #from start to middle - 1
-        left_side_of_robot = np.nansum(left_side_of_robot, axis=1)
-        right_side_of_robot = np.nansum(right_side_of_robot, axis=1)
-        side = np.sign(left_side_of_robot - right_side_of_robot)
-        return side
-
-def get_extrema_values(array, extrema='max'):
-    if array.ndim == 1:
-        if extrema == 'min': return np.nanmin(array)
-        if extrema == 'max': return np.nanmax(array)
-    if array.ndim == 2:
-        if extrema == 'min': return np.nanmin(array, axis=1)
-        if extrema == 'max': return np.nanmax(array, axis=1)
 
 
 def plot_robot_positions(x, y, yaws_deg, dot_color='black', arrow_color='black', arrow_length=100, dot_cmap='viridis', arrow_cmap='viridis'):

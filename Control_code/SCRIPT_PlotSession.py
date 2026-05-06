@@ -9,7 +9,7 @@ from Library import DataProcessor, Utils
 # ============================================
 # CONFIGURATION
 # ============================================
-#data_folder = "TrainingData"  # or "PolicyRuns"
+#data_folder = "SonarSessions"  # or "PolicyRuns"
 data_folder = "PolicyRuns"
 session = "session5_h10_arena1_02"
 
