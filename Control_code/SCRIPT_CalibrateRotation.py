@@ -39,22 +39,23 @@ from Library import Client
 from Library import LorexTracker
 from Library import Utils
 from Library import Settings as _settings
+from Library.TrackerNav import wait_for_stable_pose
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-ROBOT_ID       = 1
-ANGLES         = [-40, -30, -20, -10, -5, 5, 10, 20, 30, 40]   # 0 added implicitly as (0, 0)
-REPEATS        = 3
-SETTLE_S       = 2.5   # wait after each step for the robot/tracker to settle
-PRE_READ_S     = 1.5  # tiny pause before yaw read so a previous step has flushed
+ROBOT_ID            = 1
+ANGLES              = [-40, -30, -20, -10, -5, 5, 10, 20, 30, 40]   # 0 added implicitly as (0, 0)
+REPEATS             = 3
+POST_STEP_DELAY_S   = 1.0   # buffer after each step so the tracker has begun
+                            # reflecting the new motion before settled-poll starts.
+                            # Without this, identical lagged frames look "stable"
+                            # and produce a y_after read that's still pre-rotation.
 
 
-def _read_yaw(tracker, robot_id):
-    pos = tracker.get_position(robot_id)
-    if not pos:
-        return None
-    yaw = pos.get("yaw_deg")
-    return float(yaw) if yaw is not None else None
+def _read_yaw_settled(tracker, robot_id):
+    """Return a yaw read taken after the tracker has settled, or None."""
+    pose = wait_for_stable_pose(tracker, robot_id, verbose=True)
+    return pose[2] if pose is not None else None
 
 
 def main():
@@ -89,15 +90,14 @@ def main():
     # heating) is averaged across all angles instead of biasing one bin.
     for rep in range(REPEATS):
         for a in ANGLES:
-            time.sleep(PRE_READ_S)
-            y_before = _read_yaw(tracker, ROBOT_ID)
+            y_before = _read_yaw_settled(tracker, ROBOT_ID)
             try:
                 client.step(angle=a, rotation_speed=90)
             except RuntimeError as e:
                 print(f"  rep {rep}, angle {a:+4d}: step aborted: {e}")
                 continue
-            time.sleep(SETTLE_S)
-            y_after = _read_yaw(tracker, ROBOT_ID)
+            time.sleep(POST_STEP_DELAY_S)
+            y_after = _read_yaw_settled(tracker, ROBOT_ID)
             if y_before is None or y_after is None:
                 print(f"  rep {rep}, angle {a:+4d}: tracker missed pose; skipping")
                 continue

@@ -31,17 +31,12 @@ class ClientConfig:
     # actually obtained by the robot for that command. Both columns are in the
     # CCW-positive convention (positive = left turn), matching tracker yaw,
     # world +X, and the firmware after the May-2026 CW→CCW sign flip in
-    # motors.py.
-    #
-    # TODO: re-measure per-robot calibrations after the firmware flip. The
-    # previous client1 measurement showed real L/R asymmetry (positive vs
-    # negative angles produced different magnitudes), and the flip swapped
-    # which wheel pattern is driven for a given signed command, so the old
-    # numbers no longer describe what the robot does. Until a fresh
-    # measurement is taken, all clients use the symmetric identity default.
-    rotation_desired: list = field(default_factory=lambda: [-40, -30, -20, -10, -5, 0, 5, 10, 20, 30, 40])
-    rotation_obtained: list = field(default_factory=lambda: [-40.24, -29.83, -20.71, -10.61, -5.02, 0.0, 4.51, 10.48, 20.98, 29.7, 38.55])
-
+    # motors.py. Re-measure with SCRIPT_CalibrateRotation.py if the robot's
+    # rotation behaviour changes (battery degradation, motor wear, firmware
+    # changes, etc.).
+    rotation_desired:  list = field(default_factory=lambda: [-40, -30, -20, -10, -5, 0, 5, 10, 20, 30, 40])
+    rotation_obtained: list = field(default_factory=lambda: [-40.75, -28.52, -19.29, -11.96, -5.44, 0.0, 5.41, 11.3, 21.01, 29.28, 40.48])
+    
 client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101", aruco_id=0)
 client2 = ClientConfig(robot_name="Robot02", ip="192.168.0.102", aruco_id=1)
 client3 = ClientConfig(robot_name="Robot03", ip="192.168.0.103", aruco_id=2)

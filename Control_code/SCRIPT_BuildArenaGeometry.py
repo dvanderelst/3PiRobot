@@ -66,18 +66,15 @@ from Library.DataProcessor import read_wall_mask, mask2coordinates
 # Settings  ← change these before running
 # ══════════════════════════════════════════════════════════════════════════════
 
-# One or more session folders, env folders, or SonarSessions roots. Each path
-# is processed in turn; any env_* subfolder found is rebuilt.
-SESSION_PATHS: List[str] = [
-    "SonarSessions/sessionB01",
-    "SonarSessions/sessionB02",
-    "SonarSessions/sessionB03",
-    "SonarSessions/sessionB04",
-    "SonarSessions/sessionB05",
-    "TargetArenas/easy",
-    "TargetArenas/hard",
-    "TargetArenas/loop1",
-    "TargetArenas/loop2"
+# Parent folders to walk. Each entry can be:
+#   - a parent containing arena folders, e.g. AcquisitionArenas/<layout>/env_*/
+#   - an arena folder containing env_* subfolders directly, e.g. TargetArenas/easy/
+#   - an env_* folder itself
+# Missing entries are skipped with a warning so the two parents below can be
+# populated independently.
+ROOTS: List[str] = [
+    "AcquisitionArenas",   # arenas used for vision-guided sonar data collection
+    "TargetArenas",        # arenas used for policy training/deployment
 ]
 
 # Wall height (mm) — used to back-project annotated wall tops to their (X, Y)
@@ -204,10 +201,28 @@ def backproject_annotation(
 # ─── Build per env ───────────────────────────────────────────────────────────
 
 def find_env_dirs(root: Path) -> List[Path]:
-    """Return env_* subfolders under *root*, or [root] if root itself is one."""
+    """Return env_* folders under *root*. Three accepted shapes:
+
+    - *root* is itself an env_* folder → return [root].
+    - *root* contains env_* subfolders directly (an arena folder, e.g.
+      TargetArenas/easy/) → return those.
+    - *root* contains arena-folder children which themselves contain env_*
+      grandchildren (a parent like AcquisitionArenas/) → recurse one level
+      and return env_* across all arena subfolders.
+    """
     if root.name.startswith("env_"):
         return [root]
-    return sorted(p for p in root.iterdir() if p.is_dir() and p.name.startswith("env_"))
+    direct = sorted(p for p in root.iterdir()
+                    if p.is_dir() and p.name.startswith("env_"))
+    if direct:
+        return direct
+    nested: List[Path] = []
+    for sub in sorted(p for p in root.iterdir() if p.is_dir()):
+        nested.extend(sorted(
+            p for p in sub.iterdir()
+            if p.is_dir() and p.name.startswith("env_")
+        ))
+    return nested
 
 
 def load_meta(env_dir: Path) -> dict:
@@ -359,10 +374,11 @@ def plot_walls(
 def process(root: Path, pylorex_calib_dir: Path) -> None:
     env_dirs = find_env_dirs(root)
     if not env_dirs:
-        raise SystemExit(f"No env_* subfolders under {root}")
+        print(f"  no env_* subfolders under {root}; skipping")
+        return
     print(f"Processing {len(env_dirs)} env folder(s) under {root}")
     for env_dir in env_dirs:
-        print(f"  {env_dir}")
+        print(f"  {env_dir.relative_to(root.parent) if root.parent in env_dir.parents else env_dir}")
         build_walls_for_env(env_dir, pylorex_calib_dir)
 
 
@@ -381,8 +397,9 @@ if __name__ == "__main__":
             f"PYLOREX_CALIBRATION_DIR not found: {pylorex_calib_dir}\n"
             f"(resolved from '{PYLOREX_CALIBRATION_DIR}')"
         )
-    for path_str in SESSION_PATHS:
+    for path_str in ROOTS:
         path = _resolve(path_str)
         if not path.is_dir():
-            raise SystemExit(f"Not a directory: {path}")
+            print(f"Skipping {path_str}: not found at {path}")
+            continue
         process(path, pylorex_calib_dir)
