@@ -66,15 +66,18 @@ from Library.DataProcessor import read_wall_mask, mask2coordinates
 # Settings  ← change these before running
 # ══════════════════════════════════════════════════════════════════════════════
 
-# One or more session folders, env folders, or TrainingData roots. Each path
+# One or more session folders, env folders, or SonarSessions roots. Each path
 # is processed in turn; any env_* subfolder found is rebuilt.
 SESSION_PATHS: List[str] = [
-    "TrainingData/sessionB01",
-    "TrainingData/sessionB02",
-    "TrainingData/sessionB03",
-    "TrainingData/sessionB04",
-    "TrainingData/sessionB05",
-    "PolicyRuns/session5_h10_arena1_01"
+    "SonarSessions/sessionB01",
+    "SonarSessions/sessionB02",
+    "SonarSessions/sessionB03",
+    "SonarSessions/sessionB04",
+    "SonarSessions/sessionB05",
+    "TargetArenas/easy",
+    "TargetArenas/hard",
+    "TargetArenas/loop1",
+    "TargetArenas/loop2"
 ]
 
 # Wall height (mm) — used to back-project annotated wall tops to their (X, Y)

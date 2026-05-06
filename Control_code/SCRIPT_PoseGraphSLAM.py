@@ -429,12 +429,13 @@ def ingest_real(run_dir: str):
         # This attributes the intra-burst drive to the post-r2 heading, a
         # small bias on non-zero-r2 steps that SLAM absorbs as odom residual.
         #
-        # Sign flip per rotation_conventions.md §2: commanded rotations are
-        # CW-positive, overhead-camera yaw is CCW-positive. Negate dθ.
+        # Both commanded rotations and overhead-camera yaw are CCW-positive
+        # (post-May-2026 firmware flip; see Convention block on the Notion
+        # "Lorex Camera System" page), so no sign flip is needed here.
         r2 = np.asarray(r2_deg, dtype=np.float64)
         intra = np.asarray(intra_mm, dtype=np.float64)
         inter = np.asarray(inter_mm, dtype=np.float64)
-        dθ_rad = -np.radians(r2[1:])
+        dθ_rad = np.radians(r2[1:])
         dr_mm_ = intra[1:] + inter[1:]
     else:
         # Feature set: dist_mm, log_L, log_R, prom_L, prom_R, r1_deg, r2_deg
@@ -466,13 +467,12 @@ def ingest_real(run_dir: str):
         #  assumed yaw[k]+dθ[k]; the rotate1[k+1] mis-attribution is small when
         #  rotations are small per step.)
         #
-        # Sign flip: per rotation_conventions.md §2, commanded rotations are
-        # CW-positive, but overhead-camera yaw (and the solver's trig) are
-        # CCW-positive. Negate commanded dθ here so both odometry sources feed
-        # the GN solver in a consistent CCW-positive frame.
+        # Both commanded rotations and the solver's trig are CCW-positive
+        # (post-May-2026 firmware flip; see Convention block on the Notion
+        # "Lorex Camera System" page), so no sign flip is needed here.
         r1 = np.asarray(r1_deg, dtype=np.float64)
         r2 = np.asarray(r2_deg, dtype=np.float64)
-        dθ_rad = -np.radians(r2[:-1] + r1[1:])
+        dθ_rad = np.radians(r2[:-1] + r1[1:])
         dr_mm_ = np.asarray(drive_mm[:-1], dtype=np.float64)
 
     commanded = {"dθ_rad": dθ_rad, "dr_mm": dr_mm_}

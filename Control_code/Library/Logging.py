@@ -63,13 +63,6 @@ _T0_NS = time.perf_counter_ns()
 _LAST_GLOBAL_NS = _T0_NS
 _LAST_BY_ORIGIN_NS = defaultdict(lambda: None)  # origin -> last perf_counter_ns
 
-def reset_timing():
-    """Reset the process start and 'last' markers (useful between runs)."""
-    global _T0_NS, _LAST_GLOBAL_NS, _LAST_BY_ORIGIN_NS
-    _T0_NS = time.perf_counter_ns()
-    _LAST_GLOBAL_NS = _T0_NS
-    _LAST_BY_ORIGIN_NS.clear()
-
 def _ms(ns: int) -> float:  # ns -> ms float
     return ns / 1e6
 

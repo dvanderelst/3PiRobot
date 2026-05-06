@@ -3,38 +3,17 @@
 *__pycache*
 */.*/
 
-############## Control_code sub repo
+############## Control_code output folders
 Control_code/Library/RobotCalibration/
-Control_code/TestScripts
-Control_code/PaperPlots/
-Control_code/TrainingData/
+Control_code/Cache/
+Control_code/PolicyAssessment/
 Control_code/PolicyRuns/
 Control_code/PolicyTraining/
+Control_code/TargetArenas/
 Control_code/TempOutput/
-Control_code/EchoProcessor/
-Control_code/Emulator/
-
-Control_code/PolicyAssessment/
-Control_code/ValidStarts/
-Control_code/Cache/
-Control_code/CollisionAssessment/
-############## Robot code sub repo
-robot_code/.Trash-1000/
-robot_code/System Volume Information/
-
-############## Updater sub repo
-Updater/staging/
-
-Control_code/cache/
-
-
+Control_code/SonarModel/
+Control_code/SonarSessions/
 
 *.zip
-
-
-
-Control_code/SupervisorData/
-
-Control_code/DemonstratorData/
 
 .claude/

@@ -1,300 +1,237 @@
 > **Do not edit without explicit user consent.**
 
 > **Implementation:** the canonical implementation of this rationale lives in three files:
-> `SCRIPT_TrainEmulator.py` (emulator training), `SCRIPT_TrainPolicy.py` (policy training),
+> `SCRIPT_TrainSonarModel.py` (sonar model training), `SCRIPT_TrainPolicy.py` (policy training),
 > and `SCRIPT_RunPolicy.py` (deployment). Consistency checks should cover all three.
 
 # Project Overview
 
-Modelling a bat that learns to use its sonar system, with a specific focus on **vicarious learning**: a single generic acoustic emulator, learned once from real sonar data, is used to mentally rehearse in any new arena so that a policy can be fit to that arena without the robot physically crashing in it.
+Modelling a bat that learns to use its sonar system, with a specific focus on **vicarious learning**: a single generic sonar model, trained once on real sonar data, is used to mentally rehearse in any new arena so that a policy can be fit to that arena without the robot physically crashing in it.
 
 The pipeline has three stages:
 
-1. **Generic emulator.** Train a single emulator on pooled sonar data in `TrainingData/` (sessions B01–B05). This emulator is trained once and reused across all downstream arenas.
-2. **Arena specification.** For each target arena, extract its layout from an annotated overhead image in the same edge format used during emulator training.
-3. **Arena-specific policy.** Using the emulator as a simulator of that arena's geometry, train a policy dedicated to that arena. One policy per target arena.
+1. **Generic sonar model.** Train a single 3-slice distance model on pooled real sonar data (sessions B01–B05). The model maps a stereo sonar envelope to three (distance, σ) pairs covering the forward cone. It is trained once and reused across all downstream arenas.
+2. **Arena specification.** For each target arena, extract its layout from an annotated overhead image into the same edge format used during sonar-model training, and define a target path through it. Together these specify what the robot should do in that arena.
+3. **Arena-specific policy.** Using the trained sonar model as the sensor inside a geometric simulator of the target arena, train a policy by **behavioural cloning of a pure-pursuit teacher** that knows the target path. One policy per target arena.
 4. **Deployment + cross-arena control.** Each policy is deployed on the real robot in its matched arena. Policies are then cross-swapped (policy_A in arena_B, and vice versa) as the primary control.
 
-The central empirical claim is that the matched condition outperforms the swapped condition. A positive result simultaneously demonstrates (a) that policies are genuinely arena-specific and (b) that the emulator-based vicarious adaptation is doing real work.
+The central empirical claim is that the matched condition outperforms the swapped condition. A positive result simultaneously demonstrates (a) that policies are genuinely arena-specific and (b) that the simulator-driven vicarious adaptation is doing real work.
 
-Data collection for the emulator sessions uses `SCRIPT_DataAcquisition.py`.
+Real-data collection for the sonar-model sessions uses `SCRIPT_DataAcquisition.py`.
 
 ---
 
-## Emulator
+## Sonar Model
 
-The emulator predicts, from a geometric profile of the local arena, the sonar readings (IID and distance) the robot would receive at that position and heading. It is a single 1D CNN with two regression heads — one for IID and one for distance — both trained on echo-present samples only. Echo presence is not predicted explicitly.
+The sonar model predicts, from a stereo sonar envelope, the minimum wall distance (with predictive σ) in each of three angular slices of a forward cone. It is trained **once** on pooled data from `EmulatorTrainingData/` and held fixed across all downstream policy-training runs. Its generality is what makes vicarious learning possible.
 
-The emulator is trained **once** on pooled data from `TrainingData/` and is held fixed across all downstream policy-training runs. Its generality is what makes vicarious learning possible.
+### Geometry and slices
 
-### Profile (input)
+- **Forward cone:** ±`cone_half_deg` around boresight (currently 35°).
+- **Slices:** the cone is split into three equal angular thirds — `right`, `center`, `left` — each `2/3 × cone_half_deg` wide. Names follow the project `+az = LEFT` convention: the `right` slice covers the most-negative-azimuth third (robot's physical right), the `left` slice covers the most-positive third.
+- **Profile (ground truth at training/sim time):** a 1-D array of wall distances sampled at evenly-spaced azimuth bins covering `opening_angle` (currently 270°) over `profile_steps` bins (currently 90), centred on the robot's heading. The per-slice training target is the minimum wall distance whose bin centre falls within that slice. `profile_method` (`ray_center` or `min_bin`) controls how each profile bin is computed from the wall point cloud.
 
-A profile is a 1D array of wall distances sampled at evenly-spaced azimuth angles centred on the robot's current heading. The same profile is the input to both CNN heads.
+All of these parameters are recorded in `SonarModel/slices_feature_params.json`. The simulator and policy-training pipeline read them from that file, so retraining the sonar model with different geometry automatically propagates downstream.
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| `opening_angle` | 220° | Broad enough to give the CNN lateral context, including walls that influence IID even outside the sonar's forward beam |
-| `resolution` | 11°/bin | 220° / 20 bins — fine enough to resolve spatial variation, compact enough to keep input small |
-| `profile_method` | `min_bin` | Also available: `ray_center` (see `DataCollection.load_profiles()`) |
+### Architecture (`SonarSlicesUQ`)
 
-Distances in the profile are in **mm**.
+A single 1-D CNN backbone embeds the left and right sonar envelopes independently into feature vectors `z_L` and `z_R`. Three heads then produce (mean, log σ²) per slice:
 
-### IID and distance (shared CNN, two heads)
+- **Center heads** operate on `(z_L + z_R) / 2`. By construction, swapping L and R leaves the center prediction unchanged.
+- **Side heads** share weights and are applied with channels swapped:
+  - `right_*` receives `concat(z_L, z_R)`  (zL-emphasized → trained on the negative-azimuth slice)
+  - `left_*`  receives `concat(z_R, z_L)`  (zR-emphasized → trained on the positive-azimuth slice)
+  Swapping the L and R sonar inputs exactly swaps the left and right predictions.
 
-**Targets:**
-- `corrected_iid` from the sonar package — a single float per step, in dB. IID > 0 means wall on the right; IID < 0 means wall on the left.
-- `corrected_distance` from the sonar package — in mm.
+This bakes in the physical L/R symmetry of the robot. Each head is a small 2-layer MLP.
 
-The full 220° profile (20 bins) is used as input to both heads. A broad profile is necessary because IID encodes the lateral asymmetry of the environment, which requires context beyond the narrow forward beam. The distance head uses the same input; the CNN learns which parts of the profile are relevant for each output.
+### Envelope normalisation
 
-**Profile normalisation:** each profile is divided by `max_dist_mm` (a fixed global scale), then z-scored using training-set per-bin mean and std. This preserves absolute distance information across profiles.
+Each ping's L and R envelopes are min-max scaled per channel to a fixed range (`[0, 1]`) along the time axis before they reach the conv stack. Applied identically in `SCRIPT_TrainSonarModel.load_data` and inside `SonarModel.predict_from_envelope` at inference; the chosen mode is recorded in `slices_feature_params.json` under `envelope_norm` so train and deploy paths can't drift apart. Legacy feature_params files without that field default to a no-op for backward compatibility.
 
-> **Do NOT normalise each profile by its own mean (per-profile normalisation).** This is acoustically incorrect: IID magnitude depends on absolute distance, not just the shape of the profile. A profile at a sufficiently large distance produces IID ≈ 0 regardless of its shape, because the sonar echoes are too weak to carry lateral information. Per-profile normalisation would make all such distant profiles look identical to nearby ones, destroying the distance cue the CNN needs.
+The motivation is sim-to-real robustness on the absolute amplitude of the receive envelope. The emit-pulse peak and the post-pulse signal level both depend on battery state and analog-receive-path drift; we observed empirically that the same robot in the same arena can produce envelope peaks at 25 k counts on one day and 28–30 k counts on another, with no firmware or arena change. With raw amplitudes feeding the conv stack, this between-session gain drift pushes inputs out of the model's training distribution and degrades predictions sharply. Per-ping normalisation removes absolute amplitude as a cue — the conv stack reads only envelope *shape* — and the model becomes invariant to receive-path gain.
 
-**Model architecture:**
+The upper reference for the rescale is the max within the first `ref_window` samples of the envelope (currently 10), not the global max. This anchors the scale to the **emit-pulse region**, which is always present at the start of every ping. Anchoring on the global max would silently mis-scale pings where a strong close-wall echo exceeds the emit-pulse peak — those would be normalised differently from "normal" pings even though their underlying signal interpretation should be consistent. With emit-anchored scaling, post-emit echoes simply produce normalised values proportional to their amplitude relative to the emit drive (sometimes > 1 for very close walls), giving the conv stack a consistent feature scale. The lower reference is the global min (the noise floor).
 
-```
-Conv1D(in=1,  out=32, kernel=5, padding=2) → ReLU   ┐
-Conv1D(in=32, out=64, kernel=5, padding=2) → ReLU   ┘ shared backbone
-AdaptiveAvgPool1d(8) → flatten → FC(64×8=512 → 64) → ReLU
+The trade-off is loss of an absolute-distance hint that lives in raw amplitude (closer wall ↔ stronger echo, by spreading-loss). Empirically, echo *timing* is a much stronger distance cue than raw amplitude, so this loss is small; whether it's negligible is testable by comparing held-out NLL between a normalised SonarModel and a non-normalised one.
 
-→ FC(64→32) → ReLU → FC(32→1)   [IID head: predicted IID in dB]
-→ FC(64→32) → ReLU → FC(32→1)   [distance head: predicted distance in mm]
-```
+### Loss and training
 
-**Loss:** `IID_MSE + dist_loss_weight × distance_MSE`, computed on echo-present samples only. Both targets are z-scored independently (using echo-present training statistics) before computing MSE, so the two losses are in comparable units.
+For each slice the loss is **Gaussian negative log-likelihood**:
+`0.5 × (log σ² + (μ − target)² / σ²)`,
+with log-σ² clamped to `[LOG_VAR_MIN, LOG_VAR_MAX]`. The first `WARMUP_EPOCHS` use plain MSE on the means only, then training switches to NLL so the σ heads can fit residual scale without dragging the means around at initialisation.
 
-### Echo presence
+Training data is split by **quadrant** per session: one quadrant per session is held out for validation (≈25% of each session), and the held-out set defines both the val-NLL early-stopping signal and the empirical σ_sim lookup described below.
 
-Echo presence is **not** predicted by the emulator. Samples with `corrected_distance ≥ max_dist_mm` are excluded from training (their distance and IID values are sentinel values set by `AcousticProcessing`, not real measurements). At inference the networks simply extrapolate: a flat, far-away profile naturally produces a large predicted distance and near-zero predicted IID, which is the correct behaviour.
+### Two inference paths from one model
 
-### Symmetrised inference
+`Library/SonarModel.py` wraps the trained checkpoint and exposes two callable interfaces with the same six-key output (`distance_{L,C,R}_mm`, `sigma_{L,C,R}_mm`):
 
-By physical definition, mirroring a profile horizontally (left↔right) must negate the IID and leave the distance unchanged. A CNN trained on finite data may not learn these (anti)symmetries exactly. To enforce them at inference time, each profile is passed through the network twice — once as-is and once flipped — and the outputs are combined:
+- **`predict_from_envelope(L, R)`** — used at deployment. The real sonar envelope is z-scored using the saved training mean/std and run through the network; σ is the network's heteroscedastic per-ping prediction.
+- **`predict_from_profile(profile, rng)`** — used inside the simulator. The geometric per-slice minimum distance is taken from the profile and corrupted with `N(0, σ_sim_slice(d_true))`. `σ_sim` for each slice is a linear interpolation through per-bin empirical residual standard deviations measured on the validation split, stored in `feature_params.json`.
 
-```
-iid_db   = (iid_normal  − iid_flipped)  / 2   # antisymmetric under flip
-distance = (dist_normal + dist_flipped) / 2   # symmetric under flip
-```
+The σ in the two paths is **different by design**: at sim time we don't have a sonar input to condition on, so we use the marginal residual scale; at deploy time the network's per-ping σ is more informative and is used directly. They agree only insofar as the σ heads have correctly learned the marginal distance-conditional residual scale.
 
-This guarantees the physical constraints are satisfied regardless of any residual asymmetry in the trained weights, at the cost of doubling inference time.
+### Why σ, why three slices
 
-### Data, split, and evaluation
+- σ lets the policy reason about confidence (it can ignore high-σ readings or weight them less). In practice the current policy is configured with `use_sigma=False` and the σ outputs are not consumed — but the model is trained with them so the option is on the shelf.
+- Three slices give the policy a coarse left/center/right asymmetry signal without exposing it to the full, high-dimensional profile. Cheapest possible spatial input that still preserves "is the obstacle on my left or my right?".
 
-**Data source:** all sessions in `TrainingData/` (B01–B05), loaded via `DataCollection`. Each data point pairs a profile (computed from the arena geometry at the robot's logged position and heading) with the `corrected_iid` and `corrected_distance` from the sonar package recorded at that step.
+### Diagnostics
 
-**Train/validation split** is quadrant-based: the emulator is trained on data from most spatial regions and validated on held-out regions. The split is specified as a dict mapping session name to a list of quadrant indices (0–3) to withhold for validation. All remaining data from all sessions goes to training. Example:
-
-```python
-validation_quadrants = {
-    "sessionB01": [3],
-    "sessionB03": [3],
-}
-```
-
-This withholds ~12.5% of data per listed session while keeping all other sessions' data in training.
-
-**Role of this split.** Under the new scope, the emulator's ultimate test is **behavioural**: does a policy trained vicariously with it work in a real arena? If the behavioural test fails, the emulator is one of several possible culprits. The quadrant-held-out split is therefore retained as a **diagnostic** — a cheap, standalone measure of emulator quality that lets us distinguish "bad emulator" from "bad policy training" when a downstream run disappoints. It is not the primary validation.
-
-**Metrics:** report Pearson r and RMSE for IID and distance separately on (1) training data (echo-present) and (2) held-out validation quadrants (echo-present).
+Per-slice scatter and σ calibration plots, an L/C/R collapse check, an "overall min" comparison against a single-output distance model, and per-slice σ_sim fits are written alongside the checkpoint. Val-set NLL is the standalone diagnostic used to flag a bad sonar model when downstream policy results are weak.
 
 ---
 
 ## Arena Specification
 
-Each target arena is specified by an **annotated overhead image**, processed into arena edges using the same pipeline as the `TrainingData/` sessions (see `SCRIPT_BuildArenaGeometry.py` and `EnvironmentSimulator`). The edge representation is what the simulator consumes when generating profiles for emulator queries during policy training, and is the only geometric information the policy-training pipeline needs about that arena.
+Each target arena is specified by:
 
-Target arenas are independent of the sessions in `TrainingData/` — the whole point of vicarious learning is that the emulator generalises to geometry it was not trained on.
+1. An **annotated overhead image** processed into wall edges via `SCRIPT_BuildArenaGeometry.py`. The wall-cloud format is the same one used for the sonar-model training sessions.
+2. A **target path** (`TargetArenas/<arena>/target_path.json`) — a closed polygonal loop of waypoints in arena (x, y) mm coordinates that the robot is expected to follow. Loaded and densified by `Library/TargetPath.py`.
+3. A **release box and direction arrow** inside the path JSON, specifying the rectangle and yaw from which the real robot is released for an experimental run. Used both for training start-pool sampling and for matched real-world deployment conditions.
 
----
-
-## Policy: Architecture and Step Sequence
-
-For each target arena, a separate policy is trained inside a simulator instantiated with that arena's edges. The emulator is queried on profiles sampled from that geometry. Policies are not shared between arenas.
-
-The policy is a neural network that produces two rotations per step — **rotation 1** and **rotation 2**. This models a bat's ability to measure in a different direction (via head rotation) than the direction of flight.
-
-### Step sequence
-
-**Phase 1 — look:**
-
-1. Present the policy with *n* previous values of:
-   - sonar distance (emulator output for the *n* previous steps + 1 zero)
-   - sonar IID (emulator output for the *n* previous steps + 1 zero)
-   - rotation 1 (the *n* previous values + 1 zero)
-   - rotation 2 (the *n* previous values — no zero appended, because rotation 2 from the previous step is already available)
-2. Network produces **rotation 1**.
-3. Robot rotates by rotation 1 degrees.
-4. In this orientation, a sonar measurement is taken: the local profile is extracted and passed to the emulator to obtain IID and distance.
-
-**Phase 2 — move:**
-
-5. Present the policy with *n* previous values of:
-   - sonar distance (previous *n* steps + new distance)
-   - sonar IID (previous *n* steps + new IID)
-   - rotation 1 (previous *n* values + new rotation 1)
-   - rotation 2 (previous *n* values)
-6. Network produces **rotation 2**.
-7. Robot rotates by rotation 2 degrees.
-8. The robot's new heading is `original heading + rotation1 + rotation2` (the net body rotation per step is the sum of both rotations).
-9. Robot drives straight for a fixed distance. This distance should be calibrated to match the intercall distance observed in bats.
+Target arenas live under `TargetArenas/`, one subfolder per arena, and are independent of the sonar-model training sessions. Multiple arenas can be specified to support cross-arena comparison.
 
 ---
 
-## Policy: IID Bilateral Symmetry
+## Simulator
 
-The policy network is trained exclusively in a canonical **"wall-on-right" frame**: IID values presented to the network are always non-negative. When the physical IID is negative (wall on left), the IID sign is flipped before feeding the network and the output rotation is negated, so the robot still turns the correct physical direction. History is always stored in this canonical frame (absolute IID, rotations reflected accordingly).
+`Library/EnvironmentSimulator.py` couples the loaded `SonarModel` with an `ArenaLayout` (wall point cloud + arena bounds). It exposes:
 
-This symmetry wrapper is applied identically during training (in the simulator) and during deployment (on the real robot). Without it, the GA can find a degenerate solution that always turns in one direction regardless of sonar input.
+- `get_sonar_measurement(x, y, yaw)` — geometry → profile → noisy 6-key sonar dict.
+- `simulate_robot_movement(...)` — applies a `(rotate1, rotate2, drive)` action with collision-aware drive. `rotate1` is included for compatibility but the current policy pipeline always sets it to 0 (single rotation per step). The drive is collision-checked against both the wall point cloud (with `robot_radius_mm` clearance) and the arena boundary; if the segment is blocked the robot stops at the safe endpoint and the step is flagged `collision.drive_blocked=True`.
+- `reseed(seed)` — resets the σ_sim noise generator so a rollout is fully reproducible from a single integer seed.
 
----
-
-## Policy: History Initialisation
-
-The policy uses a history buffer of *n* steps. At episode start this buffer contains no real sonar data. Two naive approaches both cause problems:
-
-- **Zero-fill:** the network can detect "all zeros = episode start" and behave differently at the start of an episode than mid-episode, which will not generalise well.
-- **Random noise fill:** the network learns that early history is untrustworthy and may learn to discount it, wasting the history mechanism.
-
-**Adopted solution — honest zero-fill:** both training and deployment initialise the history buffer to zeros. This is the truthful representation of episode start — the robot genuinely has no prior information — and is fully consistent between training and deployment. If the policy learns a distinct start-of-episode behaviour, that is legitimate: it is in a genuinely different situation at the start.
-
-> **Open question:** is zero-fill actually the best strategy? The alternative — random pre-fill in training — prevents the network from exploiting the start-condition cue, at the cost of giving it dishonest history. Whether the policy benefits from, or is harmed by, knowing it is at the start of an episode is an empirical question worth revisiting.
+All sonar geometry parameters (cone, profile, σ_sim) are pulled from the loaded `SonarModel`. The simulator has no parallel config of its own.
 
 ---
 
-## Policy: Training with a GA
+## Policy
 
-The policy is trained with a genetic algorithm (GA), assessed on two criteria: (1) paths should be smooth, and (2) crashing should be rare. Training happens entirely inside the emulator-driven simulator of the target arena — the real robot is not involved until deployment.
+For each target arena, a separate policy is trained inside the simulator instantiated with that arena's edges. Policies are not shared between arenas.
 
-### Fitness function
+The policy is a **vanilla RNN** with hidden size 32. Per step it produces a single rotation (in degrees), clamped to `±max_rotate_deg`. After this rotation the robot drives a fixed `fixed_drive_mm` (currently 125 mm) — the inter-call distance is calibrated separately and is not adjusted by the policy.
 
-1. Compute the centroid (*x_c*, *y_c*) of all positions visited during an episode.
-2. Divide 360° into angular bins of width *W* degrees (e.g. 10°).
-3. For each bin, find all path points whose angle from the centroid falls in that bin and record the mean distance from the centroid. If no points fall in a bin, its distance is 0.
-4. The **raw fitness** is the mean of these per-bin mean distances across all bins. This rewards paths that are consistently far from the centroid in every direction. Using the mean (not max) per bin prevents a degenerate strategy where the robot shoots briefly to the walls in each direction and returns to the centre — the robot must spend sustained time far from the centroid to score well.
-5. If the episode ends in a collision, the raw fitness is multiplied by a **collision discount factor** (< 1).
-6. A **survival** factor penalises early termination:
+### Step sequence (training and deployment)
 
-```
-survival = steps_survived / max_steps
-```
+1. Take a sonar measurement at the current pose.
+2. Form the observation vector and feed it (with the previous hidden state) to the RNN.
+3. Read the rotation output. Rotate the robot in place by that amount.
+4. Drive forward by `fixed_drive_mm`.
+5. Repeat.
 
-7. A **jitter penalty** is applied multiplicatively to enforce smooth paths:
+The recurrent hidden state carries information across steps; there is no explicit history buffer, no two-phase look/move, and no head–body separation.
 
-```
-jerk_t         = |(rotate1_t + rotate2_t) − (rotate1_{t−1} + rotate2_{t−1})|   # physical turns
-jitter_factor  = 1 − w_smooth × mean(jerk_t) / max_possible_jerk
-fitness        = coverage × survival × jitter_factor × collision_discount
-```
+### Observation vector
 
-where `max_possible_jerk = 2 × max_net_rotation_deg` (the maximum heading reversal per step, governed by the net-rotation cap described below). A smooth arc has low mean jerk; left-right oscillation has high mean jerk. Consistent wall-following turns are not penalised — only reversals are. `w_smooth` controls penalty strength (0 = disabled, 1 = full weight).
+Canonical layout, all components scaled to roughly [-1, 1]:
 
-### Net rotation cap
+- `distance_left_mm  / max_dist_mm`
+- `distance_center_mm / max_dist_mm`
+- `distance_right_mm / max_dist_mm`
+- (optional) `sigma_left_mm / max_sigma_mm`, `sigma_center_mm / max_sigma_mm`, `sigma_right_mm / max_sigma_mm` — included only when `cfg.use_sigma=True`.
+- `prev_rot_deg / max_rotate_deg`
 
-The net body rotation per step is hard-capped: `|rotate1 + rotate2| ≤ max_net_rotation_deg`. After the policy produces `rotate2`, it is clipped so the cap is not exceeded. This prevents the robot from spinning excessively in a single step, regardless of what the policy outputs. `max_possible_jerk` in the jitter penalty is defined relative to this cap.
+Distances are **clamped** to `[min_dist_mm, max_dist_mm]` before scaling (`min_dist_mm` reflects the minimum range the real sonar can return — anything closer saturates). σs are clamped to `[0, max_sigma_mm]`. These same clamps apply at training and deployment; if they drift apart the policy will see out-of-distribution inputs on the real robot.
 
-### Distance floor (sonar saturation)
+`prev_rot` is the **commanded** rotation from the previous step (what the policy or teacher asked for), not the motor-noisy executed rotation. The robot knows what it asked, not what its motors did.
 
-The real sonar cannot return distances below **300 mm** — any wall closer than this produces a saturated reading of 300 mm. To keep training consistent with deployment, the emulator's predicted distance is clamped from below at `min_dist_mm = 300.0` mm before being passed to the policy or stored in history:
+### Teacher: pure pursuit
 
-```python
-dist_mm = max(cfg.min_dist_mm, min(emulator_distance_mm, cfg.max_dist_mm))
-```
+The training teacher is **pure pursuit** along the target path:
 
-Without this floor, the emulator may predict sub-300 mm values when the simulated robot gets close to a wall (geometrically correct for the simulation, but unreachable on the real robot). The policy would then learn to react to distance values it will never observe during deployment. Clamping ensures that 300 mm is treated as a saturated "at or closer than minimum range" signal, consistent with its meaning on the real robot.
+1. Project the current `(x, y)` onto the closest segment of the densified path.
+2. Advance `teacher_lookahead_mm` (currently 200 mm) along the path in arc-length order.
+3. Take the rotation that points the robot's current yaw at that lookahead point, clamped to `±max_rotate_deg`.
 
-### IID noise injection
+Direction along the loop is fixed by arc-length order, so a robot starting "the wrong way" is commanded to U-turn at first. The teacher's target is purely a function of `(x, y)` — yaw-independent — which makes the teacher field a clean 2-D vector field over the arena.
 
-During training (fitness evaluation and trajectory plotting), Gaussian noise with std `iid_noise_db` is optionally added to the emulator's IID output before it is fed to the policy. This prevents the policy from overfitting to the emulator's exact IID values and encourages robustness to the measurement noise present on the real robot. Set `iid_noise_db = 0` to disable.
+### Training: behavioural cloning + DAGGER-lite
 
-### Crash-start pool
+Behavioural cloning of the teacher, with masked MSE loss + BPTT through the full episode.
 
-To prevent the GA from ignoring collision-prone situations, a **crash-start pool** is maintained throughout training. When a trajectory episode ends in a collision, the robot's position and heading `crash_backtrack_steps` steps before the crash are added to the pool. In each subsequent generation a fixed number of guaranteed episodes are started from pool positions (in addition to randomly sampled starts), forcing every genome to face previously lethal situations.
+To prevent compounding errors from off-path drift, three noise sources are injected during rollout:
 
-Pool entries are **retired** after each generation: the current best-genome policy is re-run from each pool start, and any start it now navigates without crashing is removed. This prevents stale easy-to-solve starts from accumulating and keeps the pool focused on genuinely difficult positions. The pool is capped at `max_crash_starts_per_session` entries per session.
+- **Teacher perturbation** (`teacher_perturb_prob=0.30`, σ=30°): with some probability, the rotation actually executed in the simulator is the teacher's rotation plus Gaussian noise. **The training label remains the clean teacher rotation** — only the commanded rotation is noisy. This generates recovery examples in the dataset (DAGGER-style).
+- **Per-step motor execution noise** (3° σ on rotation, 5 mm σ on drive): zero-mean Gaussian added on top of the commanded rotation/drive before the simulator step, but `prev_rot` fed back to the policy stays at the commanded value. This is the high-frequency component of sim→real motor imperfection — averages out within ~10 steps.
+- **Per-episode kinematic gain bias** (`motion_rot_gain_range_pct=0.15`, `motion_drive_gain_range_pct=0.05`): one `rot_gain ∼ U(1−0.15, 1+0.15)` and one `drive_gain ∼ U(1−0.05, 1+0.05)` are sampled at episode reset and applied multiplicatively to every commanded action for the whole rollout (`actual = commanded × gain + per-step noise`). This is the *systematic* sim→real component the per-step noise can't capture: the real robot exhibits a sustained ~10 % rotation gain mismatch and ~5 % drive gain mismatch (measured by `SCRIPT_CalibrateRotation.py` and per-step displacement on `SCRIPT_RunPolicy.py` traces). With only zero-mean per-step noise, those biases compound undetected; with a per-episode bias the policy is forced to use sonar feedback to discover and compensate within an episode. The samples are logged to `<output_dir>/motion_noise_log.tsv` for verification.
 
----
+Episodes terminate at `max_steps` (currently 150) or when the simulator reports a wall collision.
+
+### Starting positions
+
+Training uses a pool of starts inside the path's `start_box` with yaw drawn from the box's `start_arrow` direction plus Gaussian noise (10° σ). The disjoint train/val split is over this pool, so val tests on unseen starts but within the same release box (matching the real-robot experimental setup).
+
+This is a deliberately narrow start distribution — it matches the experimental release condition. A policy that fails far outside the box is not necessarily broken; it has simply not been trained for that state. If wider robustness is needed, the start pool should be widened or a curriculum added.
+
+### Saved policy
+
+Each best-on-val checkpoint is written to `PolicyTraining/<condition>/best_policy.json` with everything needed to rebuild the obs vector and run the RNN forward pass:
+
+- `obs_layout` — names of the obs vector components, in order.
+- `genome` — flat array, ordered `[W_xh, W_hh, b_h, W_hy, b_y]`, reshaped using `hidden_size` and `in_dim`.
+- `hidden_size`, `in_dim`, `out_dim`, `use_sigma`, `max_rotate_deg`, `fixed_drive_mm`,
+  `min_dist_mm`, `max_dist_mm`, `max_sigma_mm`.
+
+Deployment must read the clamps and obs layout from this file rather than re-hard-coding them.
 
 ### Architecture choice
 
-The policy is an **MLP** (not an RNN). An RNN was considered but rejected: although it has fewer parameters, each parameter has compounding effects across time steps, making the GA fitness landscape more rugged. The MLP with explicit history has a smoother, more GA-friendly landscape and maps cleanly onto the input structure described above.
+A vanilla RNN with explicit BPTT was chosen over an MLP-with-buffered-history because:
 
-The network has a **single output neuron** used for both rotation 1 and rotation 2. A two-output variant was considered but rejected: because the inputs to the two calls are systematically different (zeros vs. actual measurements in the current slot), the same function can produce meaningfully different values for r1 and r2 without needing separate output weights. Keeping one output neuron reduces genome size, which directly benefits GA search.
-
----
-
-## Policy: Variation of History Length
-
-To understand how much the policy benefits from memory, we train separate policies for several values of `history_len` (e.g. 1, 3, 5, 10) — per arena. The goal is best performance at each history size, not a fair comparison between equally-sized networks, so the network is allowed to scale naturally with history.
-
-Memory and head–body separation are treated as a coupled pair: the baseline has neither, and all history policies (`history_len > 0`) have both. This coupling is principled — a decoupled head is only useful if the robot can remember where it looked and what it found across steps. Without memory, a free head simply collapses to a GA-optimised fixed look angle, which adds no adaptive value.
-
-### Network scaling with history
-
-The input dimension is `4 * history_len + 3` (or `4 * history_len + 2` when `include_r1_in_input=False`), so it grows with history length. The hidden layer sizes are kept fixed across all runs. The expressivity bottleneck for short-history policies is the lack of temporal information, not network capacity, so scaling hidden sizes with history is not expected to help.
-
-### Baseline: history_len=0, include_r1_in_input=False, force_aligned=True
-
-The baseline agent has no memory and no head–body separation. With `force_aligned=True`, rotate1 is always 0: the head is fixed to the body and the sonar always measures straight ahead. The single network call (Phase 2) receives only `[dist_current, iid_current]` and produces the total body rotation for that step.
-
-The baseline therefore learns only how to scale its body rotation as a function of the current sonar reading — nothing more. It is the correct lower bound for comparison with memory-augmented policies.
-
-`r1_current` is excluded from the Phase 2 input (`include_r1_in_input=False`) for consistency with the rest of the framework, though it has no effect here since rotate1 is always 0.
-
-### history_len = 1
-
-`history_len = 1` is **not** a reactive baseline — it has one step of memory. Tracing through `build_input`:
-
-- **Phase 1 (look):** input is `[prev_dist, 0, prev_iid, 0, prev_r1, 0, prev_r2]` — the network uses the previous step's measurement to decide where to look.
-- **Phase 2 (move):** input is `[prev_dist, dist_current, prev_iid, iid_current, prev_r1, r1_current, prev_r2]` — both the previous and current measurements are available.
-
-This is the minimal policy that makes meaningful use of the two-phase structure with memory.
-
-### Hall of fame
-
-The top-N genomes seen across all generations are retained in a **hall of fame** (`top_policies/rank001.json` … `rankNNN.json`). This provides a pool of high-quality policies from different points in training, which is useful for post-hoc analysis and deployment: the overall best policy may appear at any generation, not just the final one.
-
-### Multi-run training
-
-`SCRIPT_TrainPolicy.py` loops over `HISTORY_LENGTHS` for a given target arena. A value of 0 trains the baseline (`PolicyTraining/<condition>_h00`); any other value trains the standard config for that history length (`PolicyTraining/<condition>_h01`, `PolicyTraining/<condition>_h10`, etc.). All other settings (GA parameters, fitness function, architecture hidden sizes) are identical across runs. The `<condition>` prefix is expected to encode the target arena so that policies trained for different arenas do not collide on disk.
+- The recurrent hidden state is a more compact representation of arbitrary-length history than a fixed-size buffer.
+- Path following needs implicit localisation along the loop ("how far around am I?"), which the recurrent state can carry naturally.
+- Training is supervised (BC), so the GA-friendly considerations that motivated MLPs in earlier prototypes do not apply.
 
 ---
 
 ## Deployment on the Real Robot
 
-After training, each arena-specific policy is applied on the real robot in its matched arena using a script similar to `SCRIPT_DataAcquisition.py`. The same sonar data collection and processing pipeline is used, yielding a `sonar_package` per step; `corrected_iid` and `corrected_distance` from that package are fed into the trained policy.
+The trained policy is run on the real robot in its arena via `SCRIPT_RunPolicy.py`. The same data-collection and processing pipeline as `SCRIPT_DataAcquisition.py` produces the per-step `sonar_package`; the L and R envelopes are passed through `SonarModel.predict_from_envelope` to obtain 3-slice distances and σs, exactly as during training.
 
-### Physical rotation sequence (each step)
+### Per-step sequence
 
-1. Decide rotate1 using the policy (with IID symmetry wrapper applied to last step's IID).
-2. Physically rotate the robot's body by rotate1 degrees.
-3. Take a sonar measurement (`corrected_iid`, `corrected_distance`).
-4. Decide rotate2 using the policy (with IID symmetry wrapper applied to current IID).
-5. Physically rotate the robot's body by rotate2 degrees.
-6. Drive forward a fixed distance calibrated to match bat intercall distances.
-7. Append canonical (flipped) values to the history buffer.
+1. Take a sonar measurement (`predict_from_envelope` on the real envelope).
+2. Apply the same clamps as training (`min_dist_mm`, `max_dist_mm`, `max_sigma_mm` from `best_policy.json`).
+3. Form the observation vector (same layout as training) and run one RNN step from the carried hidden state.
+4. Physically rotate the robot's body by the policy's output (clamped to `±max_rotate_deg`).
+5. Drive forward `fixed_drive_mm`.
+6. Set `prev_rot = commanded rotation`. Continue.
 
-> Because the sonar is body-fixed, rotate1 is a genuine physical rotation — it is not a virtual "look direction" as in the emulator-based simulator.
-
-### IID symmetry wrapper (identical to training)
-
-If `corrected_iid < 0` (wall on left): pass `abs(corrected_iid)` to the network and negate the output rotation to obtain the physical rotation. Store `abs(corrected_iid)` and the canonical (negated) rotation in the history buffer.
+There is no IID symmetry wrapper, no explicit history buffer, and no two-phase look/move — those concepts belonged to an earlier prototype and are not part of the current pipeline.
 
 ### History initialisation
 
-Initialise the history buffer to zeros, consistent with how training episodes are initialised.
+The RNN hidden state starts at zero. Training does the same.
 
 ### Stopping condition
 
-The robot runs for a fixed number of steps (`max_steps`, a configurable parameter). The script can also be interrupted manually.
+Fixed `max_steps`, configurable per run; manual interrupt is also supported.
 
 ### Data logging (per step)
 
 - `sonar_package` (full, as returned by `client.read_and_process`)
-- position from tracker: *x*, *y*, `yaw_deg`
-- rotate1, rotate2, net rotation (rotate1 + rotate2)
-- drive distance
-- Additional fields can be added as needed.
+- 6-key sonar prediction (3 distances + 3 σs) before and after clamping
+- Position from external tracker: `x`, `y`, `yaw_deg`
+- Commanded rotation, drive distance
+- Hidden state (optional, useful for offline analysis)
+
+---
+
+## Acquisition-Protocol Comparison (Planned)
+
+The current `SCRIPT_DataAcquisition.py` collects sonar training data while the robot runs a **sonar-IID-driven** obstacle-avoidance policy: distance, IID, and a small turn-probability decide each action. The pose distribution that lands in the training set is therefore whatever those dynamics produce — predominantly mid-corridor, walls ≈ 0.8–1.5 m away, with close-wall and corner configurations systematically avoided. Per-step diagnostics on early deploy runs (`PolicyRuns/.../step_metrics_analysis.png`) show that close-wall and corner poses are exactly where the trained SonarModel's residuals and σ are largest. The model is weakest on the configurations the acquisition policy never visits.
+
+A planned alternative uses the **overhead tracker plus the annotated arena map** to actively steer the robot. The simulator's `compute_profile` already supplies geometric truth at any pose; a tracker-feedback nav controller can drive the robot through a deliberately chosen sequence of (x, y, yaw) poses, including ones close to walls, in corners, and through narrow gaps. At each pose the robot rotates in place and pings at multiple yaws, providing direct supervision on rotation invariance from a fixed location. Three protocol variants form a controlled comparison:
+
+- **A — sonar-IID-driven** (existing `SCRIPT_DataAcquisition.py`). Avoidance algorithm picks actions from sonar.
+- **B — vision-coverage-driven** (new acquisition script). Tracker + arena map picks actions to maximise coverage of pose / profile-feature space, deliberately targeting under-represented configurations.
+- **C — random teleport** (control). Pose chosen uniformly at random from feasible space each step. Isolates "deliberate non-IID exploration" from the simpler "any non-IID protocol."
+
+All three share arena, hardware, supervisory signal (`compute_profile` against the arena map), SonarModel architecture, training pipeline, and total number of pings. The only manipulated variable is the pose distribution. Pre-registered metrics: held-out NLL on a fixed test set spanning all configuration classes (open / corridor / corner / narrow-gap / very-close-wall), per-configuration-class error, σ calibration on held-out, and downstream policy performance at deploy time.
+
+**Scientific framing.** This implements **active cross-modal calibration**: vision (the overhead tracker plus the arena map) supplies *both* the supervisory targets and the exploration policy that gates which acoustic configurations the agent encounters. The biological analogy is a developing or environmentally-perturbed bat using non-sonar cues to deliberately expose itself to under-sampled acoustic scenes, accelerating sonar-interpretation learning. The substantive empirical claim is the size of the gap **on configurations both A and B cover** (open arena, normal corridors); a gap on corner / close-wall configurations alone is partly tautological because A by construction doesn't visit them.
 
 ---
 
@@ -305,9 +242,9 @@ The primary baseline against the matched (arena_X policy in arena_X) condition i
 If matched outperforms swapped, the experiment simultaneously supports two claims:
 
 1. Policies are arena-specific — there is real structure that a generic one-size-fits-all policy would miss.
-2. The emulator-driven vicarious training captures enough of that structure to produce the arena-specific tuning.
+2. The simulator-driven BC captures enough of that structure to produce arena-specific tuning without on-robot training.
 
-If matched does **not** outperform swapped, the interpretation depends on the diagnostic: weak emulator (quadrant-held-out metrics are poor), insufficiently arena-specific fitness landscape, or GA training instability are the main candidates to check.
+If matched does **not** outperform swapped, the interpretation depends on the diagnostics: weak sonar model (val NLL is poor / σ poorly calibrated), insufficiently arena-specific teacher field, or BC instability are the main candidates to check.
 
 With three or more target arenas, all off-diagonal swaps can be run to strengthen the design.
 
@@ -315,7 +252,6 @@ With three or more target arenas, all off-diagonal swaps can be run to strengthe
 
 ## Out of Scope (Parked)
 
-The following directions are parked for this phase of the project and are not covered by the pipeline above:
-
-- **Burst policy variant.** Previously implemented in `SCRIPT_TrainPolicy_Burst.py` (multiple within-burst measurements per step). Interesting biologically but shelved until the vicarious-learning story is established.
-- **Mapping / pose-graph SLAM / spatial-information analyses.** Scripts on the `new_ideas` branch (`SCRIPT_PoseGraphSLAM_SE2*.py`, `SCRIPT_SonarSpatialInfo.py`, `SCRIPT_TakeEnvSnapshot.py`, `SCRIPT_SweepSLAM.py`) target a later phase of the project where the robot builds its own spatial representation rather than receiving an annotated arena image.
+- **Burst policy variant** (multiple within-burst measurements per step) — biologically interesting but shelved until the vicarious-learning story is established.
+- **Mapping / pose-graph SLAM / spatial-information analyses** — scripts on `new_ideas` (`SCRIPT_PoseGraphSLAM*.py`, `SCRIPT_TakeEnvSnapshot.py`) target a later phase where the robot builds its own spatial representation rather than receiving an annotated arena image.
+- **GA-trained policies, IID-emulator dual-head architectures, two-phase look/move, fixed-size history buffers, hall-of-fame** — earlier-prototype machinery that has been replaced by the BC + RNN + 3-slice-distance pipeline described here.
