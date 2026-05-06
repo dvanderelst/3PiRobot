@@ -1,7 +1,7 @@
 # Minimal menu for Pololu 3pi+ 2040: A=prev, B=select, C=next
-from pololu_3pi_2040_robot.display import Display
-from pololu_3pi_2040_robot.buzzer import Buzzer
-from pololu_3pi_2040_robot.buttons import ButtonA, ButtonB, ButtonC
+from my_pololu_lib.display import Display
+from my_pololu_lib.buzzer import Buzzer
+from my_pololu_lib.buttons import ButtonA, ButtonB, ButtonC
 import time, sys
 
 display = Display()

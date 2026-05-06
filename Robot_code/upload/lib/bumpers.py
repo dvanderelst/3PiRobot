@@ -1,4 +1,4 @@
-from pololu_3pi_2040_robot import ir_sensors
+from my_pololu_lib import ir_sensors
 import time
 
 

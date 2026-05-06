@@ -1,4 +1,4 @@
-from pololu_3pi_2040_robot.buzzer import Buzzer as _Buzzer
+from my_pololu_lib.buzzer import Buzzer as _Buzzer
 
 class Beeper:
     """Wrapper around Pololu Buzzer with predefined UI beeps and custom play."""

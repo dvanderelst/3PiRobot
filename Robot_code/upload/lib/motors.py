@@ -1,4 +1,4 @@
-from pololu_3pi_2040_robot import robot
+from my_pololu_lib import robot
 import math, time, settings
 
 _INTER_PHASE_DELAY_MS = 100  # pause between turn and drive within a step
@@ -55,7 +55,7 @@ class Motors:
         if self.verbose: print(f"[PWM] L {left_mps:+.3f} m/s → {l_cmd:+4d} | R {right_mps:+.3f} m/s → {r_cmd:+4d}")
 
     def set_kinematics(self, lin_mps: float = 0.0, rot_dps: float = 0.0):
-        omega = -math.radians(rot_dps)  # +CW
+        omega = math.radians(rot_dps)  # +CCW (left turn) — see rotation_conventions on Notion
         v_l = lin_mps - (self.wheel_base_m / 2) * omega
         v_r = lin_mps + (self.wheel_base_m / 2) * omega
         self._set_pwm(v_l, v_r)
@@ -104,7 +104,8 @@ class Motors:
             counts = arc_m * self.counts_per_meter
             start_l, start_r = self.encoders.get_counts()
             sign = self._sgn(angle_deg)
-            self._set_pwm(sign * wheel_mps, -sign * wheel_mps)
+            # +angle_deg = CCW (left turn): right wheel forward, left wheel backward.
+            self._set_pwm(-sign * wheel_mps, sign * wheel_mps)
             self._active = {'kind': 'turn', 'start_l': start_l, 'start_r': start_r, 'counts': counts, 'start_ms': time.ticks_ms()}
         elif kind == 'drive':
             meters, speed = a, b

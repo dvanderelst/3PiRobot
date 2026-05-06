@@ -1,17 +1,43 @@
+# Modified from upstream Pololu library to free GP7 between beeps.
+# Upstream acquired the PWM peripheral on GP7 at import time and held it
+# for the program's lifetime; this collides with GP7's other use as the
+# sonar recv1 trigger (settings.trigger_recv1). Here PWM is acquired on
+# first use and released after each tune, returning GP7 to driven-low so
+# the MB1360 recv1 sensor stays inhibited between beeps.
+# See PATCHES.md.
+
 from machine import Pin, PWM
 import machine
 import time
 
-pwm = PWM(Pin(7, Pin.OUT))
+pwm = None
 user_callback = lambda i: None
 is_playing = False
 
 volume_levels = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 64, 128]
 
+
+def _acquire_pwm():
+    global pwm
+    if pwm is None:
+        pwm = PWM(Pin(7, Pin.OUT))
+    return pwm
+
+
+def _release_pwm():
+    # Tear down PWM and drive GP7 actively low so the sonar recv1 trigger
+    # (which shares this pin) is held inhibited between beeps.
+    global pwm
+    if pwm is not None:
+        pwm.duty_u16(0)
+        pwm.deinit()
+        pwm = None
+    Pin(7, Pin.OUT, value=0)
+
+
 class Buzzer:
     def __init__(self):
-        global pwm
-        self.pwm = pwm
+        # Ensure quiet state and GP7 driven low at construction.
         self.off()
 
     def is_playing(self):
@@ -23,21 +49,24 @@ class Buzzer:
         user_callback = f
 
     def beep(self):
-        self.pwm.freq(440)
-        self.pwm.duty_u16(32767)
+        p = _acquire_pwm()
+        p.freq(440)
+        p.duty_u16(32767)
         time.sleep_ms(100)
-        self.pwm.duty_u16(0)
+        _release_pwm()
 
     def on(self):
-        self.pwm.freq(200)
-        self.pwm.duty_u16(32767)
+        # Continuous tone — caller must invoke off() to release GP7.
+        p = _acquire_pwm()
+        p.freq(200)
+        p.duty_u16(32767)
 
     def off(self):
         global is_playing
         if is_playing:
             timer.deinit()
             is_playing = False
-        self.pwm.duty_u16(0)
+        _release_pwm()
 
     def play(self, notes):
         global is_playing
@@ -188,6 +217,7 @@ class Buzzer:
             octave_boost = 0
         # end of loop
 
+        _acquire_pwm()
         is_playing = True
         i = 0
         note_count = len(frequencies)
@@ -198,7 +228,8 @@ def callback(t):
     global pwm, i, frequencies, volumes, durations, note_count, is_playing
 
     if i >= note_count:
-        pwm.duty_u16(0)
+        # End of tune: release GP7 back to driven-low for sonar recv1.
+        _release_pwm()
         is_playing = False
         return
 
