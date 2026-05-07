@@ -10,20 +10,20 @@ Modelling a bat that learns to use its sonar system, with a specific focus on **
 
 The pipeline has three stages:
 
-1. **Generic sonar model.** Train a single 3-slice distance model on pooled real sonar data (sessions B01–B05). The model maps a stereo sonar envelope to three (distance, σ) pairs covering the forward cone. It is trained once and reused across all downstream arenas.
+1. **Generic sonar model.** Train a single 3-slice distance model on pooled real sonar data collected via vision-guided acquisition across multiple arena layouts (sessions in `AcquisitionSessions/`). The model maps a stereo sonar envelope to three (distance, σ) pairs covering the forward cone. It is trained once and reused across all downstream arenas.
 2. **Arena specification.** For each target arena, extract its layout from an annotated overhead image into the same edge format used during sonar-model training, and define a target path through it. Together these specify what the robot should do in that arena.
 3. **Arena-specific policy.** Using the trained sonar model as the sensor inside a geometric simulator of the target arena, train a policy by **behavioural cloning of a pure-pursuit teacher** that knows the target path. One policy per target arena.
 4. **Deployment + cross-arena control.** Each policy is deployed on the real robot in its matched arena. Policies are then cross-swapped (policy_A in arena_B, and vice versa) as the primary control.
 
 The central empirical claim is that the matched condition outperforms the swapped condition. A positive result simultaneously demonstrates (a) that policies are genuinely arena-specific and (b) that the simulator-driven vicarious adaptation is doing real work.
 
-Real-data collection for the sonar-model sessions uses `SCRIPT_DataAcquisition.py`.
+Real-data collection for the sonar-model sessions uses `SCRIPT_VisualDataAcquisition.py`: the overhead Lorex tracker steers the robot through a precomputed tour of feasible (x, y) waypoints across an annotated arena, pinging at several yaws per waypoint. The tour is built by `SCRIPT_BuildAcquisitionPlan.py` against an arena under `AcquisitionArenas/`. This replaces the earlier `SCRIPT_DataAcquisition.py` path that drove the robot via a sonar-IID-driven avoidance policy and produced sessions B01–B05 (now archived in `OLD.zip`).
 
 ---
 
 ## Sonar Model
 
-The sonar model predicts, from a stereo sonar envelope, the minimum wall distance (with predictive σ) in each of three angular slices of a forward cone. It is trained **once** on pooled data from `EmulatorTrainingData/` and held fixed across all downstream policy-training runs. Its generality is what makes vicarious learning possible.
+The sonar model predicts, from a stereo sonar envelope, the minimum wall distance (with predictive σ) in each of three angular slices of a forward cone. It is trained **once** on pooled data from `AcquisitionSessions/` (output of `SCRIPT_VisualDataAcquisition.py`, ingested by `Library/AcquisitionSessionLoader.py`) and held fixed across all downstream policy-training runs. Its generality across arena layouts is what makes vicarious learning possible.
 
 ### Geometry and slices
 
@@ -47,13 +47,15 @@ This bakes in the physical L/R symmetry of the robot. Each head is a small 2-lay
 
 ### Envelope normalisation
 
-Each ping's L and R envelopes are min-max scaled per channel to a fixed range (`[0, 1]`) along the time axis before they reach the conv stack. Applied identically in `SCRIPT_TrainSonarModel.load_data` and inside `SonarModel.predict_from_envelope` at inference; the chosen mode is recorded in `slices_feature_params.json` under `envelope_norm` so train and deploy paths can't drift apart. Legacy feature_params files without that field default to a no-op for backward compatibility.
+Off by default in the current pipeline (`ENVELOPE_NORM_KIND = None`). The trainer's z-score normalisation (using the saved `sonar_norm` mean/std in `slices_feature_params.json`) still applies and keeps inputs at the network in roughly `[-3, 3]`, but the per-ping per-channel min-max scaling described below is no longer applied at train or deploy time.
 
-The motivation is sim-to-real robustness on the absolute amplitude of the receive envelope. The emit-pulse peak and the post-pulse signal level both depend on battery state and analog-receive-path drift; we observed empirically that the same robot in the same arena can produce envelope peaks at 25 k counts on one day and 28–30 k counts on another, with no firmware or arena change. With raw amplitudes feeding the conv stack, this between-session gain drift pushes inputs out of the model's training distribution and degrades predictions sharply. Per-ping normalisation removes absolute amplitude as a cue — the conv stack reads only envelope *shape* — and the model becomes invariant to receive-path gain.
+The mechanism is kept on the shelf in case amplitude variability returns. When enabled (`ENVELOPE_NORM_KIND = "per_ping_minmax"`), each ping's L and R envelopes are min-max scaled per channel to `[0, 1]` along the time axis before reaching the conv stack. Applied identically in `SCRIPT_TrainSonarModel.load_data` and inside `SonarModel.predict_from_envelope` at inference; the chosen mode is recorded in `slices_feature_params.json` under `envelope_norm` so train and deploy paths can't drift apart. Legacy feature_params files without that field default to a no-op for backward compatibility.
 
-The upper reference for the rescale is the max within the first `ref_window` samples of the envelope (currently 10), not the global max. This anchors the scale to the **emit-pulse region**, which is always present at the start of every ping. Anchoring on the global max would silently mis-scale pings where a strong close-wall echo exceeds the emit-pulse peak — those would be normalised differently from "normal" pings even though their underlying signal interpretation should be consistent. With emit-anchored scaling, post-emit echoes simply produce normalised values proportional to their amplitude relative to the emit drive (sometimes > 1 for very close walls), giving the conv stack a consistent feature scale. The lower reference is the global min (the noise floor).
+The original motivation was sim-to-real robustness on the absolute amplitude of the receive envelope. The emit-pulse peak and post-pulse signal level both depended on battery state and analog-receive-path drift; we observed empirically that the same robot in the same arena could produce envelope peaks at 25 k counts on one day and 28–30 k counts on another, with no firmware or arena change. That drift has since been addressed at the hardware/firmware level, so the normalisation is no longer load-bearing. If amplitude variability ever returns (different robot, different battery chemistry, transducer wear), flip `ENVELOPE_NORM_KIND` back to `"per_ping_minmax"` and retrain.
 
-The trade-off is loss of an absolute-distance hint that lives in raw amplitude (closer wall ↔ stronger echo, by spreading-loss). Empirically, echo *timing* is a much stronger distance cue than raw amplitude, so this loss is small; whether it's negligible is testable by comparing held-out NLL between a normalised SonarModel and a non-normalised one.
+When enabled, the upper reference for the rescale is the max within the first `ref_window` samples of the envelope (currently 10), not the global max. This anchors the scale to the **emit-pulse region**, which is always present at the start of every ping. Anchoring on the global max would silently mis-scale pings where a strong close-wall echo exceeds the emit-pulse peak — those would be normalised differently from "normal" pings even though their underlying signal interpretation should be consistent. With emit-anchored scaling, post-emit echoes simply produce normalised values proportional to their amplitude relative to the emit drive (sometimes > 1 for very close walls), giving the conv stack a consistent feature scale. The lower reference is the global min (the noise floor).
+
+The trade-off when enabled is loss of an absolute-distance hint that lives in raw amplitude (closer wall ↔ stronger echo, by spreading-loss). Empirically, echo *timing* is a much stronger distance cue than raw amplitude, so this loss is small.
 
 ### Loss and training
 
@@ -61,7 +63,7 @@ For each slice the loss is **Gaussian negative log-likelihood**:
 `0.5 × (log σ² + (μ − target)² / σ²)`,
 with log-σ² clamped to `[LOG_VAR_MIN, LOG_VAR_MAX]`. The first `WARMUP_EPOCHS` use plain MSE on the means only, then training switches to NLL so the σ heads can fit residual scale without dragging the means around at initialisation.
 
-Training data is split by **quadrant** per session: one quadrant per session is held out for validation (≈25% of each session), and the held-out set defines both the val-NLL early-stopping signal and the empirical σ_sim lookup described below.
+Training data is split by **quadrant** per session: one quadrant per session is held out for validation (≈25% of each session), and the held-out set defines both the val-NLL early-stopping signal and the empirical σ_sim lookup described below. Quadrants are computed at load time as the sign of `(x − x_med, y − y_med)` per session in `Library/AcquisitionSessionLoader.py`, so each held-out quadrant carries roughly equal pings regardless of arena shape.
 
 ### Two inference paths from one model
 
@@ -85,13 +87,18 @@ Per-slice scatter and σ calibration plots, an L/C/R collapse check, an "overall
 
 ## Arena Specification
 
-Each target arena is specified by:
+Two parallel folders hold annotated arenas, one per role:
 
-1. An **annotated overhead image** processed into wall edges via `SCRIPT_BuildArenaGeometry.py`. The wall-cloud format is the same one used for the sonar-model training sessions.
-2. A **target path** (`TargetArenas/<arena>/target_path.json`) — a closed polygonal loop of waypoints in arena (x, y) mm coordinates that the robot is expected to follow. Loaded and densified by `Library/TargetPath.py`.
-3. A **release box and direction arrow** inside the path JSON, specifying the rectangle and yaw from which the real robot is released for an experimental run. Used both for training start-pool sampling and for matched real-world deployment conditions.
+- **`AcquisitionArenas/<layout>/`** — arenas used to collect sonar-model training data. Each holds the overhead snapshot, per-camera annotated wall masks, the back-projected wall point cloud (`arena_walls.npz`), and a `plans/` subfolder with one or more sampling tours (`plan_*.json`, `plan_*.png`, `diagnostics_*.png`) produced by `SCRIPT_BuildAcquisitionPlan.py`. The acquisition runner consumes these.
+- **`TargetArenas/<arena>/`** — arenas used for policy training and deployment. Each adds a `target_path.json` on top of the same wall-cloud format: a closed polygonal loop of waypoints the robot should follow, plus a release box and direction arrow specifying the rectangle and yaw from which the real robot is released for an experimental run. Loaded and densified by `Library/TargetPath.py` and used by the policy trainer for start-pool sampling and matched-real-world deployment conditions.
 
-Target arenas live under `TargetArenas/`, one subfolder per arena, and are independent of the sonar-model training sessions. Multiple arenas can be specified to support cross-arena comparison.
+Both folder shapes use the same arena-geometry pipeline:
+
+1. An **annotated overhead image** processed into wall edges via `SCRIPT_BuildArenaGeometry.py`. The script walks both `AcquisitionArenas/` and `TargetArenas/` and rebuilds `arena_walls.npz` for each `<layout>/env_*/` it finds.
+2. A **target path** (TargetArenas only) — closed polygonal loop in arena (x, y) mm.
+3. A **release box and direction arrow** (TargetArenas only) — start-pool spec for the policy.
+
+The two folders are independent of each other and of the per-session output. Multiple acquisition arenas → richer sonar-model training data; multiple target arenas → cross-arena comparison at the policy level.
 
 ---
 
@@ -188,7 +195,7 @@ A vanilla RNN with explicit BPTT was chosen over an MLP-with-buffered-history be
 
 ## Deployment on the Real Robot
 
-The trained policy is run on the real robot in its arena via `SCRIPT_RunPolicy.py`. The same data-collection and processing pipeline as `SCRIPT_DataAcquisition.py` produces the per-step `sonar_package`; the L and R envelopes are passed through `SonarModel.predict_from_envelope` to obtain 3-slice distances and σs, exactly as during training.
+The trained policy is run on the real robot in its arena via `SCRIPT_RunPolicy.py`. The per-step `sonar_package` is produced by the same `client.read_and_process` path used by both `SCRIPT_VisualDataAcquisition.py` (sonar-model data collection) and the legacy `SCRIPT_DataAcquisition.py`; the L and R envelopes are passed through `SonarModel.predict_from_envelope` to obtain 3-slice distances and σs, exactly as during training.
 
 ### Per-step sequence
 
@@ -219,19 +226,15 @@ Fixed `max_steps`, configurable per run; manual interrupt is also supported.
 
 ---
 
-## Acquisition-Protocol Comparison (Planned)
+## Acquisition Protocol
 
-The current `SCRIPT_DataAcquisition.py` collects sonar training data while the robot runs a **sonar-IID-driven** obstacle-avoidance policy: distance, IID, and a small turn-probability decide each action. The pose distribution that lands in the training set is therefore whatever those dynamics produce — predominantly mid-corridor, walls ≈ 0.8–1.5 m away, with close-wall and corner configurations systematically avoided. Per-step diagnostics on early deploy runs (`PolicyRuns/.../step_metrics_analysis.png`) show that close-wall and corner poses are exactly where the trained SonarModel's residuals and σ are largest. The model is weakest on the configurations the acquisition policy never visits.
+The active pipeline is **vision-coverage-driven**: the overhead Lorex tracker plus the annotated arena map actively steer the robot through a precomputed tour of feasible (x, y) waypoints, pinging at several yaws per waypoint. Plan construction (`SCRIPT_BuildAcquisitionPlan.py`) samples uniformly at random inside the arena polygon subject to a wall-clearance threshold (250 mm — below which the emit pulse masks first echoes), a min-neighbor distance to spread coverage, and a feasibility-aware nearest-neighbour tour reorder. The runner (`SCRIPT_VisualDataAcquisition.py`) drives the robot through the tour using `Library/TrackerNav` (closed-loop go-to-pose with settled-poll on the tracker), pings at each planned yaw, and records per-ping `sonar_package` + `executed_pose` + plan/nav metadata to `AcquisitionSessions/<session>/`.
 
-A planned alternative uses the **overhead tracker plus the annotated arena map** to actively steer the robot. The simulator's `compute_profile` already supplies geometric truth at any pose; a tracker-feedback nav controller can drive the robot through a deliberately chosen sequence of (x, y, yaw) poses, including ones close to walls, in corners, and through narrow gaps. At each pose the robot rotates in place and pings at multiple yaws, providing direct supervision on rotation invariance from a fixed location. Three protocol variants form a controlled comparison:
+**Why this replaces the earlier sonar-IID-driven protocol.** The legacy `SCRIPT_DataAcquisition.py` (now archived) drove the robot via an obstacle-avoidance policy keyed on distance, IID, and a turn-probability. The pose distribution that landed in the training set was whatever those dynamics produced — predominantly mid-corridor, walls ≈ 0.8–1.5 m away, with close-wall and corner configurations systematically avoided. Per-step diagnostics on early deploy runs (`PolicyRuns/.../step_metrics_analysis.png`) showed that close-wall and corner poses are exactly where the trained SonarModel's residuals and σ are largest. The model was weakest on the configurations the acquisition policy never visited. Vision-coverage-driven sampling produces a pose distribution whose mass naturally lands in the close-wall / corner band (it's a non-trivial fraction of feasible area in any non-trivial arena), inverting that bias by construction.
 
-- **A — sonar-IID-driven** (existing `SCRIPT_DataAcquisition.py`). Avoidance algorithm picks actions from sonar.
-- **B — vision-coverage-driven** (new acquisition script). Tracker + arena map picks actions to maximise coverage of pose / profile-feature space, deliberately targeting under-represented configurations.
-- **C — random teleport** (control). Pose chosen uniformly at random from feasible space each step. Isolates "deliberate non-IID exploration" from the simpler "any non-IID protocol."
+**Scientific framing.** This implements **active cross-modal calibration**: vision (the overhead tracker plus the arena map) supplies *both* the supervisory targets and the exploration policy that gates which acoustic configurations the agent encounters. The biological analogy is a developing or environmentally-perturbed bat using non-sonar cues to deliberately expose itself to under-sampled acoustic scenes, accelerating sonar-interpretation learning.
 
-All three share arena, hardware, supervisory signal (`compute_profile` against the arena map), SonarModel architecture, training pipeline, and total number of pings. The only manipulated variable is the pose distribution. Pre-registered metrics: held-out NLL on a fixed test set spanning all configuration classes (open / corridor / corner / narrow-gap / very-close-wall), per-configuration-class error, σ calibration on held-out, and downstream policy performance at deploy time.
-
-**Scientific framing.** This implements **active cross-modal calibration**: vision (the overhead tracker plus the arena map) supplies *both* the supervisory targets and the exploration policy that gates which acoustic configurations the agent encounters. The biological analogy is a developing or environmentally-perturbed bat using non-sonar cues to deliberately expose itself to under-sampled acoustic scenes, accelerating sonar-interpretation learning. The substantive empirical claim is the size of the gap **on configurations both A and B cover** (open arena, normal corridors); a gap on corner / close-wall configurations alone is partly tautological because A by construction doesn't visit them.
+**Optional controlled comparison.** A direct A-vs-B head-to-head against the legacy sonar-IID-driven protocol is not currently part of the active research plan but would be straightforward to run: the archived `SCRIPT_DataAcquisition.py` and the current `SCRIPT_VisualDataAcquisition.py` share arena, hardware, supervisory signal (`compute_profile` against the arena map), SonarModel architecture, training pipeline, and total number of pings — the only manipulated variable is the pose distribution. Pre-registerable metrics: held-out NLL on a fixed test set spanning all configuration classes (open / corridor / corner / narrow-gap / very-close-wall), per-configuration-class error, σ calibration on held-out, and downstream policy performance at deploy time. The substantive empirical claim would be the size of the gap **on configurations both protocols cover** (open arena, normal corridors); a gap on corner / close-wall configurations alone is partly tautological because the IID-driven protocol by construction doesn't visit them. A "random teleport" control could isolate "deliberate non-IID exploration" from the simpler "any non-IID protocol."
 
 ---
 
@@ -253,5 +256,5 @@ With three or more target arenas, all off-diagonal swaps can be run to strengthe
 ## Out of Scope (Parked)
 
 - **Burst policy variant** (multiple within-burst measurements per step) — biologically interesting but shelved until the vicarious-learning story is established.
-- **Mapping / pose-graph SLAM / spatial-information analyses** — scripts on `new_ideas` (`SCRIPT_PoseGraphSLAM*.py`, `SCRIPT_TakeEnvSnapshot.py`) target a later phase where the robot builds its own spatial representation rather than receiving an annotated arena image.
+- **Mapping / pose-graph SLAM / spatial-information analyses** — scripts on `new_ideas` (`SCRIPT_PoseGraphSLAM*.py`) target a later phase where the robot builds its own spatial representation rather than receiving an annotated arena image. (Note: `SCRIPT_TakeEnvSnapshot.py` is no longer parked — it's the canonical way to snapshot a new arena layout into `AcquisitionArenas/` or `TargetArenas/`.)
 - **GA-trained policies, IID-emulator dual-head architectures, two-phase look/move, fixed-size history buffers, hall-of-fame** — earlier-prototype machinery that has been replaced by the BC + RNN + 3-slice-distance pipeline described here.
