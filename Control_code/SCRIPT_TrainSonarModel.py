@@ -2,33 +2,23 @@
 """
 SCRIPT_TrainSonarModel.py
 
-One model, three slices. Predicts the min wall distance (with σ) in each
-of three angular slices of the ±CONE_HALF_DEG forward cone. Slice labels
-follow the project +az = LEFT convention (azimuth CCW from robot
-forward), so increasing bin index goes from physical right to left:
+Train the 3-slice SonarSlicesUQ model on visually-guided acquisition data.
+Reads AcquisitionSessions/<name>/ folders via Library.AcquisitionSessionLoader,
+predicts per-slice (mean, σ²) for the right/center/left thirds of the
+±CONE_HALF_DEG forward cone, and writes the canonical model artifacts to
+SonarModel/ for downstream simulator/policy use.
+
+Slice labels follow the project +az = LEFT convention (azimuth CCW from
+robot forward), so increasing bin index goes from physical right to left:
 
   right  = [-cone,   -cone/3)        (negative az → robot's physical right)
   center = [-cone/3, +cone/3)
   left   = [+cone/3, +cone]          (positive az → robot's physical left)
 
-Each slice gets a (mean, σ) pair → 6 output heads total. Together they
-give the policy three distance estimates plus three confidences:
-
-  - "closest thing dead ahead"       → center prediction
-  - "more obstruction left or right" → compare left vs right
-  - "overall closest in cone"        → min of the three (post-hoc)
-
-Symmetry by construction:
-  - center heads operate on (z_L + z_R) / 2  → invariant to L/R swap
-  - side heads share weights, applied with channels swapped:
-      right_mean(L, R)   = side_mean(z_L, z_R)   # zL-emphasized
-      left_mean(L, R)    = side_mean(z_R, z_L)   # zR-emphasized
-    Swapping L/R sonar exactly swaps left/right predictions.
-
-Replaces both SCRIPT_TrainSonarDistanceModel.py and the azimuth model.
-For comparison, this script also reports the predicted "overall min"
-(= min over slices) RMSE against the existing distance model's task,
-so we can quantify how much the slicing costs in absolute accuracy.
+Each slice gets a (mean, σ) pair → 6 output heads total. Symmetry is
+baked into the architecture: center heads see (z_L + z_R) / 2; side heads
+share weights and are applied with channels swapped, so swapping L/R
+sonar inputs exactly swaps left/right predictions.
 
 Outputs in SonarModel/  (prefix `slices_`):
   slices_best_model.pth
@@ -54,15 +44,15 @@ import torch
 import torch.nn as nn
 from scipy.optimize import minimize
 
-from Library.DataProcessor import DataCollection
+from Library.AcquisitionSessionLoader import load_data as _load_acquisition_data
 from Library.SonarModel import SonarSlicesUQ, SLICE_NAMES as _LIB_SLICE_NAMES
 from Library.SonarModel import normalize_envelope_per_ping
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-SESSION_PATHS = ["sessionB01", "sessionB02", "sessionB03", "sessionB04", "sessionB05"]
-CACHE_DIR     = "Cache"
+ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A", "Acquisition03A", "Acquisition04A"]
+ACQUISITIONS_ROOT    = "AcquisitionSessions"
 
 OPENING_ANGLE  = 270.0
 PROFILE_STEPS  = 90
@@ -70,12 +60,13 @@ PROFILE_METHOD = "ray_center"
 
 CONE_HALF_DEG  = 35.0    # full cone; split into 3 equal angular slices
 
+# Validation: hold out one quadrant per session. Loader's quadrants are by
+# per-session median split on (x, y); 0..3 covers all four quadrants.
 VALIDATION_QUADRANTS = {
-    "sessionB01": [0],
-    "sessionB02": [1],
-    "sessionB03": [2],
-    "sessionB04": [3],
-    "sessionB05": [0],
+    "Acquisition01A": [0],
+    "Acquisition02A": [1],
+    "Acquisition03A": [2],
+    "Acquisition04A": [3],
 }
 
 SONAR_CONV_CHANNELS = [8, 16]
@@ -84,37 +75,33 @@ SONAR_POOL_OUT      = 8
 SONAR_FC_HIDDEN     = 32
 SONAR_HEAD_HIDDEN   = 16
 
-# Per-ping per-channel envelope normalisation (applied identically here at
-# training time and inside SonarModel.predict_from_envelope at inference).
-# Removes absolute amplitude as a cue and makes the model robust to
-# between-session gain drift (battery state, transducer wear). The chosen
-# mode is recorded in slices_feature_params.json under `envelope_norm` so
-# train/deploy can't drift apart. Set ENVELOPE_NORM_KIND = None to disable
-# (legacy behaviour).
-ENVELOPE_NORM_KIND       = "per_ping_minmax"
+# Per-ping envelope normalisation was originally added to defend against
+# day-to-day emission-strength drift (battery state, analog-receive-path
+# drift). That drift has been addressed at the hardware/firmware level, so
+# new acquisitions don't need it. Keep the setting but default to off; flip
+# back to "per_ping_minmax" if amplitude variability ever returns. The
+# trainer's z-score normalisation (using sonar_norm in feature_params.json)
+# still applies regardless and keeps inputs at the network in roughly
+# [-3, 3] range.
+ENVELOPE_NORM_KIND       = None
 ENVELOPE_NORM_OUT_MIN    = 0.0
 ENVELOPE_NORM_OUT_MAX    = 1.0
-# Upper reference for the per-ping max comes from the first REF_WINDOW samples
-# (the emit-pulse region), not the whole envelope. This anchors the scale to
-# the emit pulse so post-emit echoes stay on a consistent relative scale, even
-# when a particularly strong wall echo would otherwise exceed the emit peak
-# and become the global max. Set to 0 / None to fall back to global-max.
 ENVELOPE_NORM_REF_WINDOW = 10
 
 LR             = 1e-3
 BATCH_SIZE     = 64
-EPOCHS         = 150       # slightly longer — 6-head model has more to learn
+EPOCHS         = 150
 WARMUP_EPOCHS  = 20
 LOG_VAR_MIN    = -6.0
 LOG_VAR_MAX    = 4.0
 SEED           = 42
 
-N_SIGMA_BINS   = 8         # bins for per-slice empirical σ_sim lookup
+N_SIGMA_BINS   = 8
 
 OUTPUT_DIR      = "SonarModel"
 ARTIFACT_PREFIX = "slices"
 
-SLICE_NAMES = list(_LIB_SLICE_NAMES)   # canonical order, same as Library/SonarModel.py
+SLICE_NAMES = list(_LIB_SLICE_NAMES)
 
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
@@ -125,10 +112,6 @@ def profile_bin_centers(opening_angle, profile_steps):
 
 
 def slice_masks(bin_centers, cone_half_deg):
-    """Return three boolean masks over bin_centers, ordered by ascending
-    azimuth bin to match SLICE_NAMES = (right, center, left): the first
-    mask covers the most-negative-azimuth third (robot's physical right)
-    and the last covers the most-positive-azimuth third (physical left)."""
     third = 2.0 * cone_half_deg / 3.0
     right_lo, right_hi = -cone_half_deg,                -cone_half_deg + third
     cent_lo,  cent_hi  = -cone_half_deg + third,        -cone_half_deg + 2.0 * third
@@ -141,17 +124,21 @@ def slice_masks(bin_centers, cone_half_deg):
 
 
 def compute_slice_targets(profiles, bin_centers, cone_half_deg):
-    """(N, 3) — min profile distance per slice, ordered to match SLICE_NAMES
-    (right, center, left). slice_masks() yields masks in the same order
-    (ascending bin index → ascending azimuth)."""
+    """Per-slice min profile distance, robust to a few NaN bins (gaps where
+    no wall point fell into a profile cell). Uses np.nanmin so a slice with
+    even one valid bin still yields a usable target — only fully-empty
+    slices remain NaN, and those rows are dropped before training."""
     masks = slice_masks(bin_centers, cone_half_deg)
-    cols = [profiles[:, m].min(axis=1) for m in masks]
+    cols = []
+    for m in masks:
+        sub = profiles[:, m]
+        all_nan = np.isnan(sub).all(axis=1)
+        col = np.where(all_nan, np.nan, np.nanmin(np.where(all_nan[:, None], np.inf, sub), axis=1))
+        cols.append(col)
     return np.stack(cols, axis=1).astype(np.float32)
 
 
-# ── Model ─────────────────────────────────────────────────────────────────────
-# SonarSlicesUQ lives in Library/SonarModel.py so the training script and the
-# loadable wrapper share the exact same architecture. Imported above.
+# ── Loss ──────────────────────────────────────────────────────────────────────
 
 def gnll_loss(pred_mean, pred_log_var, target,
               log_var_min=LOG_VAR_MIN, log_var_max=LOG_VAR_MAX):
@@ -163,22 +150,15 @@ def gnll_loss(pred_mean, pred_log_var, target,
 # ── Data ──────────────────────────────────────────────────────────────────────
 
 def load_data():
-    dc = DataCollection(SESSION_PATHS, cache_dir=CACHE_DIR)
-    dc.load_profiles(opening_angle=OPENING_ANGLE, steps=PROFILE_STEPS,
-                     profile_method=PROFILE_METHOD)
-    bin_centers = profile_bin_centers(OPENING_ANGLE, PROFILE_STEPS)
-    s_l, p_l, q_l, sess_l = [], [], [], []
-    for proc in dc.processors:
-        proc.load_sonar(flatten=False)
-        s_l.append(np.asarray(proc.sonar_data, dtype=np.float32))
-        p_l.append(np.asarray(proc.profiles,   dtype=np.float32))
-        q_l.append(proc.quadrants)
-        sess_l.append(np.array([os.path.basename(proc.session)] * proc.n))
-    return (np.concatenate(s_l, axis=0),
-            np.concatenate(p_l, axis=0),
-            np.concatenate(q_l, axis=0),
-            np.concatenate(sess_l, axis=0),
-            bin_centers)
+    """Returns sonar (N, T, 2), profiles (N, profile_steps), quads (N,),
+    sess (N,), bin_centers (profile_steps,)."""
+    return _load_acquisition_data(
+        ACQUISITION_SESSIONS,
+        acquisitions_root=ACQUISITIONS_ROOT,
+        opening_angle=OPENING_ANGLE,
+        profile_steps=PROFILE_STEPS,
+        profile_method=PROFILE_METHOD,
+    )
 
 
 def split_indices(quads, sess):
@@ -191,7 +171,6 @@ def split_indices(quads, sess):
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def make_loader(s, t, batch_size, shuffle):
-    """t shape: (N, 3) — targets ordered by SLICE_NAMES (right, center, left)."""
     L = torch.as_tensor(s[..., 0], dtype=torch.float32)
     R = torch.as_tensor(s[..., 1], dtype=torch.float32)
     T = torch.as_tensor(t,         dtype=torch.float32)
@@ -200,7 +179,6 @@ def make_loader(s, t, batch_size, shuffle):
 
 
 def total_loss(out, T_norm, in_warmup):
-    """Sum of 3 per-slice losses (MSE during warmup, NLL after)."""
     means    = [out["right_mean"].squeeze(1),   out["center_mean"].squeeze(1),   out["left_mean"].squeeze(1)]
     log_vars = [out["right_log_var"].squeeze(1),out["center_log_var"].squeeze(1),out["left_log_var"].squeeze(1)]
     targets  = [T_norm[:, 0], T_norm[:, 1], T_norm[:, 2]]
@@ -265,7 +243,6 @@ def train(tr_s, tr_t, va_s, va_t, sonar_stats, target_stats, device, save_path):
 
 
 def predict(model, sonar, sonar_stats, target_stats, device):
-    """Returns (means [N, 3], stds [N, 3]) in mm."""
     s_mean, s_std = sonar_stats
     t_mean, t_std = target_stats
     s = ((sonar - s_mean) / s_std).astype(np.float32)
@@ -317,20 +294,16 @@ def fit_parametric_sigma(bin_centers, bin_sigmas):
         return float(((predict_(params, bc) - bs) ** 2).mean())
     floor_init = float(np.min(bs))
     over = np.where(bs > floor_init * 1.5)[0]
-    knee_init  = float(bc[over[0]]) if len(over) else float(bc[len(bc) // 2])
-    slope_init = float(max((bs[-1] - bs[0]) / max(bc[-1] - bc[0], 1.0), 0.05))
-    init = [floor_init, knee_init, slope_init]
-    result = minimize(loss, init, method='Nelder-Mead',
-                      options={'xatol': 1e-2, 'fatol': 1e-2, 'maxiter': 800})
-    floor, knee, slope = result.x
-    return {"sigma_floor_mm": float(floor),
-            "d_knee_mm":      float(knee),
-            "slope":          float(slope)}
+    knee_init = float(bc[over[0]]) if len(over) > 0 else float(bc[len(bc) // 2])
+    slope_init = max(0.0, float((bs[-1] - floor_init) / max(bc[-1] - knee_init, 1.0)))
+    res = minimize(loss, x0=[floor_init, knee_init, slope_init], method="Nelder-Mead")
+    floor, knee, slope = [float(v) for v in res.x]
+    return {"sigma_floor_mm": floor, "d_knee_mm": knee, "slope": slope}
 
 
 def parametric_sigma(d_mm, params):
     return params["sigma_floor_mm"] + params["slope"] * np.maximum(
-        0.0, np.asarray(d_mm) - params["d_knee_mm"])
+        0.0, d_mm - params["d_knee_mm"])
 
 
 # ── Plots ─────────────────────────────────────────────────────────────────────
@@ -405,38 +378,28 @@ def plot_sigma_sim_fit_per_slice(true, pred_mean, fits, out_path):
 
 
 def collapse_check(true, pred_mean):
-    """
-    Sanity check: does the model actually predict different values for
-    left/center/right per sample, or has it collapsed to a single value?
-
-    Returns metrics dict + the underlying arrays for plotting.
-    """
     pred_spread = pred_mean.std(axis=1)
     true_spread = true.std(axis=1)
     n_collapsed = int(np.sum(pred_spread < 5.0))
     true_LR = true[:, 0]      - true[:, 2]
     pred_LR = pred_mean[:, 0] - pred_mean[:, 2]
     pearson_LR = float(np.corrcoef(true_LR, pred_LR)[0, 1])
-
-    # Side accuracy stratified by how decisive the geometry is
     side_acc_by_threshold = {}
     for thr in (0, 50, 100, 200, 400):
         mask = np.abs(true_LR) > thr
         if mask.any():
             acc = float(np.mean(np.sign(pred_LR[mask]) == np.sign(true_LR[mask])))
             side_acc_by_threshold[f"|trueLR|>{thr}mm"] = {"acc": acc, "n": int(mask.sum())}
-
     return {
-        "true_spread_mean_mm":        float(true_spread.mean()),
-        "true_spread_median_mm":      float(np.median(true_spread)),
-        "pred_spread_mean_mm":        float(pred_spread.mean()),
-        "pred_spread_median_mm":      float(np.median(pred_spread)),
-        "spread_ratio_pred_over_true": float(pred_spread.mean()
-                                             / max(true_spread.mean(), 1e-8)),
-        "n_samples":                  int(len(pred_spread)),
-        "n_collapsed_under_5mm":      n_collapsed,
-        "pearson_LR_pred_vs_true":    pearson_LR,
-        "side_acc_by_LR_threshold":   side_acc_by_threshold,
+        "true_spread_mean_mm":         float(true_spread.mean()),
+        "true_spread_median_mm":       float(np.median(true_spread)),
+        "pred_spread_mean_mm":         float(pred_spread.mean()),
+        "pred_spread_median_mm":       float(np.median(pred_spread)),
+        "spread_ratio_pred_over_true": float(pred_spread.mean() / max(true_spread.mean(), 1e-8)),
+        "n_samples":                   int(len(pred_spread)),
+        "n_collapsed_under_5mm":       n_collapsed,
+        "pearson_LR_pred_vs_true":     pearson_LR,
+        "side_acc_by_LR_threshold":    side_acc_by_threshold,
         "_arrays": {"true_LR": true_LR, "pred_LR": pred_LR,
                     "true_spread": true_spread, "pred_spread": pred_spread,
                     "pearson_LR": pearson_LR},
@@ -446,8 +409,6 @@ def collapse_check(true, pred_mean):
 def plot_collapse_check(diag, out_path):
     a = diag["_arrays"]
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
-
-    # Left: pred LR vs true LR — collapse would put all points on the red line
     ax = axes[0]
     ax.scatter(a["true_LR"], a["pred_LR"], s=8, alpha=0.5, color='steelblue')
     lo = float(min(a["true_LR"].min(), a["pred_LR"].min()))
@@ -462,8 +423,6 @@ def plot_collapse_check(diag, out_path):
     ax.set_ylabel("pred (left − right) (mm)")
     ax.set_title(f"L−R asymmetry: pred vs true   r = {a['pearson_LR']:+.3f}")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
-
-    # Right: distribution of per-sample spread (collapse → mass at 0)
     ax = axes[1]
     bins = np.linspace(0, max(a["true_spread"].max(), a["pred_spread"].max()), 40)
     ax.hist(a["true_spread"], bins=bins, alpha=0.55, color='gray',
@@ -474,14 +433,10 @@ def plot_collapse_check(diag, out_path):
     ax.set_ylabel("count")
     ax.set_title("Per-sample spread across slices  (collapse → mass at 0)")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
-
     plt.tight_layout(); plt.savefig(out_path, dpi=120); plt.close()
 
 
 def plot_overall_min_comparison(true, pred_mean, out_path):
-    """How well does min(slice predictions) substitute for the dedicated
-    distance model? Compare against the existing model's task: predicting
-    min(profile within ±35°), which equals min over the three slice mins."""
     true_overall = true.min(axis=1)
     pred_overall = pred_mean.min(axis=1)
     rmse = float(np.sqrt(((pred_overall - true_overall) ** 2).mean()))
@@ -510,15 +465,9 @@ def main():
 
     print("[1/5] Loading data")
     sonar, profiles, quads, sess, bin_centers = load_data()
+    print(f"  loaded {len(sonar)} pings from {len(set(sess.tolist()))} session(s)")
 
-    # Apply per-ping per-channel envelope normalisation BEFORE computing the
-    # z-score stats. The same function runs inside SonarModel.predict_from_
-    # envelope at inference (controlled via the saved feature_params.json), so
-    # train and deploy paths see identically-normalised inputs.
     if ENVELOPE_NORM_KIND == "per_ping_minmax":
-        # sonar shape: (N, T, 2). normalize_envelope_per_ping handles the (N, T, C)
-        # case by min-max per (n, c) along the T axis. Upper reference comes
-        # from the first ENVELOPE_NORM_REF_WINDOW samples (emit-pulse region).
         n_before = sonar.shape[0]
         sonar = normalize_envelope_per_ping(
             sonar,
@@ -574,19 +523,16 @@ def main():
         print(f"  {name:>6}:  RMSE={rmse:5.0f}  MAE={mae:4.0f}  "
               f"corr(σ,|r|)={cor:+.3f}  frac_1σ={f1s:.2f}  σ_med={np.median(s):.0f}")
 
-    # Overall min recovery — compare against existing distance model (142 mm RMSE)
     true_overall = va_t.min(axis=1)
     pred_overall = pred_mean.min(axis=1)
     overall_rmse = float(np.sqrt(((pred_overall - true_overall) ** 2).mean()))
     overall_mae  = float(np.abs(pred_overall - true_overall).mean())
-    print(f"\n  Overall min  (= min over 3 slice predictions, vs. true min over ±35° cone):")
+    print(f"\n  Overall min:")
     print(f"    RMSE = {overall_rmse:.0f} mm  (reference distance-only model: 142 mm)")
     print(f"    MAE  = {overall_mae:.0f} mm")
 
-    # Collapse check + side-direction signal (the model is useless for
-    # rotation decisions if it predicts the same value for L/C/R)
     diag = collapse_check(va_t, pred_mean)
-    print(f"\n  Collapse check (does the model differentiate L/C/R?):")
+    print(f"\n  Collapse check:")
     print(f"    Per-sample spread across slices:")
     print(f"      true:  mean={diag['true_spread_mean_mm']:.0f} mm,  "
           f"median={diag['true_spread_median_mm']:.0f} mm")
@@ -595,8 +541,7 @@ def main():
           f"(pred/true = {diag['spread_ratio_pred_over_true']:.2f})")
     print(f"    Samples with predicted spread < 5 mm (collapsed): "
           f"{diag['n_collapsed_under_5mm']}/{diag['n_samples']}")
-    print(f"    Pearson(pred L−R, true L−R) = {diag['pearson_LR_pred_vs_true']:+.3f}  "
-          f"(0 = full collapse, 1 = perfect)")
+    print(f"    Pearson(pred L−R, true L−R) = {diag['pearson_LR_pred_vs_true']:+.3f}")
     print(f"  Side accuracy by |true L−R| threshold:")
     for k, v in diag["side_acc_by_LR_threshold"].items():
         print(f"    {k:>16}:  acc = {v['acc']:.3f}  (n={v['n']})")
@@ -618,8 +563,8 @@ def main():
                                os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_calibration.png"))
     plot_sigma_sim_fit_per_slice(va_t, pred_mean, fits,
                                  os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_sigma_sim_fit.png"))
-    overall_metrics = plot_overall_min_comparison(va_t, pred_mean,
-                          os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_overall_min_scatter.png"))
+    plot_overall_min_comparison(va_t, pred_mean,
+                                os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_overall_min_scatter.png"))
     plot_collapse_check(diag,
                         os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_collapse_check.png"))
 
@@ -679,7 +624,7 @@ def main():
         "data": {
             "n_train": int(len(tr_t)), "n_val": int(len(va_t)),
             "validation_quadrants": VALIDATION_QUADRANTS,
-            "sessions": SESSION_PATHS,
+            "sessions": ACQUISITION_SESSIONS,
         },
     }
     with open(os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_results.json"), "w") as f:
