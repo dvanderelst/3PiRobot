@@ -121,6 +121,7 @@ class AcquisitionPlan:
     n_yaws: int
     clearance_mm: float
     min_step_mm: float
+    min_neighbor_mm: float                  # min distance to ANY prior waypoint
     seed: int
 
 
@@ -137,12 +138,30 @@ def load_plan(path) -> AcquisitionPlan:
 
 # ─── Sampling helpers ────────────────────────────────────────────────────────
 
-def _sample_in_bounds(bounds, rng) -> np.ndarray:
-    """Uniform random (x, y) in the arena bounding box."""
-    return np.array([
-        rng.uniform(bounds["min_x"], bounds["max_x"]),
-        rng.uniform(bounds["min_y"], bounds["max_y"]),
-    ], dtype=np.float64)
+def _sample_in_polygon(poly_path: MplPath, rng) -> np.ndarray:
+    """Uniform random `(x, y)` inside a convex polygon.
+
+    Fan triangulation from vertex 0, pick a triangle weighted by area, then
+    sample uniformly inside it via reflected-barycentric coordinates. Strictly
+    faster than bbox + rejection when the polygon is much smaller than its
+    bounding box (camera FOV vs. arena polygon ratio).
+    """
+    poly_pts = poly_path.vertices[:-1]  # drop the duplicated closing vertex
+    n = len(poly_pts)
+    v0 = poly_pts[0]
+    tri_areas = np.array([
+        0.5 * abs(np.cross(poly_pts[i] - v0, poly_pts[i + 1] - v0))
+        for i in range(1, n - 1)
+    ])
+    cum = np.cumsum(tri_areas) / tri_areas.sum()
+    tri_idx = int(np.searchsorted(cum, rng.random()))
+    a = v0
+    b = poly_pts[tri_idx + 1]
+    c = poly_pts[tri_idx + 2]
+    u1, u2 = rng.random(), rng.random()
+    if u1 + u2 > 1.0:
+        u1, u2 = 1.0 - u1, 1.0 - u2
+    return a + u1 * (b - a) + u2 * (c - a)
 
 
 def yaw_set(n_yaws: int, rng) -> List[float]:
@@ -162,12 +181,10 @@ def yaw_set(n_yaws: int, rng) -> List[float]:
 
 # ─── Plan construction ───────────────────────────────────────────────────────
 
-def _find_feasible_start(walls, bounds, arena_path, clearance_mm, rng,
+def _find_feasible_start(walls, arena_path, clearance_mm, rng,
                          max_tries: int = 2000) -> np.ndarray:
     for _ in range(max_tries):
-        cand = _sample_in_bounds(bounds, rng)
-        if not arena_path.contains_point(cand):
-            continue
+        cand = _sample_in_polygon(arena_path, rng)
         if min_dist_point_to_walls(cand, walls) >= clearance_mm:
             return cand
     raise RuntimeError(
@@ -181,6 +198,7 @@ def build_plan(arena,
                target_k: int,
                clearance_mm: float,
                min_step_mm: float,
+               min_neighbor_mm: float,
                max_attempts_per_step: int,
                n_yaws: int,
                arena_name: str,
@@ -188,35 +206,41 @@ def build_plan(arena,
                seed: int) -> AcquisitionPlan:
     """Iteratively grow a tour of feasible waypoints.
 
+    `min_step_mm` constrains *consecutive* waypoints; `min_neighbor_mm`
+    constrains the new candidate against *every* prior waypoint and is what
+    spreads samples uniformly. Set `min_neighbor_mm = 0` to disable the
+    neighbor check (reverts to the old behaviour).
+
     Returns a plan with up to `target_k + 1` positions (start + target_k more),
     or fewer if the tour terminates early when no feasible next step is found
     within `max_attempts_per_step` candidates.
     """
     rng = np.random.default_rng(seed)
     walls = arena["walls"]
-    bounds = arena["bounds"]
     arena_path = arena_polygon(walls)
 
-    rejections = {"outside_arena": 0, "position_clearance": 0,
-                  "min_step": 0, "segment_clearance": 0}
+    rejections = {"position_clearance": 0,
+                  "min_step": 0, "min_neighbor": 0, "segment_clearance": 0}
 
-    start = _find_feasible_start(walls, bounds, arena_path, clearance_mm, rng)
+    start = _find_feasible_start(walls, arena_path, clearance_mm, rng)
     positions: List[np.ndarray] = [start]
     yaws: List[List[float]] = [yaw_set(n_yaws, rng)]
 
     for _ in range(target_k):
         added = False
+        pos_arr = np.asarray(positions)  # cached per outer iter; cheap
         for _attempt in range(max_attempts_per_step):
-            cand = _sample_in_bounds(bounds, rng)
-            if not arena_path.contains_point(cand):
-                rejections["outside_arena"] += 1
-                continue
+            cand = _sample_in_polygon(arena_path, rng)
             if min_dist_point_to_walls(cand, walls) < clearance_mm:
                 rejections["position_clearance"] += 1
                 continue
             if np.linalg.norm(cand - positions[-1]) < min_step_mm:
                 rejections["min_step"] += 1
                 continue
+            if min_neighbor_mm > 0:
+                if np.linalg.norm(pos_arr - cand, axis=1).min() < min_neighbor_mm:
+                    rejections["min_neighbor"] += 1
+                    continue
             if min_dist_segment_to_walls(positions[-1], cand, walls) < clearance_mm:
                 rejections["segment_clearance"] += 1
                 continue
@@ -230,9 +254,9 @@ def build_plan(arena,
             break
 
     print(f"  rejections during build: "
-          f"outside_arena={rejections['outside_arena']}, "
           f"position={rejections['position_clearance']}, "
           f"min_step={rejections['min_step']}, "
+          f"min_neighbor={rejections['min_neighbor']}, "
           f"segment={rejections['segment_clearance']}")
 
     return AcquisitionPlan(
@@ -243,6 +267,7 @@ def build_plan(arena,
         n_yaws=n_yaws,
         clearance_mm=clearance_mm,
         min_step_mm=min_step_mm,
+        min_neighbor_mm=min_neighbor_mm,
         seed=int(seed),
     )
 
@@ -335,4 +360,217 @@ def plot_plan(plan: AcquisitionPlan, arena, out_path) -> None:
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+# ─── Tour reordering (post-hoc TSP heuristic) ────────────────────────────────
+
+def total_path_length_mm(positions) -> float:
+    """Sum of Euclidean leg lengths along the tour."""
+    pos = np.asarray(positions, dtype=np.float64)
+    if pos.shape[0] < 2:
+        return 0.0
+    return float(np.sum(np.linalg.norm(np.diff(pos, axis=0), axis=1)))
+
+
+def reorder_tour(plan: AcquisitionPlan, arena) -> AcquisitionPlan:
+    """Greedy nearest-neighbour reordering of `plan.positions[1:]` while keeping
+    `positions[0]` as the start. Feasibility-aware: each candidate next-edge
+    must have segment clearance ≥ `plan.clearance_mm` against the wall point
+    cloud, otherwise the runner would try to drive through a wall.
+
+    Sample-order plans are essentially random tours (≈ 5–10× optimal length);
+    NN heuristic typically gives ~1.25× optimal, a substantial cut in robot
+    drive time. If you want even tighter, layer 2-opt on top.
+
+    Each candidate-edge segment-clearance check is cached to keep the worst
+    case at O(n²) checks rather than per-step recomputation.
+    """
+    walls = arena["walls"]
+    positions = np.asarray(plan.positions, dtype=np.float64)
+    n = positions.shape[0]
+    if n <= 2:
+        return plan
+
+    feas_cache: dict = {}
+
+    def is_feasible(i: int, j: int) -> bool:
+        key = (i, j) if i < j else (j, i)
+        if key not in feas_cache:
+            d = min_dist_segment_to_walls(positions[i], positions[j], walls)
+            feas_cache[key] = d >= plan.clearance_mm
+        return feas_cache[key]
+
+    visited = [0]
+    remaining = set(range(1, n))
+    fallbacks = 0
+    cur = 0
+
+    while remaining:
+        # Distances from cur to every remaining node, sorted ascending.
+        rem_arr = np.array(sorted(remaining))
+        d = np.linalg.norm(positions[rem_arr] - positions[cur], axis=1)
+        order = np.argsort(d)
+
+        next_idx = None
+        for k in order:
+            j = int(rem_arr[k])
+            if is_feasible(cur, j):
+                next_idx = j
+                break
+
+        if next_idx is None:
+            # Every remaining segment from cur intersects a wall. Take nearest
+            # anyway — the runner will log a nav failure on this leg, but the
+            # rest of the tour is still useful. Should be rare given the plan
+            # was built with feasible-segment constraints.
+            next_idx = int(rem_arr[order[0]])
+            fallbacks += 1
+
+        visited.append(next_idx)
+        remaining.remove(next_idx)
+        cur = next_idx
+
+    if fallbacks > 0:
+        print(f"  reorder: {fallbacks} infeasible legs accepted as fallbacks")
+
+    new_positions = [plan.positions[i] for i in visited]
+    new_yaws = [plan.yaws_at_position[i] for i in visited]
+    return AcquisitionPlan(
+        arena_name=plan.arena_name,
+        arena_dir=plan.arena_dir,
+        positions=new_positions,
+        yaws_at_position=new_yaws,
+        n_yaws=plan.n_yaws,
+        clearance_mm=plan.clearance_mm,
+        min_step_mm=plan.min_step_mm,
+        min_neighbor_mm=plan.min_neighbor_mm,
+        seed=plan.seed,
+    )
+
+
+# ─── Diagnostics ─────────────────────────────────────────────────────────────
+
+def plot_diagnostics(plan: AcquisitionPlan, arena, out_path) -> None:
+    """Four-panel diagnostic figure.
+
+    Panel 1 (polar): histogram of all yaws across the plan. With per-position
+        random offset and uniform spacing, this should look close to uniform
+        on the circle; a clear modal direction means the offset randomisation
+        isn't doing what we expect.
+    Panel 2: histogram of per-waypoint min-wall-distance. The clearance is
+        marked. Tells us how close-wall-heavy the plan actually is.
+    Panel 3: histogram of per-waypoint nearest-neighbor distance. Quantifies
+        spatial uniformity — long left tail = clustering, long right tail =
+        isolated points, tight = even spacing.
+    Panel 4: 2D heatmap of waypoint density on the arena. Locates undersampled
+        regions visually.
+    """
+    walls = arena["walls"]
+    bounds = arena["bounds"]
+    positions = np.array(plan.positions)
+    all_yaws = np.array([y for ys in plan.yaws_at_position for y in ys])
+
+    min_wall_dists = np.array([min_dist_point_to_walls(p, walls) for p in positions])
+
+    if len(positions) > 1:
+        diffs = positions[:, None, :] - positions[None, :, :]
+        d_pair = np.sqrt(np.sum(diffs ** 2, axis=-1))
+        np.fill_diagonal(d_pair, np.inf)
+        nn_dists = d_pair.min(axis=1)
+    else:
+        nn_dists = np.array([])
+
+    fig = plt.figure(figsize=(14, 11))
+
+    # Panel 1: polar heading histogram
+    ax1 = fig.add_subplot(2, 2, 1, projection="polar")
+    n_bins = 36
+    counts, edges = np.histogram(np.deg2rad(all_yaws), bins=n_bins,
+                                 range=(-np.pi, np.pi))
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    width = 2 * np.pi / n_bins
+    ax1.bar(centers, counts, width=width, alpha=0.7,
+            edgecolor="black", linewidth=0.4, color="#4c72b0")
+    ax1.set_theta_zero_location("E")
+    ax1.set_theta_direction(1)  # CCW (matches yaw convention: +ccw from +X)
+    ax1.set_title(f"Heading distribution\n({len(all_yaws)} yaws)")
+
+    # Panel 2: min-wall-distance histogram per waypoint
+    ax2 = fig.add_subplot(2, 2, 2)
+    ax2.hist(min_wall_dists, bins=20, edgecolor="black", color="#4c72b0", alpha=0.8)
+    ax2.axvline(plan.clearance_mm, color="red", linestyle="--",
+                linewidth=1.2, label=f"clearance ({plan.clearance_mm:.0f} mm)")
+    ax2.set_xlabel("min wall distance (mm)")
+    ax2.set_ylabel("# waypoints")
+    ax2.set_title(f"Distance to nearest wall (per waypoint)\n"
+                  f"median={np.median(min_wall_dists):.0f} mm, "
+                  f"min={min_wall_dists.min():.0f} mm, "
+                  f"max={min_wall_dists.max():.0f} mm")
+    ax2.legend()
+
+    # Panel 3: nearest-neighbor distance histogram
+    ax3 = fig.add_subplot(2, 2, 3)
+    if nn_dists.size > 0:
+        ax3.hist(nn_dists, bins=20, edgecolor="black", color="#4c72b0", alpha=0.8)
+        if plan.min_neighbor_mm > 0:
+            ax3.axvline(plan.min_neighbor_mm, color="red", linestyle="--",
+                        linewidth=1.2,
+                        label=f"min neighbor ({plan.min_neighbor_mm:.0f} mm)")
+        ax3.axvline(plan.min_step_mm, color="orange", linestyle=":",
+                    linewidth=1.0,
+                    label=f"min step ({plan.min_step_mm:.0f} mm)")
+        ax3.legend()
+        title_extra = (f"\nmedian={np.median(nn_dists):.0f} mm, "
+                       f"min={nn_dists.min():.0f} mm, "
+                       f"max={nn_dists.max():.0f} mm")
+    else:
+        title_extra = ""
+    ax3.set_xlabel("nearest-neighbor distance (mm)")
+    ax3.set_ylabel("# waypoints")
+    ax3.set_title("Inter-waypoint spacing" + title_extra)
+
+    # Panel 4: 2D waypoint density heatmap on the arena
+    ax4 = fig.add_subplot(2, 2, 4)
+    n_grid = 20
+    x_edges = np.linspace(bounds["min_x"], bounds["max_x"], n_grid + 1)
+    y_edges = np.linspace(bounds["min_y"], bounds["max_y"], n_grid + 1)
+    H, _, _ = np.histogram2d(positions[:, 0], positions[:, 1],
+                             bins=[x_edges, y_edges])
+    # Mask cells with zero count so they're visually distinct from the heatmap
+    # max — `hot` maxes out at white, which is indistinguishable from masked
+    # cells. Use `viridis` (max = yellow) and a contrasting background colour
+    # for "no waypoints here".
+    H_plot = np.ma.masked_where(H.T == 0, H.T)
+    cmap_density = plt.get_cmap("viridis").copy()
+    cmap_density.set_bad(color="#e8e8e8")  # light grey for empty cells
+    im = ax4.imshow(
+        H_plot,
+        extent=(bounds["min_x"], bounds["max_x"],
+                bounds["min_y"], bounds["max_y"]),
+        origin="lower",
+        cmap=cmap_density,
+        aspect="equal",
+        zorder=2,
+    )
+    cbar = plt.colorbar(im, ax=ax4, fraction=0.046, pad=0.04)
+    cbar.set_label("waypoints per cell")
+    ax4.scatter(walls[::20, 0], walls[::20, 1],
+                s=0.5, c="black", alpha=0.4, zorder=1)
+    hull_path = arena_polygon(walls)
+    hull_pts = hull_path.vertices
+    ax4.plot(hull_pts[:, 0], hull_pts[:, 1], linestyle="--",
+             color="#888", alpha=0.6, linewidth=0.8, zorder=3)
+    ax4.set_xlim(bounds["min_x"], bounds["max_x"])
+    ax4.set_ylim(bounds["min_y"], bounds["max_y"])
+    ax4.set_xlabel("x (mm)")
+    ax4.set_ylabel("y (mm)")
+    ax4.set_title(f"Waypoint density ({n_grid}×{n_grid} grid, "
+                  f"{len(positions)} waypoints)")
+
+    fig.suptitle(f"Acquisition plan diagnostics: {plan.arena_name}  "
+                 f"(seed {plan.seed})",
+                 y=0.995)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
