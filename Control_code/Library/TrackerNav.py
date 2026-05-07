@@ -124,7 +124,7 @@ class TrackerNav:
                  stable_n_consec: int = 4,
                  stable_poll_s: float = 0.1,
                  stable_timeout_s: float = 5.0,
-                 post_step_delay_s: float = 0.5,
+                 post_step_delay_s: float = 1.0,
                  verbose: bool = True):
         self.client = client
         self.tracker = tracker

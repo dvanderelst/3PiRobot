@@ -30,7 +30,7 @@ from Library.AcquisitionPlanner import (
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-ARENA_NAME             = "Acquisition01"
+ARENA_NAME             = "Acquisition04"
 TARGET_K               = 250       # number of waypoints (excluding the start)
 N_YAWS                 = 5         # measurements per position (72° spacing → cones non-overlapping)
 CLEARANCE_MM           = 250.0     # min distance from any wall (point AND segment)

@@ -316,10 +316,27 @@ def plot_plan(plan: AcquisitionPlan, arena, out_path) -> None:
             label="planner feasible region", zorder=1.5)
     ax.legend(loc="lower left", fontsize=8)
 
-    # Tour segments
+    # Tour segments. Per-leg colour by feasibility: grey for feasible, red for
+    # any leg whose segment-to-walls clearance is below the planner's threshold.
+    # A red leg is a runner hazard — should never appear, but if it does the
+    # plot makes it instantly visible (e.g. someone hand-edited a plan).
     if len(positions) >= 2:
-        ax.plot(positions[:, 0], positions[:, 1],
-                color="#888", alpha=0.55, linewidth=0.8, zorder=2)
+        n_infeas = 0
+        for i in range(len(positions) - 1):
+            d = min_dist_segment_to_walls(positions[i], positions[i + 1], walls)
+            colour = "#888" if d >= plan.clearance_mm else "#d62728"
+            lw = 0.8 if d >= plan.clearance_mm else 2.0
+            alpha = 0.55 if d >= plan.clearance_mm else 0.95
+            ax.plot(positions[i:i + 2, 0], positions[i:i + 2, 1],
+                    color=colour, alpha=alpha, linewidth=lw, zorder=2)
+            if d < plan.clearance_mm:
+                n_infeas += 1
+        if n_infeas > 0:
+            ax.text(0.02, 0.98, f"WARNING: {n_infeas} infeasible leg(s)",
+                    transform=ax.transAxes, fontsize=10, color="#d62728",
+                    weight="bold", verticalalignment="top",
+                    bbox=dict(boxstyle="round", facecolor="white",
+                              edgecolor="#d62728"))
 
     # Waypoints coloured by min-wall-distance
     sc = ax.scatter(
@@ -403,7 +420,6 @@ def reorder_tour(plan: AcquisitionPlan, arena) -> AcquisitionPlan:
 
     visited = [0]
     remaining = set(range(1, n))
-    fallbacks = 0
     cur = 0
 
     while remaining:
@@ -420,19 +436,20 @@ def reorder_tour(plan: AcquisitionPlan, arena) -> AcquisitionPlan:
                 break
 
         if next_idx is None:
-            # Every remaining segment from cur intersects a wall. Take nearest
-            # anyway — the runner will log a nav failure on this leg, but the
-            # rest of the tour is still useful. Should be rare given the plan
-            # was built with feasible-segment constraints.
-            next_idx = int(rem_arr[order[0]])
-            fallbacks += 1
+            # NN got stuck: every remaining waypoint is across a wall from
+            # the current node. Truncate rather than accept a wall-crossing
+            # edge. (The previous version accepted the nearest infeasible as
+            # a "fallback", which let through a leg with 0 mm clearance and
+            # the runner would try to drive through the obstacle.) Caller
+            # can re-run with a different seed if the loss is significant.
+            print(f"  reorder: truncated at {len(visited)}/{n} waypoints "
+                  f"({len(remaining)} dropped — no feasible direct neighbour "
+                  f"from current node)")
+            break
 
         visited.append(next_idx)
         remaining.remove(next_idx)
         cur = next_idx
-
-    if fallbacks > 0:
-        print(f"  reorder: {fallbacks} infeasible legs accepted as fallbacks")
 
     new_positions = [plan.positions[i] for i in visited]
     new_yaws = [plan.yaws_at_position[i] for i in visited]
