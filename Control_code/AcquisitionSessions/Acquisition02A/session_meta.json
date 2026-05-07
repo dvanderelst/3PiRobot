@@ -1,0 +1,15 @@
+{
+  "arena_name": "Acquisition02",
+  "arena_dir": "/home/dieter/Dropbox/PythonRepos/3PiRobot/Control_code/AcquisitionArenas/Acquisition02",
+  "plan_file": "plan_2026-05-07T13-17-13.json",
+  "plan_seed": 1778174229,
+  "n_positions_planned": 89,
+  "n_pings_planned": 445,
+  "robot_number": 1,
+  "started_at": "2026-05-07T13-18-23",
+  "finished_at": "2026-05-07T14-27-26",
+  "duration_s": 4131.367954492569,
+  "pings_collected": 445,
+  "nav_failures": 13,
+  "ping_failures": 0
+}
