@@ -42,15 +42,16 @@ from Library import Settings as _settings
 from Library.EnvironmentSimulator import EnvironmentSimulator
 from Library.Policy import Policy
 from Library.SonarModel import SonarModel
+from Library.TrackerNav import wait_for_stable_pose
 from LorexLib.Environment import capture_environment_layout
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
-POLICY    = "rnn_sup_loop2_h32_nosigma"   # sub-folder under PolicyTraining/
-ARENA     = "loop2"                       # sub-folder under TargetArenas/
-REPEAT    = "13"
+POLICY    = "default_Target02_h32_nosigma"   # sub-folder under PolicyTraining/
+ARENA     = "Target02"                       # sub-folder under TargetArenas/
+REPEAT    = "04"
 
 MAX_STEPS = 500
 
@@ -73,14 +74,16 @@ POLICY_INPUT_SOURCE = "live"   # "live" | "sim" | "sim_clean"
 
 # After a step (especially a sharp turn) the overhead tracker takes ~1–2 s to
 # converge on the new pose; reading immediately gives a stale yaw and feeds the
-# wrong geometric profile to the policy. Wait until the tracker yaw is stable
-# (last N reads within YAW_STABLE_TOL_DEG) before using its value. Verbose flag
-# prints each poll for early debugging.
+# wrong geometric profile to the policy. We delegate the settled-read to
+# `wait_for_stable_pose` (in motion-required mode — see `_wait_for_pose` below)
+# so it cannot lock onto pre-motion lag frames.
 YAW_STABLE_TOL_DEG    = 0.5    # max spread (deg) across the rolling window
+YAW_STABLE_POS_TOL_MM = 8.0    # max position spread (mm) across the rolling window
 YAW_STABLE_N_CONSEC   = 3      # how many consecutive in-tol reads required
 YAW_STABLE_POLL_S     = 0.1    # seconds between polls
-YAW_STABLE_TIMEOUT_S  = 3.0    # give up after this; use last available pose
-YAW_STABLE_VERBOSE    = False  # print per-poll trace; flip on for debugging
+YAW_STABLE_TIMEOUT_S  = 5.0    # motion-required mode needs room for tracker lag
+                               # (~1–2 s) plus the n_consec settle window
+YAW_STABLE_VERBOSE    = False  # warn on timeout / motion-not-observed
 
 PLOT_EVERY            = 1      # save trajectory plot every N steps (0 = disable)
 wait_for_confirmation = False
@@ -295,63 +298,36 @@ def _write_metrics_row(step, position, meas_live, meas_clean, meas_sim,
     _metrics_file.flush()
 
 
-def _yaw_spread(yaws):
-    """Max wrapped pairwise difference (deg) across a sequence of yaws."""
-    a = np.asarray(yaws, dtype=float)
-    diffs = a.reshape(-1, 1) - a.reshape(1, -1)
-    diffs = ((diffs + 180.0) % 360.0) - 180.0
-    return float(np.abs(diffs).max())
+def _wait_for_pose(prior=None):
+    """Settled tracker read with motion-required gating when `prior` is given.
 
+    Returns a dict with keys 'x', 'y', 'yaw_deg' (matching `tracker.get_position`)
+    or None if the tracker never produced any read. After a `client.step`
+    motion, pass the previous-step pose as `prior` so the underlying
+    `wait_for_stable_pose` won't lock onto pre-motion lag frames (a known
+    failure mode of plain spread-based stability detection — see
+    `Library/TrackerNav.wait_for_stable_pose` docstring).
 
-def _wait_yaw_stable(robot_id,
-                     tol_deg=YAW_STABLE_TOL_DEG,
-                     n_consec=YAW_STABLE_N_CONSEC,
-                     poll_s=YAW_STABLE_POLL_S,
-                     timeout_s=YAW_STABLE_TIMEOUT_S,
-                     verbose=YAW_STABLE_VERBOSE,
-                     tag=""):
-    """Poll the tracker until yaw stabilises (last `n_consec` reads have
-    wrap-aware max-spread < `tol_deg`) or `timeout_s` elapses. Returns the
-    last successfully-read position dict (or None if the tracker never
-    answered). Used at the top of each policy iteration: after a step the
-    overhead tracker takes ~1–2 s to converge on the new pose, and using
-    a stale yaw feeds the simulator/policy a wrong geometric profile."""
-    history_yaw = []
-    last_pos    = None
-    t0          = time.time()
-    converged   = False
-    while time.time() - t0 < timeout_s:
-        pos = tracker.get_position(robot_id)
-        elapsed_ms = (time.time() - t0) * 1000.0
-        if pos is not None:
-            last_pos = pos
-            yaw = pos.get("yaw_deg")
-            if yaw is not None:
-                history_yaw.append(float(yaw))
-                if verbose:
-                    print(f"    [yaw_stable{tag}] t+{elapsed_ms:>4.0f}ms  "
-                          f"yaw={yaw:+7.2f}°  n={len(history_yaw)}", end="")
-                if len(history_yaw) >= n_consec:
-                    spread = _yaw_spread(history_yaw[-n_consec:])
-                    if verbose:
-                        print(f"  spread(last {n_consec})={spread:.2f}°")
-                    if spread < tol_deg:
-                        converged = True
-                        break
-                elif verbose:
-                    print()  # newline (no spread yet)
-        elif verbose:
-            print(f"    [yaw_stable{tag}] t+{elapsed_ms:>4.0f}ms  no pose")
-        time.sleep(poll_s)
-    if verbose:
-        total_ms = (time.time() - t0) * 1000.0
-        if converged:
-            print(f"    [yaw_stable{tag}] converged after {total_ms:.0f}ms "
-                  f"(n_polls={len(history_yaw)})")
-        else:
-            print(f"    [yaw_stable{tag}] TIMEOUT at {total_ms:.0f}ms; "
-                  f"using last pose (n_polls={len(history_yaw)})")
-    return last_pos
+    `strict_motion=False`: if the timeout fires before motion is observed
+    (e.g., the robot was paused and the user resumed without moving it), we
+    return the last pose anyway so the loop can keep going."""
+    prior_tuple = None
+    if prior is not None:
+        prior_tuple = (prior["x"], prior["y"], prior["yaw_deg"])
+    pose = wait_for_stable_pose(
+        tracker, ROBOT_ID,
+        yaw_tol_deg=YAW_STABLE_TOL_DEG,
+        pos_tol_mm=YAW_STABLE_POS_TOL_MM,
+        n_consec=YAW_STABLE_N_CONSEC,
+        poll_s=YAW_STABLE_POLL_S,
+        timeout_s=YAW_STABLE_TIMEOUT_S,
+        prior_pose=prior_tuple,
+        strict_motion=False,
+        verbose=YAW_STABLE_VERBOSE,
+    )
+    if pose is None:
+        return None
+    return {"x": pose[0], "y": pose[1], "yaw_deg": pose[2]}
 
 
 def _interp_gaps(arr):
@@ -605,7 +581,7 @@ def _preview_rollouts(start_pose, n=PREVIEW_N, n_steps=PREVIEW_STEPS,
 
 
 print("\n=== Pre-flight: reading physical start pose for sim preview ===")
-init_pose = _wait_yaw_stable(ROBOT_ID, tag="#init")
+init_pose = _wait_for_pose()
 if init_pose is None:
     print("⚠️  could not read pose from tracker — preview skipped")
 else:
@@ -636,7 +612,10 @@ for step in range(MAX_STEPS):
     # After a sharp turn the tracker can lag the real yaw by ~1–2 s; reading
     # immediately would give a stale yaw and feed the simulator/policy a
     # geometric profile for the wrong heading.
-    position      = _wait_yaw_stable(ROBOT_ID, tag=f"#step{step}")
+    # Pass last_position so the settle-poll won't accept pre-motion lag
+    # frames as the post-step pose. On step 0, last_position is None →
+    # plain spread-based settle (no motion required).
+    position      = _wait_for_pose(prior=last_position)
 
     if sonar_package is None:
         # Skip the step entirely — do not advance hidden state or prev_rot.
