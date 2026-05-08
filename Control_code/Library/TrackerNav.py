@@ -48,53 +48,130 @@ def wait_for_stable_pose(tracker,
                          n_consec: int = 4,
                          poll_s: float = 0.1,
                          timeout_s: float = 5.0,
+                         prior_pose: Optional[Tuple[float, float, float]] = None,
+                         motion_thresh_yaw_deg: Optional[float] = None,
+                         motion_thresh_pos_mm: Optional[float] = None,
+                         strict_motion: bool = False,
                          verbose: bool = False) -> Optional[Tuple[float, float, float]]:
     """Poll `tracker` until both yaw AND position are stable across the
     last `n_consec` reads (yaw spread < `yaw_tol_deg`, position spread <
     `pos_tol_mm`), or `timeout_s` elapses.
 
     Returns `(x_mm, y_mm, yaw_deg)` or None if the tracker never produced a
-    valid read in the timeout window. Used by TrackerNav and standalone
-    callers (e.g., SCRIPT_CalibrateRotation) that need a post-motion read
-    after the camera/processing pipeline has caught up. Yaw alone is not
-    enough: integer-rounded yaw can stick on a stale frame while x/y are
-    still drifting.
+    valid read in the timeout window. Yaw alone is not enough: integer-
+    rounded yaw can stick on a stale frame while x/y are still drifting.
 
-    ⚠ Caller responsibility — POST-STEP DELAY:
-    If you call this immediately after `client.step(...)`, the tracker may
-    still be emitting cached pre-motion frames for ~0.5-1.0 s. Those
-    identical lagged reads trivially satisfy the stability criterion, and
-    the function will return a "stable" pose that predates the motion you
-    just commanded. Symptom: a measured rotation of ~0° for a non-trivial
-    command (this bit `SCRIPT_CalibrateRotation` once already).
+    Repeat-frame filtering:
+        The function deduplicates against the previous tracker read: if a
+        new read is bit-identical to the immediately-preceding one, it is
+        discarded (treated as the camera re-serving the same buffered
+        frame, which carries no new physical information). Only *distinct*
+        reads advance the stability window. This addresses the failure
+        mode where the polling rate (10 Hz at default `poll_s=0.1`) out-
+        paces the camera's update rate, so the same frame fills several
+        poll slots and trivially passes the spread test even though the
+        robot is still in motion. Symptom (seen in `SCRIPT_DiagnoseDriveCurl`
+        Phase 2): a rotate(−30°) registers as Δyaw ≈ 0° because the post-
+        rotate settle locked onto 4 identical mid-rotation frames. Aruco
+        sub-pixel jitter means truly-stationary reads are almost never
+        bit-identical, so this rarely blocks legitimate convergence.
 
-    The fix is at the call site, not here, because the right amount of
-    pre-poll padding depends on what the caller just did (or didn't do):
-      - `TrackerNav.go_to_pose` sleeps `post_step_delay_s` after each step.
-      - `SCRIPT_CalibrateRotation` sleeps `POST_STEP_DELAY_S` after each step.
-      - Idle re-reads (no recent motion) need no padding.
-    Adding a delay inside this function would silently slow down callers
-    that don't need it, so each caller declares its own buffer."""
+    Motion-required mode (use after a `client.step(...)` motion):
+        Pass `prior_pose` — the settled pose read *before* the motion. The
+        function will then refuse to count any read toward the n_consec
+        stability window until it has seen at least one read that differs
+        from `prior_pose` by more than `motion_thresh_yaw_deg`
+        (default 2 × yaw_tol_deg) or `motion_thresh_pos_mm`
+        (default 2 × pos_tol_mm). Stability is then evaluated only on
+        post-motion reads.
+
+        This defeats the stale-frame failure mode where the tracker keeps
+        emitting cached pre-motion frames for ~0.5–2 s after a step. Those
+        identical lagged reads trivially satisfy the spread criterion, and
+        without this gate the function will happily return the pre-motion
+        pose as "settled". Symptom: rotations measured as ~0° for non-
+        trivial commands (this bit `SCRIPT_CalibrateRotation`'s ±30° bin in
+        the May 2026 re-cal — 3 of 30 repeats came back as half-rotations
+        because the post-motion read was a stale pre-motion frame).
+
+    Behaviour on timeout:
+        - Stability achieved (motion observed if required) → return pose.
+        - Motion was required but never observed:
+            * `strict_motion=True`  → return None. Right for measurement
+              contexts (rotation calibration) that must discard contaminated
+              samples rather than silently use a pre-motion pose.
+            * `strict_motion=False` (default) → return `last_pose` with a
+              warning. Right for control loops where the robot may legitimately
+              not have moved (e.g., resumed after a manual pause) and forward
+              progress matters more than measurement integrity.
+        - Tracker never produced a valid read at all → return None."""
+    if motion_thresh_yaw_deg is None:
+        motion_thresh_yaw_deg = 2.0 * yaw_tol_deg
+    if motion_thresh_pos_mm is None:
+        motion_thresh_pos_mm = 2.0 * pos_tol_mm
+
+    motion_required = prior_pose is not None
+    motion_observed = not motion_required
+
     history_yaw: list = []
     history_x:   list = []
     history_y:   list = []
     last_pose: Optional[Tuple[float, float, float]] = None
+    last_read: Optional[Tuple[float, float, float]] = None
     t0 = time.time()
     while time.time() - t0 < timeout_s:
         pos = tracker.get_position(robot_id)
         if pos is not None and pos.get('x') is not None:
             x = float(pos['x']); y = float(pos['y']); yaw = float(pos['yaw_deg'])
-            last_pose = (x, y, yaw)
-            history_yaw.append(yaw); history_x.append(x); history_y.append(y)
-            if len(history_yaw) >= n_consec:
-                yaw_spread = _yaw_spread(history_yaw[-n_consec:])
-                pos_spread = float(np.hypot(
-                    np.ptp(history_x[-n_consec:]),
-                    np.ptp(history_y[-n_consec:]),
-                ))
-                if yaw_spread < yaw_tol_deg and pos_spread < pos_tol_mm:
-                    return last_pose
+            new_read = (x, y, yaw)
+
+            # Repeat-frame filter: the camera (or the buffer between camera and
+            # us) sometimes serves bit-identical frames at successive polls
+            # when our 100 ms poll cadence out-paces the camera update rate.
+            # Identical reads carry no new physical information; counting them
+            # toward the stability window lets it pass the spread test while
+            # the robot is still physically moving. Skip — keep polling.
+            if new_read == last_read:
+                time.sleep(poll_s)
+                continue
+            last_read = new_read
+            last_pose = new_read
+
+            if not motion_observed:
+                px, py, pyaw = prior_pose
+                yaw_diff = abs(((yaw - pyaw + 180.0) % 360.0) - 180.0)
+                pos_diff = math.hypot(x - px, y - py)
+                if (yaw_diff > motion_thresh_yaw_deg
+                        or pos_diff > motion_thresh_pos_mm):
+                    motion_observed = True
+                    # Restart stability window on the first post-motion read so
+                    # earlier pre-motion frames can't contaminate the spread.
+                    history_yaw = [yaw]; history_x = [x]; history_y = [y]
+                # else: pre-motion frame, discarded — keep polling.
+            else:
+                history_yaw.append(yaw); history_x.append(x); history_y.append(y)
+                if len(history_yaw) >= n_consec:
+                    yaw_spread = _yaw_spread(history_yaw[-n_consec:])
+                    pos_spread = float(np.hypot(
+                        np.ptp(history_x[-n_consec:]),
+                        np.ptp(history_y[-n_consec:]),
+                    ))
+                    if yaw_spread < yaw_tol_deg and pos_spread < pos_tol_mm:
+                        return last_pose
         time.sleep(poll_s)
+
+    if motion_required and not motion_observed:
+        if verbose:
+            Logging.print_message("tracker_settle",
+                f"motion never observed within {timeout_s:.1f}s "
+                f"(thresh: {motion_thresh_yaw_deg:.1f}° / "
+                f"{motion_thresh_pos_mm:.0f}mm)"
+                + ("; returning None (strict)" if strict_motion
+                   else "; returning last pose"),
+                "WARNING")
+        if strict_motion:
+            return None
+        return last_pose
     if last_pose is not None and verbose:
         Logging.print_message("tracker_settle",
                               f"pose did not stabilise within {timeout_s:.1f}s; "

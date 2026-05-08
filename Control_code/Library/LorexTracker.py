@@ -25,8 +25,12 @@ class LorexTracker:
             message = f"ID {aruco_id}, {robot_name}> C:{camera_name}, Not Found"
             message_type = "WARNING"
         else:
+            # DEBUG so the per-poll trace stays out of normal output. The
+            # function is called ~10×/s by wait_for_stable_pose during every
+            # settle; at INFO the screen is flooded. Set tracker_verbosity=3
+            # in Settings.py to see these for debugging.
             message = f"ID {aruco_id}, {robot_name}> C:{camera_name}, X:{int(x)}, Y:{int(y)}, Yaw:{int(yaw)}"
-            message_type = "INFO"
+            message_type = "DEBUG"
 
         yaw = Utils.wrap_angle(yaw)
 
