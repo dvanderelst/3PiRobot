@@ -40,7 +40,7 @@ from Library.EnvironmentSimulator import EnvironmentSimulator
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-ARENAS:             List[str] = ["hard", "easy", "loop1", "loop2"]
+ARENAS:             List[str] = ["Target02"]
 ARENAS_ROOT:        str       = "TargetArenas"
 GRID_RESOLUTION_MM: float     = 10.0
 COLORMAP:           str       = "viridis"
@@ -120,7 +120,7 @@ def collect_path_and_starts(
 
     # ── Drawing artists (reused by redraw) ─────────────────────────────────────
     line_path,   = ax.plot([], [], "-", color="red", linewidth=2.5, zorder=10)
-    line_open,   = ax.plot([], [], "-", color="red", linewidth=1.5,
+    line_open,   = ax.plot([], [], color="red", linewidth=1.5,
                            linestyle=":", alpha=0.6, zorder=10)
     pts_path,    = ax.plot([], [], "o", color="red", markersize=7,
                            markeredgecolor="black", zorder=11)
