@@ -186,10 +186,29 @@ class Client:
 
     def step(self, distance=0, angle=0, linear_speed=0, rotation_speed=0, wait_for_completion=True, timeout=30.0, post_delay_s=0.05):
         start = time.time()
-        rotation_desired = self.configuration.rotation_desired
+        rotation_desired  = self.configuration.rotation_desired
         rotation_obtained = self.configuration.rotation_obtained
+        drive_curl_dpm    = self.configuration.drive_yaw_curl_deg_per_mm
+        distance_scale    = self.configuration.drive_distance_scale
+
+        # Drive-curl pre-compensation: the forward drive will rotate the robot
+        # by `distance_mm * drive_curl_dpm` (asymmetric wheel slip). Add the
+        # opposite up front so the net heading change after rotate+drive
+        # matches the caller's `angle`.
+        distance_mm  = float(distance) * 1000.0
+        angle       += -distance_mm * drive_curl_dpm
+
+        # Rotation calibration: convert the (possibly curl-corrected) desired
+        # angle into the firmware command that produces it.
         correction = get_correction(target=angle, desired=rotation_desired, obtained=rotation_obtained)
-        angle = int(angle + correction)
+        angle      = int(angle + correction)
+
+        # Distance scaling: command more (or less) than the caller asked for
+        # so the actual chord length matches the request. Identity = 1.0;
+        # guard against an accidental zero.
+        if distance_scale and distance_scale != 1.0:
+            distance = distance / distance_scale
+
         params = {'distance': distance, 'angle': angle, 'linear_speed': linear_speed, 'rotation_speed': rotation_speed}
         if wait_for_completion:
             resp = self._send_command('step', params=params, wait_for_response=True, timeout=timeout, max_retries=1)

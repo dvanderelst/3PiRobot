@@ -31,11 +31,13 @@ class ClientConfig:
     # actually obtained by the robot for that command. Both columns are in the
     # CCW-positive convention (positive = left turn), matching tracker yaw,
     # world +X, and the firmware after the May-2026 CW→CCW sign flip in
-    # motors.py. Re-measure with SCRIPT_CalibrateRotation.py if the robot's
+    # motors.py. Re-measure with SCRIPT_CalibrateRobot.py (Phase 1) when
     # rotation behaviour changes (battery degradation, motor wear, firmware
-    # changes, etc.).
-    rotation_desired:  list = field(default_factory=lambda: [-40, -30, -20, -10, -5, 0, 5, 10, 20, 30, 40])
-    rotation_obtained: list = field(default_factory=lambda: [-40.75, -28.52, -19.29, -11.96, -5.44, 0.0, 5.41, 11.3, 21.01, 29.28, 40.48])
+    # changes, wheel swap, etc.).
+    rotation_desired:           list  = field(default_factory=lambda: [-40, -30, -20, -10, -5, 0, 5, 10, 20, 30, 40])
+    rotation_obtained:          list  = field(default_factory=lambda: [-39.09, -28.26, -19.75, -10.55, -5.58, 0.0, 5.55, 9.26, 20.2, 28.36, 40.05])
+    drive_yaw_curl_deg_per_mm:  float = -0.03693
+    drive_distance_scale:       float = 0.992
     
 client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101", aruco_id=0)
 client2 = ClientConfig(robot_name="Robot02", ip="192.168.0.102", aruco_id=1)
