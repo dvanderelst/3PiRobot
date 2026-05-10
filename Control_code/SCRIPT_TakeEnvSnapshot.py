@@ -4,7 +4,7 @@ from LorexLib.Environment import capture_environment_layout
 
 DATA_FOLDER = 'TempOutput'
 
-session = 'Acquisition04'
+session = 'Target02'
 tracker = LorexTracker.LorexTracker()
 writer = DataStorage.DataWriter(session, autoclear=True, verbose=False)
 writer.add_file('Library/Settings.py')

@@ -35,9 +35,9 @@ class ClientConfig:
     # rotation behaviour changes (battery degradation, motor wear, firmware
     # changes, wheel swap, etc.).
     rotation_desired:           list  = field(default_factory=lambda: [-40, -30, -20, -10, -5, 0, 5, 10, 20, 30, 40])
-    rotation_obtained:          list  = field(default_factory=lambda: [-39.09, -28.26, -19.75, -10.55, -5.58, 0.0, 5.55, 9.26, 20.2, 28.36, 40.05])
-    drive_yaw_curl_deg_per_mm:  float = -0.03693
-    drive_distance_scale:       float = 0.992
+    rotation_obtained:          list  = field(default_factory=lambda: [-38.17, -31.7, -22.69, -9.09, -5.8, 0.0, 5.38, 9.12, 22.09, 30.4, 37.89])
+    drive_yaw_curl_deg_per_mm:  float = -0.01243
+    drive_distance_scale:       float = 0.9972
     
 client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101", aruco_id=0)
 client2 = ClientConfig(robot_name="Robot02", ip="192.168.0.102", aruco_id=1)

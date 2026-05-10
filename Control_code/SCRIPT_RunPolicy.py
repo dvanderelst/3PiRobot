@@ -51,7 +51,7 @@ from LorexLib.Environment import capture_environment_layout
 # ══════════════════════════════════════════════════════════════════════════════
 POLICY    = "default_Target02_h32_nosigma"   # sub-folder under PolicyTraining/
 ARENA     = "Target02"                       # sub-folder under TargetArenas/
-REPEAT    = "04"
+REPEAT    = "07"
 
 MAX_STEPS = 500
 
@@ -77,12 +77,16 @@ POLICY_INPUT_SOURCE = "live"   # "live" | "sim" | "sim_clean"
 # wrong geometric profile to the policy. We delegate the settled-read to
 # `wait_for_stable_pose` (in motion-required mode — see `_wait_for_pose` below)
 # so it cannot lock onto pre-motion lag frames.
-YAW_STABLE_TOL_DEG    = 0.5    # max spread (deg) across the rolling window
+YAW_STABLE_TOL_DEG    = 2.0    # max spread (deg) across the rolling window;
+                               # 3σ above the aruco noise floor (σ≈0.6°,
+                               # see SCRIPT_MeasureTrackerNoise.py)
 YAW_STABLE_POS_TOL_MM = 8.0    # max position spread (mm) across the rolling window
 YAW_STABLE_N_CONSEC   = 3      # how many consecutive in-tol reads required
 YAW_STABLE_POLL_S     = 0.1    # seconds between polls
-YAW_STABLE_TIMEOUT_S  = 5.0    # motion-required mode needs room for tracker lag
-                               # (~1–2 s) plus the n_consec settle window
+YAW_STABLE_TIMEOUT_S  = 8.0    # at the current 0.8 Hz fresh-frame rate
+                               # (DVR/RTSP bottleneck — tracked in
+                               # PyLorex/TODO.md) we need ~5 s for n_consec
+                               # fresh reads; 8 s is the safe margin
 YAW_STABLE_VERBOSE    = False  # warn on timeout / motion-not-observed
 
 PLOT_EVERY            = 1      # save trajectory plot every N steps (0 = disable)

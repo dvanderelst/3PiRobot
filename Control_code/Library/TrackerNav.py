@@ -43,11 +43,11 @@ def _yaw_spread(yaws) -> float:
 
 def wait_for_stable_pose(tracker,
                          robot_id: int,
-                         yaw_tol_deg: float = 0.5,
+                         yaw_tol_deg: float = 2.0,
                          pos_tol_mm: float = 8.0,
                          n_consec: int = 4,
                          poll_s: float = 0.1,
-                         timeout_s: float = 5.0,
+                         timeout_s: float = 8.0,
                          prior_pose: Optional[Tuple[float, float, float]] = None,
                          motion_thresh_yaw_deg: Optional[float] = None,
                          motion_thresh_pos_mm: Optional[float] = None,
@@ -60,6 +60,17 @@ def wait_for_stable_pose(tracker,
     Returns `(x_mm, y_mm, yaw_deg)` or None if the tracker never produced a
     valid read in the timeout window. Yaw alone is not enough: integer-
     rounded yaw can stick on a stale frame while x/y are still drifting.
+
+    Tolerance defaults (`yaw_tol_deg=2.0`, `pos_tol_mm=8`) and `timeout_s=8`
+    are sized for the empirical 2026-05-10 measurement of the Robot01
+    pipeline (see `SCRIPT_MeasureTrackerNoise.py`):
+      - σ_yaw ≈ 0.6° per fresh tracker frame → 2.0° is just above 3σ.
+      - Fresh-frame rate ≈ 0.8 Hz (DVR/RTSP-side bottleneck; tracked in
+        PyLorex/TODO.md). At 0.8 Hz, an 8 s timeout gives ~6 fresh reads,
+        comfortably above the n_consec=4 stability window. With the
+        previous 5 s timeout the function regularly hit the limit on
+        stationary settles. Tighten these once the PyLorex frame-rate
+        bottleneck is fixed.
 
     Repeat-frame filtering:
         The function deduplicates against the previous tracker read: if a
@@ -196,11 +207,11 @@ class TrackerNav:
                  max_step_distance_m: float = 0.20,
                  max_iterations: int = 30,
                  max_yaw_iterations: int = 8,
-                 yaw_stable_tol_deg: float = 0.5,
+                 yaw_stable_tol_deg: float = 2.0,
                  pos_stable_tol_mm: float = 8.0,
                  stable_n_consec: int = 4,
                  stable_poll_s: float = 0.1,
-                 stable_timeout_s: float = 5.0,
+                 stable_timeout_s: float = 8.0,
                  post_step_delay_s: float = 1.0,
                  verbose: bool = True):
         self.client = client

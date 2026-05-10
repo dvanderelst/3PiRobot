@@ -53,8 +53,8 @@ _settings.data_folder = "TargetArenas"
 
 
 # ── Condition ────────────────────────────────────────────────────────────────
-TARGET_ARENA = "loop2"
-CONDITION    = "rnn_sup"
+TARGET_ARENA = "Target02"
+CONDITION    = "default"
 
 
 @dataclass

@@ -51,12 +51,12 @@ from Library.EnvironmentSimulator import EnvironmentSimulator
 from Library.TargetPath import load_target_path
 
 from SCRIPT_TrainPolicy import (
-    Config, RNNNet, _project_with_segment, get_sonar, encode_obs, make_starts,
+    Config, RNNNet, _project_with_segment, _obs_from_cfg, make_starts,
 )
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────
-RUN_DIR    = "PolicyTraining/rnn_sup_loop2_h32_nosigma"
+RUN_DIR    = "PolicyTraining/default_Target02_h32_nosigma"
 N_ROLLOUTS = 12
 SEED       = 1234
 
@@ -159,9 +159,9 @@ def measure_input_medians(sim: EnvironmentSimulator, path, starts,
     x, y, yaw = starts[0]
     prev_rot = 0.0
     for _ in range(n_steps):
-        d_l, d_c, d_r, s_l, s_c, s_r = get_sonar(sim, x, y, yaw, cfg)
+        meas = sim.get_sonar_measurement(x, y, yaw)
         obs_log.append(np.asarray(
-            encode_obs(d_l, d_c, d_r, s_l, s_c, s_r, prev_rot, cfg),
+            _obs_from_cfg(meas, prev_rot, cfg),
             dtype=np.float32,
         ))
         rot = teacher_rotation_deg(path, x, y, yaw,
@@ -209,9 +209,9 @@ def rollout_ablated(net: RNNNet, sim: EnvironmentSimulator, path,
 
     with torch.no_grad():
         for _ in range(cfg.max_steps):
-            d_l, d_c, d_r, s_l, s_c, s_r = get_sonar(sim, x, y, yaw, cfg)
+            meas = sim.get_sonar_measurement(x, y, yaw)
             obs = np.asarray(
-                encode_obs(d_l, d_c, d_r, s_l, s_c, s_r, prev_rot, cfg),
+                _obs_from_cfg(meas, prev_rot, cfg),
                 dtype=np.float32,
             )
             for k in clamp_idx:
@@ -357,8 +357,9 @@ def main():
     fig.tight_layout()
     out_path = os.path.join(RUN_DIR, "ablations.png")
     fig.savefig(out_path, dpi=120)
+    fig.savefig(os.path.splitext(out_path)[0] + ".svg")
     plt.close(fig)
-    print(f"\nSaved {out_path}")
+    print(f"\nSaved {out_path} (+ .svg)")
 
 
 if __name__ == "__main__":
