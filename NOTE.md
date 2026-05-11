@@ -1,171 +1,138 @@
-# Project state — 2026-05-08 evening
+# Project state — 2026-05-11
 
-Picking up: re-run `SCRIPT_CalibrateRobot.py` with the improved (median +
-16-rep) script, then re-deploy the policy and see whether the second-lap
-divergence in `default_Target02_h32_nosigma_run04` is resolved.
+Picking up: train + deploy the **blind ablation** (`BLIND = True` at the top
+of `SCRIPT_TrainPolicy.py`) and compare against the sighted baseline. The
+sighted side has just hit its first clean on-robot deploy; the next move is
+to demonstrate that this success depends on sonar, not dead-reckoning.
 
-## What we worked on today
+## Milestone — first clean policy deploy (2026-05-10)
 
-The new policy `default_Target02_h32_nosigma` was trained overnight and
-loads cleanly. Trajectories at epoch 1995 look comparable to teacher
-rollouts. But on-robot deployment exposed a chain of issues that we worked
-through in order:
+`PolicyRuns/default_Target02_run06/trajectory.png` — full 354-step figure-8
+on Target02, both loops tightly on path, no second-lap divergence. First
+deploy that didn't unravel by lap 2 since training started for this arena.
+The companion ablation sweep (`PolicyTraining/default_Target02/ablations.png`)
+also ran end-to-end and shows the expected ranking (full > center/sides >
+blind/no_prev_rot).
 
-**1. Tracker `wait_for_stable_pose` was returning pre-motion poses as
-"settled."** Two failure modes, both fixed:
+**Bisect target if anything regresses: `eef35c7`.** That commit message
+spells out exactly what unblocked the run, so a future bisect lands here
+with the context already attached. Don't squash or rewrite it.
 
-  - After a `client.step(...)` motion, the tracker would emit cached
-    pre-motion frames for ~0.5–2 s. The spread-based stability check would
-    trivially fire on identical lagged reads and declare the *pre-motion*
-    pose as the post-motion read. Fix: motion-required mode with
-    `prior_pose` — function refuses to count any read toward stability
-    until at least one read differs from `prior_pose` by more than
-    `2*tol`. `strict_motion=True` in calibration contexts so contaminated
-    samples are skipped, not silently zero-rotated.
-  - The client polls at 10 Hz, but the PyLorex server detection loop runs
-    at ~7-8 Hz (`Simple_tcp.py:178-213`). When polling out-paces the
-    server, the same buffered snapshot fills consecutive polls and
-    trivially passes the spread test. Fix: bit-equality filter on
-    consecutive reads — repeat tracker frames (same float `(x,y,yaw)`)
-    don't advance the stability window. The clean fix is to surface
-    `captured_at` on the server side; logged in `PyLorex/TODO.md`.
+What unblocked the run, in case the commit ever drifts away:
+- Recalibrated drive curl (`drive_yaw_curl_deg_per_mm` -0.03693 → -0.01243)
+  and distance scale (0.992 → 0.9972). The Friday-eve curl was inflated
+  by uncorrected residuals — the lap-2 drift was a calibration loop
+  error, not a policy issue.
+- Quantified tracker noise (`SCRIPT_MeasureTrackerNoise.py`, since
+  removed — output preserved in `Control_code/Diagnostics/tracker_noise_*`):
+  σ_yaw ≈ 0.6° per fresh frame, fresh-frame rate ≈ 0.8 Hz. Relaxed
+  `wait_for_stable_pose` defaults `yaw_tol_deg` 0.5 → 2.0 (~3σ) and
+  `timeout_s` 5 → 8. The 0.8 Hz cap is a DVR/RTSP bottleneck on
+  PyLorex's side (still tracked in `PyLorex/TODO.md`).
 
-**2. Robot rotation calibration was contaminated by the above bug.** Three
-of 30 repeats in the May-6 cal returned ~0° for ±20°/±30° commands because
-their post-motion read was a stale pre-motion frame. Re-running with the
-fixed `wait_for_stable_pose` gave clean numbers within ~1° of the original
-table, confirming the rotation primitive is reproducible. So rotation
-calibration was *not* the source of the −7°/step drift seen in
-`run01`.
+## Naming change — current folder layout
 
-**3. Drive curl is the real problem.** Created
-`SCRIPT_DiagnoseDriveCurl.py` (pure straight-drive + CW/CCW circles).
-Pure-drive yaw drift was −0.05°/mm, consistent across all three test
-phases. Confirmed wheel-mismatch / asymmetric drive primitive — the robot
-curls right ~7° per 125 mm forward step. Marker-vs-trajectory check
-confirmed this is real rotation during drive, not a marker mounting
-offset.
+The historical `default_Target02_h32_nosigma` naming was simplified to just
+`default_Target02` on 2026-05-11. Hidden size and the `_nosigma` flag
+weren't varying across runs, so the suffixes added noise. New convention:
 
-**4. Calibrate-and-correct architecture for both axes.** Rather than
-add tracker-based heading-hold (fragile when the tracker briefly loses
-the marker), unified the rotation table with two new scalar corrections in
-`SCRIPT_CalibrateRobot.py`:
+  `<CONDITION>_<TARGET_ARENA>[_blind]`  →  e.g. `default_Target02`,
+  `default_Target02_blind`
 
-  - `drive_yaw_curl_deg_per_mm` — yaw drift induced per mm forward.
-    `Client.step(distance=...)` adds an opposite-sign counter-rotation up
-    front so the net heading after rotate+drive matches the caller's
-    `angle`.
-  - `drive_distance_scale` — actual chord / commanded distance.
-    `Client.step` divides the caller's distance by this scale before
-    issuing the firmware command.
+Renamed in place (no history loss):
+- `PolicyTraining/default_Target02_h32_nosigma/` → `default_Target02/`
+- `PolicyRuns/default_Target02_h32_nosigma_run0{6,7}/` → `default_Target02_run0{6,7}/`
+- Updated downstream pointers: `SCRIPT_RunPolicy.POLICY`,
+  `SCRIPT_Ablations.RUN_DIR`, and the embedded `output_dir` field in
+  `PolicyTraining/default_Target02/config.json`.
+- The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/`
+  keep the old name on purpose — those are frozen records of the deploy
+  at the time. **Do not rename or modify these.**
 
-Both saved to `Library/RobotCalibration/<robot>_calibration.json` with
-full per-rep raw samples; both retrievable from a single calibration
-session (same drive sequence, two metrics extracted per rep).
+## Blind ablation — what's wired and what to do
 
-`SCRIPT_CalibrateRotation.py` was retired (subsumed by
-`SCRIPT_CalibrateRobot.py`).
+`SCRIPT_TrainPolicy.py` now has a top-level `BLIND` constant (right under
+`CONDITION`). Default `False`. Flip to `True` to train a control policy
+that sees only `prev_rot` (in_dim=1) — all sonar channels stripped.
 
-## Where things stand
+Plumbing in `Library/Policy.py`: `make_obs_layout`, `encode_obs`,
+`make_policy_dict`, and `Policy.__init__` all accept a `blind` flag. A
+saved blind policy loads and runs end-to-end through the same
+`Policy.load` deploy path as the sighted variant; `meas_dict` is allowed
+to be `None` so the sonar measurement call can be (and is) skipped in
+rollouts.
 
-**Run01** (uncalibrated): robot spiraled inward, gave up at step 32 of
-single lap. Per-step drift −7.0° ± 2.2°.
+**Hypothesis being tested:** with motor-noise injection
+(`motion_rot_gain_range_pct=0.15`, `motion_drive_gain_range_pct=0.05`,
+plus per-step Gaussians) a blind policy cannot use sonar feedback to
+correct sustained execution bias. Expected outcome: poor downstream
+performance vs. the sighted baseline. Intended as **publication evidence**
+that the sighted policy's success is sonar-driven rather than pure
+dead-reckoning. Save the comparison plots; they're a load-bearing figure.
 
-**Run03** (with calibration): completed one full figure-8 lap cleanly,
-made it to step 103 on the second lap before crashing into the upper
-interior obstacle. Per-step residual drift +2.2° ± 2.9° (over-correction
-flipped from −7° to +2°).
+**Concrete next steps:**
+1. `BLIND = True` at the top of `SCRIPT_TrainPolicy.py`, run training. New
+   artifact lands at `PolicyTraining/default_Target02_blind/`.
+2. Decide how to present the comparison. Two options worth a quick look:
+   - Deploy the blind policy on the robot (same way as run06) and capture
+     trajectory plots side-by-side with the sighted run. Most direct
+     evidence but requires robot time.
+   - Extend `SCRIPT_Ablations.py` to load both policies and produce a
+     sighted-vs-blind comparison panel. Sim only, but instant.
+   The user will steer; default to asking before doing the on-robot run.
+3. If you do deploy: update `SCRIPT_RunPolicy.POLICY` to
+   `default_Target02_blind`, bump `REPEAT`. Don't forget to flip it back
+   to `default_Target02` for sighted comparisons.
 
-**Run04** (after a re-cal): diverged earlier — the second-lap divergence
-sets in before the figure-8 fully closes. Westward drift around step 73
-puts the robot off-distribution; the policy didn't reach as far before
-the same kind of misstep.
+## Other changes this session (committed)
 
-The diagnosis on the run03/run04 divergence: `motion_drive_gain_range_pct`
-during training is 0.05 (±5%), but the calibration's chord measurements had
-~15% spread on individual reps (range 171–242 mm for a commanded 200 mm)
-because of residual settle-artifact contamination. So the calibrated
-distance scale and curl rate carry noise comparable to the policy's
-training tolerance. Lap 1 is fine; by lap 2 the cumulative errors put the
-robot into state-action regions the policy didn't visit during training.
+- `862c77d` — removed three obsolete scripts:
+  `SCRIPT_DiagnoseDriveCurl.py` (subsumed by Phase 2 of
+  `SCRIPT_CalibrateRobot.py`), `SCRIPT_TimeTrackerRequest.py` (one-off
+  latency probe; result captured in TrackerNav comments + PyLorex TODO),
+  `SCRIPT_SmokeTestTrackerNav.py` (covered by `SCRIPT_RunPolicy.py` as
+  the de facto end-to-end test).
+- `SCRIPT_DefinePath.py` now forces `matplotlib.use("TkAgg")` before
+  pyplot import. The picker depends on real GUI events (mouse/key/motion)
+  which PyCharm's inline backend never delivers. Other scripts keep the
+  default backend — the user is OK with PyCharm's inline image handler
+  for non-interactive plots.
 
-## What we did about it (last commit of the day)
+## User / workflow notes
 
-Hardened `SCRIPT_CalibrateRobot.py`:
-
-  - Aggregator switched from `np.mean` to `np.median` (both phases). One
-    contaminated rep can no longer pull a table value off; with N reps and
-    median, ⌊N/2⌋ outliers are silently absorbed.
-  - `DRIVE_REPEATS` bumped 8 → 16 so the median has more samples and the
-    SE on the curl and scale estimates tightens.
-  - Drive summary now prints median, IQR, and range, and flags individual
-    outliers (>3° Δyaw or >5% chord deviation from median) so they're
-    visible at calibration time.
-
-## What to do tomorrow
-
-1. **Reset the three calibration fields in `Library/Settings.py` to
-   identity:**
-   ```
-   rotation_desired:           [-40,-30,-20,-10,-5,0,5,10,20,30,40]
-   rotation_obtained:          [-40,-30,-20,-10,-5,0,5,10,20,30,40]
-   drive_yaw_curl_deg_per_mm:  0.0
-   drive_distance_scale:       1.0
-   ```
-   The calibration script's identity-check will block the run otherwise.
-
-2. **Run `SCRIPT_CalibrateRobot.py`.** Watch the printed Phase 2 summary
-   — IQR/range/outlier-flag output will indicate whether the residual
-   stale-frame contamination has been controlled. Paste the printed table
-   lines into `Settings.py`.
-
-3. **Re-run the policy** (`SCRIPT_RunPolicy.py` already retargeted at
-   `default_Target02_h32_nosigma`, `Target02`). Bump `REPEAT` to next
-   number. Compare second-lap divergence against run03/run04 — should be
-   smaller if the new calibration estimate is tighter.
-
-4. **If divergence is still present at lap 2:** add drive-curl and
-   distance-scale as **per-episode random variables in training**
-   (`SCRIPT_TrainPolicy.py`), parallel to the existing rot_gain /
-   drive_gain biases. The policy currently sees per-step rotation+drive
-   noise but doesn't learn to recover from cumulative curl drift across a
-   long episode. Sampling `drive_curl ~ U(±0.05) °/mm` and
-   `drive_scale ~ U(0.95, 1.05)` at episode reset and applying inside the
-   simulator's drive primitive would force the policy to be robust to
-   whatever residual remains after calibration. Multi-hour retrain.
+- **Editor:** PyCharm. Default matplotlib backend (inline / SciView pane)
+  is fine for most scripts; only force a windowed backend for scripts
+  that need real GUI events.
+- **Commit style for milestones:** when a change *works* and represents
+  a recovery point (calibration that fixed a bug, first clean deploy,
+  etc.), the commit message body should explicitly say "this worked"
+  and list what specifically unblocked it. The point is bisect-friendly
+  context — a future regression should land on the commit that flagged
+  itself as known-good.
+- **Bundling commits:** when the working tree mixes user-initiated and
+  agent-initiated changes, ask before bundling. The user generally
+  prefers separate commits per concern over one mixed commit.
 
 ## Open items
 
-- **PyLorex `captured_at`** — properly fixing the "client gets back-to-
-  back bit-identical snapshots" issue requires propagating
-  `CameraSnapshot.captured_at` through `ServerClient.get_tracker(...)`.
-  Tracked in `PyLorex/TODO.md`. Bit-equality filter in `TrackerNav.py` is
-  a stopgap that works for now.
-- **The +2°/step over-correction in run03** suggests the calibrated curl
-  rate was a touch too aggressive vs the actual run-time curl. Could be
-  surface/battery state difference between calibration and run time. The
-  median-aggregator change should make calibration more reproducible run-
-  to-run. After two clean calibrations on different days, we'll know if
-  this is intrinsic variability or just noise in the old calibration.
-- **Run04 trajectory** is at
-  `Control_code/PolicyRuns/default_Target02_h32_nosigma_run04/trajectory.png`.
-  Run03 at the corresponding `_run03/`. Worth re-comparing both against
-  the next deployment.
+- **PyLorex frame-rate bottleneck.** Server reports 7-8 Hz internally but
+  client sees ~0.8 Hz of distinct reads. Tracked in `PyLorex/TODO.md`.
+  Once fixed, tighten `wait_for_stable_pose` defaults back toward the
+  pre-2026-05-10 values (yaw_tol 0.5°, timeout 5s).
+- **Per-robot calibration.** `Settings.py` `ClientConfig` `default_factory`
+  carries Robot01's calibration table; `client2`/`client3` inherit it.
+  Only matters when actually deploying on those robots.
+- **Diagnostics directory.** `Control_code/Diagnostics/` is currently
+  untracked (matches the gitignore pattern of `PolicyRuns/`,
+  `PolicyTraining/`). If a future session decides outputs there are
+  worth versioning, add `Control_code/Diagnostics/` to `.gitignore`
+  explicitly to make the policy intentional rather than accidental.
 
-## Commits today
+## Commits since the last NOTE
 
-3PiRobot:
-1. Tracker settle: motion-required mode + repeat-frame filter
-2. Policy run: use canonical wait_for_stable_pose; retarget to Target02
-3. Add SCRIPT_DiagnoseDriveCurl: pure-drive + circle diagnostic
-4. Calibration: unify rotation + drive-curl + distance into SCRIPT_CalibrateRobot
-5. DefinePath: drop redundant linestyle; arenas list to Target02
+1. `eef35c7` — Calibration + tracker tolerances tuned, first clean run
+2. `862c77d` — Remove obsolete diagnostic / smoke-test scripts
+3. `be30d86` — TrainPolicy: simplify output naming + add blind ablation
 
-PyLorex:
-6. Add TODO: surface captured_at on get_tracker for client-side dedup
-
-Pre-existing user WIP not yet committed (left for review):
-- `Control_code/SCRIPT_TakeEnvSnapshot.py` (session name → "Target02")
-- `Control_code/SCRIPT_TrainPolicy.py` (TARGET_ARENA → "Target02", CONDITION → "default")
-- PyLorex: `Docs/calibration_process.md`, `LorexLib/Environment.py`,
-  `LorexLib/Lorex.py`, `LorexLib/Settings.py`, `script_capture_environment.py`
+(Plus the pending working-tree change: `SCRIPT_DefinePath.py` TkAgg
+force, and this NOTE.md rewrite — neither committed yet.)
