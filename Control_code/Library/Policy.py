@@ -48,15 +48,24 @@ _OBS_SIGMA = [
 _OBS_TAIL = ["prev_rot_deg_norm"]
 
 
-def make_obs_layout(use_sigma: bool) -> List[str]:
-    """Canonical obs-vector channel names. Train and deploy must agree."""
+def make_obs_layout(use_sigma: bool, blind: bool = False) -> List[str]:
+    """Canonical obs-vector channel names. Train and deploy must agree.
+
+    `blind=True` strips all sonar channels (distances and σs) — the policy
+    sees only `prev_rot`. Used as a control condition: with motor noise
+    injection the blind policy cannot use sonar feedback to compensate, so
+    poor performance is evidence that downstream success is sonar-driven
+    rather than dead-reckoning. `blind` overrides `use_sigma`.
+    """
+    if blind:
+        return list(_OBS_TAIL)
     return list(_OBS_BASE) + (list(_OBS_SIGMA) if use_sigma else []) + list(_OBS_TAIL)
 
 
 # ── Stateless obs encoder ────────────────────────────────────────────────────
 
 def encode_obs(
-    meas_dict: Dict[str, Union[float, np.floating]],
+    meas_dict: Dict[str, Union[float, np.floating]] | None,
     prev_rot: float,
     *,
     min_dist_mm: float,
@@ -64,6 +73,7 @@ def encode_obs(
     max_sigma_mm: float,
     max_rotate_deg: float,
     use_sigma: bool,
+    blind: bool = False,
 ) -> np.ndarray:
     """Pack a 6-key sonar measurement + previous rotation into the policy obs.
 
@@ -71,8 +81,12 @@ def encode_obs(
     max_dist_mm. σs are clamped to [0, max_sigma_mm] and divided by
     max_sigma_mm. prev_rot is divided by max_rotate_deg.
 
-    Returns float32 array, shape (4,) when use_sigma=False, (7,) otherwise.
+    Returns float32 array, shape (1,) when blind=True, (4,) when use_sigma=False,
+    (7,) otherwise. In blind mode `meas_dict` is unused and may be None.
     """
+    if blind:
+        return np.asarray([float(prev_rot) / max_rotate_deg], dtype=np.float32)
+
     def clamp_d(v: Union[float, np.floating]) -> float:
         return max(min_dist_mm, min(float(v), max_dist_mm))
 
@@ -108,6 +122,7 @@ def make_policy_dict(
     min_dist_mm: float,
     max_dist_mm: float,
     max_sigma_mm: float,
+    blind: bool = False,
 ) -> dict:
     """Deploy-relevant subset of the saved policy JSON. SCRIPT_TrainPolicy
     .save_policy() adds training metadata (val_loss, epoch, ...) on top."""
@@ -117,7 +132,8 @@ def make_policy_dict(
         "in_dim":         int(in_dim),
         "out_dim":        int(out_dim),
         "use_sigma":      bool(use_sigma),
-        "obs_layout":     make_obs_layout(bool(use_sigma)),
+        "blind":          bool(blind),
+        "obs_layout":     make_obs_layout(bool(use_sigma), bool(blind)),
         "max_rotate_deg": float(max_rotate_deg),
         "fixed_drive_mm": float(fixed_drive_mm),
         "min_dist_mm":    float(min_dist_mm),
@@ -145,6 +161,7 @@ class Policy:
         self.in_dim         = int(params["in_dim"])
         self.out_dim        = int(params["out_dim"])
         self.use_sigma      = bool(params["use_sigma"])
+        self.blind          = bool(params.get("blind", False))
         self.max_rotate_deg = float(params["max_rotate_deg"])
         self.fixed_drive_mm = float(params["fixed_drive_mm"])
         self.min_dist_mm    = float(params["min_dist_mm"])
@@ -152,17 +169,19 @@ class Policy:
         self.max_sigma_mm   = float(params["max_sigma_mm"])
         self.obs_layout     = list(params["obs_layout"])
 
-        expected_in = 7 if self.use_sigma else 4
+        expected_in = 1 if self.blind else (7 if self.use_sigma else 4)
         if self.in_dim != expected_in:
             raise ValueError(
-                f"in_dim={self.in_dim} inconsistent with use_sigma={self.use_sigma} "
+                f"in_dim={self.in_dim} inconsistent with "
+                f"use_sigma={self.use_sigma}, blind={self.blind} "
                 f"(expected {expected_in})"
             )
-        canonical_layout = make_obs_layout(self.use_sigma)
+        canonical_layout = make_obs_layout(self.use_sigma, self.blind)
         if self.obs_layout != canonical_layout:
             raise ValueError(
                 f"obs_layout {self.obs_layout!r} does not match canonical "
-                f"layout {canonical_layout!r} for use_sigma={self.use_sigma}"
+                f"layout {canonical_layout!r} for use_sigma={self.use_sigma}, "
+                f"blind={self.blind}"
             )
 
         # Unpack genome → numpy weights, in the same order as RNNNet.to_genome():
@@ -199,14 +218,14 @@ class Policy:
 
     def encode_obs(
         self,
-        meas_dict: Dict[str, Union[float, np.floating]],
+        meas_dict: Dict[str, Union[float, np.floating]] | None,
         prev_rot: float,
     ) -> np.ndarray:
         return encode_obs(
             meas_dict, prev_rot,
             min_dist_mm=self.min_dist_mm, max_dist_mm=self.max_dist_mm,
             max_sigma_mm=self.max_sigma_mm, max_rotate_deg=self.max_rotate_deg,
-            use_sigma=self.use_sigma,
+            use_sigma=self.use_sigma, blind=self.blind,
         )
 
     def step(

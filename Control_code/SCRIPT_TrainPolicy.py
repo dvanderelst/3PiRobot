@@ -55,6 +55,9 @@ _settings.data_folder = "TargetArenas"
 # ── Condition ────────────────────────────────────────────────────────────────
 TARGET_ARENA = "Target02"
 CONDITION    = "default"
+BLIND        = False        # blind ablation: drop sonar, only prev_rot fed to
+                            # the policy (in_dim=1). Output folder gets a
+                            # `_blind` suffix. See Config.blind for details.
 
 
 @dataclass
@@ -82,6 +85,18 @@ class Config:
     # d slot (since both are functions of d_true). Set False to test whether
     # the policy actually uses σ.
     use_sigma: bool = False
+
+    # Blind ablation: when True the policy sees ONLY prev_rot (in_dim=1) —
+    # all sonar channels are stripped. Used as a control: with motor noise
+    # injection a blind policy cannot use sonar feedback to compensate, so
+    # the expected outcome is poor downstream performance. That is the
+    # evidence we want to publish: success of the sighted policy is sonar-
+    # driven, not pure dead-reckoning. `blind` overrides `use_sigma`. Output
+    # folder gets a `_blind` suffix automatically so the artifact does not
+    # collide with the sighted run. Default comes from the top-level BLIND
+    # constant under the Condition section so it lives next to TARGET_ARENA
+    # / CONDITION rather than buried in the dataclass.
+    blind: bool = BLIND
 
     # Teacher (pure pursuit)
     teacher_lookahead_mm: float = 200.0
@@ -274,14 +289,15 @@ def make_starts(path: TargetPath, cfg: Config,
     return _make_path_aligned_starts(path, cfg, rng)
 
 
-def _obs_from_cfg(meas: Dict[str, float], prev_rot: float, cfg: Config) -> np.ndarray:
+def _obs_from_cfg(meas: Optional[Dict[str, float]], prev_rot: float, cfg: Config) -> np.ndarray:
     """Bind cfg's clamp + scale parameters to Library.Policy.encode_obs.
-    Used during dataset generation, before a policy artifact has been saved."""
+    Used during dataset generation, before a policy artifact has been saved.
+    `meas` is unused (and may be None) when cfg.blind is True."""
     return encode_obs(
         meas, prev_rot,
         min_dist_mm=cfg.min_dist_mm, max_dist_mm=cfg.max_dist_mm,
         max_sigma_mm=cfg.max_sigma_mm, max_rotate_deg=cfg.max_rotate_deg,
-        use_sigma=cfg.use_sigma,
+        use_sigma=cfg.use_sigma, blind=cfg.blind,
     )
 
 
@@ -294,6 +310,7 @@ def _policy_from_net(net: "RNNNet", cfg: Config) -> Policy:
         in_dim=int(net.in_dim),
         out_dim=int(net.OUT_DIM),
         use_sigma=cfg.use_sigma,
+        blind=cfg.blind,
         max_rotate_deg=net.max_rotate_deg,
         fixed_drive_mm=cfg.fixed_drive_mm,
         min_dist_mm=cfg.min_dist_mm,
@@ -433,7 +450,7 @@ def rollout_with_teacher(
     _verbose_step0 = True
 
     for _ in range(cfg.max_steps):
-        meas = simulator.get_sonar_measurement(x, y, yaw)
+        meas = None if cfg.blind else simulator.get_sonar_measurement(x, y, yaw)
         Xs.append(_obs_from_cfg(meas, prev_rot, cfg))
         rot_clean = teacher_rotation_deg(
             path, x, y, yaw,
@@ -599,7 +616,9 @@ class RNNNet(nn.Module):
     #    σ_left, σ_center, σ_right,    ← only when cfg.use_sigma
     #    prev_rot]
     # Distances normalised by max_dist_mm, σs by max_sigma_mm,
-    # prev_rot by max_rotate_deg. in_dim is 7 with σ, 4 without.
+    # prev_rot by max_rotate_deg. in_dim is 7 with σ, 4 without; in
+    # cfg.blind mode the sonar slots are stripped and in_dim is 1
+    # (just prev_rot — see Library/Policy.encode_obs).
     OUT_DIM = 1
 
     def __init__(self, hidden_size: int, max_rotate_deg: float, in_dim: int):
@@ -660,6 +679,7 @@ def save_policy(net: RNNNet, cfg: Config, val_loss: float, epoch: int, path: str
         in_dim=int(net.in_dim),
         out_dim=int(net.OUT_DIM),
         use_sigma=cfg.use_sigma,
+        blind=cfg.blind,
         max_rotate_deg=net.max_rotate_deg,
         fixed_drive_mm=cfg.fixed_drive_mm,
         min_dist_mm=cfg.min_dist_mm,
@@ -807,7 +827,7 @@ def rollout_student(
     prev_rot = 0.0
     _verbose_step0 = True
     for _ in range(cfg.max_steps):
-        meas    = simulator.get_sonar_measurement(x, y, yaw)
+        meas    = None if cfg.blind else simulator.get_sonar_measurement(x, y, yaw)
         obs     = policy.encode_obs(meas, prev_rot)
         rot, hidden = policy.step(obs, hidden)
 
@@ -875,11 +895,10 @@ def plot_trajectories(
 
 def main():
     cfg = Config()
-    in_dim = 7 if cfg.use_sigma else 4
-    suffix = "" if cfg.use_sigma else "_nosigma"
+    in_dim = 1 if cfg.blind else (7 if cfg.use_sigma else 4)
     cfg.output_dir = os.path.join(
         "PolicyTraining",
-        f"{CONDITION}_{cfg.target_arena}_h{cfg.hidden_size:02d}{suffix}",
+        f"{CONDITION}_{cfg.target_arena}{'_blind' if cfg.blind else ''}",
     )
     os.makedirs(cfg.output_dir, exist_ok=True)
     with open(os.path.join(cfg.output_dir, "config.json"), "w") as f:

@@ -49,7 +49,7 @@ from LorexLib.Environment import capture_environment_layout
 # ══════════════════════════════════════════════════════════════════════════════
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
-POLICY    = "default_Target02_h32_nosigma"   # sub-folder under PolicyTraining/
+POLICY    = "default_Target02"               # sub-folder under PolicyTraining/
 ARENA     = "Target02"                       # sub-folder under TargetArenas/
 REPEAT    = "07"
 

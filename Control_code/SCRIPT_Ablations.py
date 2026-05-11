@@ -56,7 +56,7 @@ from SCRIPT_TrainPolicy import (
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────
-RUN_DIR    = "PolicyTraining/default_Target02_h32_nosigma"
+RUN_DIR    = "PolicyTraining/default_Target02"
 N_ROLLOUTS = 12
 SEED       = 1234
 
