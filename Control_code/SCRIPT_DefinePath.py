@@ -28,6 +28,13 @@ import json
 import os
 from typing import List, Optional, Tuple
 
+# Force a windowed backend BEFORE pyplot is imported. The picker depends on
+# real GUI events (mouse clicks, key presses, motion); PyCharm's inline
+# backend renders the figure into the SciView pane and never delivers those
+# events, which would silently break the workflow. TkAgg ships with the
+# Python stdlib so it's the safest default.
+import matplotlib
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import FancyArrowPatch, Rectangle
@@ -40,7 +47,7 @@ from Library.EnvironmentSimulator import EnvironmentSimulator
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-ARENAS:             List[str] = ["Target02"]
+ARENAS:             List[str] = ["Target01", "Target02"]
 ARENAS_ROOT:        str       = "TargetArenas"
 GRID_RESOLUTION_MM: float     = 10.0
 COLORMAP:           str       = "viridis"
