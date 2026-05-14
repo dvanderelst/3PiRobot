@@ -1,0 +1,18 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.bbl
+*.blg
+*.out
+*.synctex.gz
+main.pdf
+
+# JabRef bibliography backups
+references.bib.bak
+references.bib.sav
+
+# drawio autosave/backup files
+*.bkp
+
+# Reference materials (large binaries / copyrighted, not paper source)
+resources/
