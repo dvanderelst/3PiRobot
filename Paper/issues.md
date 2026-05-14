@@ -1,14 +1,14 @@
 # Revision queue — Introduction + framework section
 
-*Status: pre-Methods. Framework setup only. Empirical contribution claim deferred to Par 14 and Results.*
+*Status: pre-Methods. Framework setup only. Empirical contribution claim deferred to Par 15 and Results.*
 
-*Last updated: 2026-05-14. Part I strategic decisions (D4 / E3 / D5) resolved and implemented in `main.tex`; see the resolution note in each section. The introduction now runs Pars 1-14 and the information-theoretic section Pars 15-20 (a new representation/reformatting paragraph at Par 3, plus the forward--inverse subsection at Pars 8-9, account for the growth). Par references throughout this file are kept in sync with `main.tex`.*
+*Last updated: 2026-05-14. Part I strategic decisions (D4 / E3 / D5) resolved and implemented in `main.tex`; see the resolution note in each section. The introduction now runs Pars 1-15 and the information-theoretic section Pars 16-21. "readout" has been cut from the intro region (Pars 1-9); the downstream uses are still pending (see A6). Par references throughout this file are kept in sync with `main.tex`.*
 
 ---
 
 ## Guiding principle
 
-**The framework is presented as established background, not as the paper's contribution.** The paper's contribution is the robotic instantiation of all three regimes wired together (Par 14). This means there is zero cost to adding precursor citations, and substantial cost to under-citing — under-citing risks reading as if we claim the framework as novel.
+**The framework is presented as established background, not as the paper's contribution.** The paper's contribution is the robotic instantiation of all three regimes wired together (Par 15). This means there is zero cost to adding precursor citations, and substantial cost to under-citing — under-citing risks reading as if we claim the framework as novel.
 
 Read every section of the introduction with this lens: *if a reader thought "they're claiming to have invented this," that's a problem to fix.*
 
@@ -77,7 +77,7 @@ Three options, in increasing weight:
 
 **Recommendation:** option 2. Strong enough to do the framing work; not so heavy that it changes the paper's voice.
 
-**Resolved (2026-05-14): dedicated subsection.** Implemented as a new `\subsection{The forward--inverse model pair}` between "Modalities preserve different features" and "Cross-modal learning lives in the overlap" (Pars 8-9). Heavier on *content* than option 2 but structure-preserving: the bat hook still opens Par 1 and the existing subsection flow is intact. Par 8 defines the forward-inverse pair and names the traditions (motor control, model-based RL, predictive coding, active inference, cybernetics) with grouped citations; Par 9 carries the D5 argument. Rationale (user's call): this text is also a proposal seed, so err on theoretical breadth now and trim for the paper later.
+**Resolved (2026-05-14): dedicated subsection.** Implemented as a new `\subsection{The forward--inverse model pair}` between "Modalities preserve different features" and "Cross-modal learning lives in the overlap" (Pars 9-10). Heavier on *content* than option 2 but structure-preserving: the bat hook still opens Par 1 and the existing subsection flow is intact. Par 9 defines the forward-inverse pair and names the traditions (motor control, model-based RL, predictive coding, active inference, cybernetics) with grouped citations; Par 10 carries the D5 argument. Rationale (user's call): this text is also a proposal seed, so err on theoretical breadth now and trim for the paper later.
 
 ### D5. Why the forward–inverse pair is non-trivially powerful
 
@@ -109,7 +109,7 @@ If we adopt any version of the unified framing, a natural reader question is: *w
 
 Citation needed if used: **Conant & Ashby (1970)** "Every good regulator of a system must be a model of that system." *International Journal of Systems Science.*
 
-**Resolved (2026-05-14): deployed full.** The counterfactual-vs-grounding argument is now Par 9. The Conant-Ashby good-regulator theorem is cited in Par 8 as the cybernetic root of the forward-inverse pair, and Friston 2010 in Par 8 for active inference; both theoretical anchors land, so the separate Par-9 parenthetical drafted above was dropped as redundant prose rather than omitted. `ConantAshby1970` and `Friston2010` added to `references.bib`.
+**Resolved (2026-05-14): deployed full.** The counterfactual-vs-grounding argument is now Par 10. The Conant-Ashby good-regulator theorem is cited in Par 9 as the cybernetic root of the forward-inverse pair, and Friston 2010 in Par 9 for active inference; both theoretical anchors land, so the separate Par-10 parenthetical drafted above was dropped as redundant prose rather than omitted. `ConantAshby1970` and `Friston2010` added to `references.bib`.
 
 ---
 
@@ -145,7 +145,7 @@ Reframing the contribution this way turns the paper from "a bat-inspired robot d
 
 **Bennett, Max (2023)** *A Brief History of Intelligence: Evolution, AI, and the Five Breakthroughs That Made Our Brains.* Mariner Books / HarperCollins. (Zotero: `2RPS3UXL`.)
 
-**Resolved (2026-05-14): medium, heavy deferred.** Par 13 cites Bennett 2023 as an accessible recent synthesis on off-line simulation; Par 14 adds the world-models sentence (learned world models as a central missing component of contemporary AI, citing Bennett). `Bennett2023` added to `references.bib`. Heavy Discussion engagement (the E3 "heavy" option) is parked for Discussion drafting.
+**Resolved (2026-05-14): medium, heavy deferred.** Par 14 cites Bennett 2023 as an accessible recent synthesis on off-line simulation; Par 15 adds the world-models sentence (learned world models as a central missing component of contemporary AI, citing Bennett). `Bennett2023` added to `references.bib`. Heavy Discussion engagement (the E3 "heavy" option) is parked for Discussion drafting.
 
 ---
 
@@ -153,7 +153,7 @@ Reframing the contribution this way turns the paper from "a bat-inspired robot d
 
 *Mechanical edits, mostly local to specific paragraphs. Execute after Part I decisions resolve.*
 
-*Par numbers below are kept in sync with `main.tex`: introduction Pars 1-14, information-theoretic section Pars 15-20.*
+*Par numbers below are kept in sync with `main.tex`: introduction Pars 1-15, information-theoretic section Pars 16-21.*
 
 ## A. Internal framework coherence
 
@@ -161,38 +161,44 @@ Reframing the contribution this way turns the paper from "a bat-inspired robot d
 
 | Term | First use | Problem |
 |------|-----------|---------|
-| *readout* | Par 4 | Core concept, defined only implicitly via example |
-| *inverse model* | Par 4 / Par 8 | Mostly resolved: Par 8 formally defines it (`\emph{inverse model}`). Par 4's earlier parenthetical "(or inverse model)" could still be tightened. |
-| *forward model* | Par 8 | Resolved: Par 8 formally defines it (`\emph{forward model}`) before the regime labels use it. |
+| *feature* | Par 4 | Resolved: Par 4 now opens with a formal definition. |
+| *representation* | Par 3 | Defined in Par 3 (the user de-emphasised it; flag if it should be `\emph`'d at definition). |
+| *inverse model* | Par 9 | Resolved: Par 9 formally defines it (`\emph{inverse model}`). |
+| *forward model* | Par 9 | Resolved: Par 9 formally defines it (`\emph{forward model}`). |
+| *readout* | (cut) | Removed from the intro (Pars 1-9) per the 2026-05-14 terminology decision; still appears downstream, see A6. |
 
-**Fix options:** largely overtaken by events. The forward--inverse subsection (Pars 8-9) now serves as the terminology anchor that option (b) envisioned, and it cross-references motor-control terminology as D anticipated. What remains is the smaller A1 item: *readout* (Par 4) is still defined only by example, and Par 4's parenthetical "(or inverse model)" could be tightened now that Par 8 owns the formal definition.
+**Fix options:** largely resolved. The crux Par 4 defines *feature*; the forward--inverse subsection (Pars 9-10) defines *inverse model* and *forward model*; *readout* has been cut. Nothing outstanding here beyond A6.
 
 ### A2. Logic-chain gaps
 
 | Transition | Missing link |
 |------------|--------------|
 | Par 1 → 2 | *Why* the channel/filter lens is the right abstraction for sensory chains |
-| Par 2 → 3 → 4 | Addressed: the new Par 3 (representation / reformatting) is the *therefore* from "channels discard info" to "estimates are readouts" in Par 4. |
-| Par 7 → 8 | Partly addressed: the forward--inverse subsection (Pars 8-9) now sits between the overlap discussion and the three regimes. Remaining gap is the *because* link into Par 10's "three regimes follow"; Par 9's close could carry a forward-pointing sentence. |
+| Par 2 → 3 → 4 | Addressed: Par 3 (representation / reformatting) is the *therefore* from "channels discard information" to "perception is the construction of a representation" in the crux Par 4. |
+| Par 8 → 9 | Partly addressed: the forward--inverse subsection (Pars 9-10) now sits between the overlap discussion and the three regimes. Remaining gap is the *because* link into Par 11's "three regimes follow"; Par 10's close could carry a forward-pointing sentence. |
 
 ### A3. Unjustified assumptions needing a citation, caveat, or example
 
 - **Par 2:** "Top-down signals don't add information" — standard predictive-coding view, contested by some. Needs citation or hedged language.
-- **Par 4:** "Channel preservation ≠ readout extraction" — key framework pillar. Currently bare. Needs example or short argument.
-- **Par 6:** *Partially addressed.* "Overlap is generally non-empty" now anchored by concrete citations (dolphins, rodents). The *"generally"* claim itself may still want qualification (vision/sonar overlap varies with conditions; see the proposal-hook comment in the source).
+- **Par 5:** "A chain can carry information about a feature without producing a representation that makes it explicit" — key framework pillar, still bare. Needs an example or short argument (the bat delay-tuned-neuron example is a candidate).
+- **Par 7:** *Partially addressed.* "Overlap is generally non-empty" now anchored by concrete citations (dolphins, rodents). The *"generally"* claim itself may still want qualification (vision/sonar overlap varies with conditions; see the proposal-hook comment in the source).
 
 ### A4. Information-theoretic foundations
 
-Par 2 announces the data-processing inequality and *defers* its consequences to the Information-theoretic Statement section. Decide: surface a one-sentence implication immediately in Par 2, or accept the punt as-is.
+The DPI-pointer sentence (which named the data-processing inequality and pointed to Section~\ref{sec:info}) is currently parked as a comment after Par 2, so `sec:info` is referenced nowhere active and the formal section dangles. Decide: restore a pointer to Section 2, surface a one-sentence implication in Par 2-3, or accept the punt.
 
 ### A5. Terminology alignment
 
-- Par 10 names regime (3) as **"cross-modal vicarious learning"**
-- Par 13 calls it **"mental rehearsal"**
+- Par 11 names regime (3) as **"cross-modal vicarious learning"**
+- Par 14 calls it **"mental rehearsal"**
 - Figure caption calls it **"in mental rehearsal"**
-- Note: Par 9 introduces **"off-line policy training"** as a generic-ML description. That is fine as the general term; the regime-specific term still needs standardising per below.
+- Note: Par 10 introduces **"off-line policy training"** as a generic-ML description. That is fine as the general term; the regime-specific term still needs standardising per below.
 
 **Recommended resolution:** standardise on **"vicarious rehearsal"** / **"vicarious learning"**, since the paper title is "Vicarious sonar learning." Treat "mental rehearsal" as a one-time gloss but not a primary term.
+
+### A6. Downstream "readout" cleanup
+
+*Added 2026-05-14.* "readout" was cut from the intro (Pars 1-9) but still appears downstream: the green/yellow/blue pathway paragraphs (Pars 12-14), the figure caption, the contribution paragraph (Par 15), and the formal section (regime list Par 18, green paragraph Par 19). These need a consistency pass, swapping "readout" for "estimate" / "inverse model" / "representation" as appropriate. A few spots (the green pathway, the figure caption) involve judgement calls and should be drafted, not blind-swapped.
 
 ---
 
@@ -200,7 +206,7 @@ Par 2 announces the data-processing inequality and *defers* its consequences to 
 
 *Note: Jordan & Rumelhart 1992 sits under section D (unified framework, motor-control specialisation), not under any individual pathway — their distal-teacher technique is not what our green pathway uses.*
 
-### B1. Par 11 — Green pathway (cross-modal supervision of inverse models)
+### B1. Par 12 — Green pathway (cross-modal supervision of inverse models)
 
 | Reference | Why it matters |
 |-----------|----------------|
@@ -208,7 +214,7 @@ Par 2 announces the data-processing inequality and *defers* its consequences to 
 | Hinton, Vinyals & Dean (2015) knowledge distillation | Same-modality precursor; cite if useful as the broader frame. |
 | Subsequent cross-modal SSL: Aytar et al., Owens & Efros, Ngiam et al., audio-visual learning | Optional broader cross-modal SSL literature |
 
-### B2. Par 12 — Yellow pathway (forward model learning)
+### B2. Par 13 — Yellow pathway (forward model learning)
 
 | Reference | Why it matters |
 |-----------|----------------|
@@ -216,9 +222,9 @@ Par 2 announces the data-processing inequality and *defers* its consequences to 
 | Wolpert / Kawato cerebellar internal models | Sensorimotor forward-model learning; covered under section D if we adopt the unification. |
 | ML model-based: forward-model fitting in Dreamer / PlaNet | Engineering instances of forward-model fitting from observation data. |
 
-*Update (2026-05-14): Rao & Ballard 1999 is now cited in the forward--inverse subsection (Par 8), and the model-based-RL lineage with it. B2 reduces to an optional reinforcing cite inside the yellow-pathway paragraph (Par 12) itself.*
+*Update (2026-05-14): Rao & Ballard 1999 is now cited in the forward--inverse subsection (Par 9), and the model-based-RL lineage with it. B2 reduces to an optional reinforcing cite inside the yellow-pathway paragraph (Par 13) itself.*
 
-### B3. Par 13 — Blue pathway (vicarious rehearsal)
+### B3. Par 14 — Blue pathway (vicarious rehearsal)
 
 | Reference | Why it matters |
 |-----------|----------------|
@@ -228,9 +234,9 @@ Par 2 announces the data-processing inequality and *defers* its consequences to 
 | Hafner et al. — PlaNet, Dreamer (v1/v2/v3) | Optional: ongoing ML lineage. |
 | Wilson 2002, Grush 2004 | Already cited. ✓ |
 
-*Update (2026-05-14): Sutton 1990 and Ha & Schmidhuber 2018 are now cited in the forward--inverse subsection (Par 8); Bennett 2023 is cited in Pars 13-14. B3 reduces to an optional reinforcing cite inside the blue-pathway paragraph (Par 13) itself.*
+*Update (2026-05-14): Sutton 1990 and Ha & Schmidhuber 2018 are now cited in the forward--inverse subsection (Par 9); Bennett 2023 is cited in Pars 14-15. B3 reduces to an optional reinforcing cite inside the blue-pathway paragraph (Par 14) itself.*
 
-### B4. Par 6 — Cross-modal feature overlap
+### B4. Par 7 — Cross-modal feature overlap
 
 | Reference | Why it matters |
 |-----------|----------------|
@@ -241,7 +247,7 @@ Par 2 announces the data-processing inequality and *defers* its consequences to 
 
 | Reference | Where it fits |
 |-----------|---------------|
-| **O'Regan & Noë (2001)** "A sensorimotor account of vision and visual consciousness" *BBS* | Philosophical adjacent to forward models. Could fit Par 4 or Par 13. |
+| **O'Regan & Noë (2001)** "A sensorimotor account of vision and visual consciousness" *BBS* | Philosophical adjacent to forward models. Could fit Par 5 or Par 14. |
 | **Friston** active inference / free energy | Broader umbrella framework. Worth one citation somewhere (section D candidate). |
 | Helmholtz, "perception as inference" | Foundational. Could be a single citation in Par 4. |
 
@@ -253,7 +259,7 @@ Par 2 announces the data-processing inequality and *defers* its consequences to 
 
 ### C1. Contribution framing audit
 
-Read Pars 1-14 with the question "could this sentence be read as a novelty claim for the framework itself?" Adjust any such language. Par 14 is currently honest ("empirical demonstration of all three regimes wired together"). Earlier paragraphs may need light adjustment, especially the new Pars 3 and 8-9, which must read as established background.
+Read Pars 1-15 with the question "could this sentence be read as a novelty claim for the framework itself?" Adjust any such language. Par 15 is currently honest ("empirical demonstration of all three regimes wired together"). Earlier paragraphs may need light adjustment, especially the new Pars 3, 5, and 9-10, which must read as established background.
 
 If we adopt section D's unified-framework framing and/or section E's world-models framing, the contribution audit should align with those updated claims.
 
@@ -266,7 +272,7 @@ Adding many references should be done without bloating prose. Use compact citati
 # Priority ordering
 
 1. ~~**Strategic decisions** (D4 + E3 + D5 textual-handling pick)~~ — **DONE (2026-05-14).** Resolved: dedicated subsection (D4), medium with heavy deferred (E3), deployed full (D5). See the resolution note in each Part I section.
-2. **A5** — terminology alignment (5-minute fix, prevents reader confusion).
+2. **A5 / A6** — terminology alignment, and the downstream "readout" cleanup (the paper is term-inconsistent until A6 is done).
 3. **B1–B3** — missing precursor citations, informed by the strategic decisions above.
 4. **A2** — logic-chain transitions (improves flow).
 5. **A1** — early definitions (could combine with D2 terminology box if D is adopted).
