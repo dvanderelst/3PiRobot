@@ -57,21 +57,24 @@
 A sensory modality $\modality$ (e.g., vision, hearing, olfaction, echolocation) connects the agent to its environment through a chain of stages, each operating on the output of the one before it. The chain begins at a physical front-end \citep[e.g., visual pigments,][]{Cronin2022} and anatomical structures \citep[such as the pinna,][]{Obrist1993}, continues through neural circuits at every level \citep[from peripheral receptive fields to early feature detectors,][]{Kuffler1953,Franz2000}, including brainstem coincidence detection \citep{Grothe2003}, midbrain space maps \citep{Knudsen1995}, and cortical specialisations \citep[e.g., delay-tuned neurons encoding echo time-of-arrival in bats,][]{Suga1990}, and feeds back out through behavioural processes \citep[such as eye movements,][]{Land2009} that themselves recode what is available to the next stage.
 
 % Par 2
-From an information-theoretic point of view \citep{Shannon1948,Pierce1980}, each stage along the chain is a channel, i.e., a process that takes an input signal and produces an output signal. A channel can preserve or discard information, but it can never create information about its input. Each stage therefore acts as an informational filter. The functional result is that all sensory systems are limited in what they perceive. Trichromatic vision is a familiar example: the photoreceptor mosaic collapses an entire light spectrum into three cone responses, so that distinct spectra producing the same triple of responses (metamers) are indistinguishable to any downstream processing. This is not a peculiarity of any particular sensory system but a general constraint on information processing, and it applies at every stage along every sensory chain. The stages of the chain are tuned to the animal's ecological niche, and in some cases the tuning becomes extreme, producing so-called matched filters \citep{Warrant2016,Wehner1987}. We have described the chain in feed-forward terms for simplicity, but top-down signals such as attention, expectation, and recurrent feedback fall under the same constraint: they re-weight what is read out from current input but do not add new information about the world. The formal statement (the data-processing inequality) and its consequences for the framework outlined here are given in Section~\ref{sec:info}; we use it informally in what follows.
+From an information-theoretic point of view \citep{Shannon1948,Pierce1980}, each stage along the chain is a channel, i.e., a process that takes an input signal and produces an output signal. A channel can preserve or discard information, but it can never create information about its input. Each stage therefore acts as an informational filter. The functional result is that all sensory systems are limited in what they perceive. Trichromatic vision is a familiar example: the photoreceptor mosaic collapses an entire light spectrum into three cone responses, so that distinct spectra producing the same triple of responses (metamers) are indistinguishable to any downstream processing. This is not a peculiarity of any particular sensory system but a general constraint on information processing, and it applies at every stage along every sensory chain. The stages of the chain are tuned to the animal's ecological niche, and in some cases the tuning becomes extreme, producing so-called matched filters \citep{Warrant2016,Wehner1987}. We have described the chain in feed-forward terms for simplicity, but top-down signals such as attention, expectation, and recurrent feedback fall under the same constraint: they re-weight what is read out from current input but do not add new information about the world. Information, in this sense, is indifferent to format: it counts only how much one signal constrains another, not how that signal is written. The formal statement (the data-processing inequality) and its consequences for the framework outlined here are given in Section~\ref{sec:info}; we use it informally in what follows.
 
 % Par 3
+Although processing can only discard information, a sensory chain is built from many recoding stages. The reason is that discarding is not all a stage does: it also re-formats what it keeps. The same information can be held in many formats, and the format is not idle. Two signals can be \emph{informationally equivalent}, each recoverable from the other, yet not \emph{computationally equivalent}: one may make some piece of what it carries explicit and cheap to read, while the other leaves it implicit, recoverable only through costly further processing \citep{Marr1982,LarkinSimon1987}. A \emph{representation} is information held in a particular format. Unlike information itself, a representation is not format-agnostic: it makes some of what it carries explicit at the expense of the rest. The purpose of the chain is this reformatting: each stage moves the information it preserves toward formats in which the features the agent's behaviour depends on become cheap to extract, at the cost of the information it discards on the way.
+
+% Par 4
 The agent never has direct access to the world's features ($\feats$); what perception delivers is an estimate of them ($\estfeats$). That estimate is a \emph{readout}, also called an inverse model: one particular function of what the channel carries forward, not a reconstruction of $\feats$ itself. Different readouts can be drawn from the same data depending on what an action requires. Motion detection is a coarse readout taken close to the periphery. Face recognition is a deeper readout taken from many recoded stages. Behaviour-based robotic architectures \citep{Brooks1991} tap the chain early; world-model architectures \citep{Bekey2005} tap it late; both are readouts, and they differ in where on the chain they tap, not in kind. Channel preservation and readout extraction are separable questions: a channel can preserve information about a feature without the agent yet having a readout that extracts it. The data is there; the answer is not [@claude: this is an imprecise statement].
 
 \subsection{Modalities preserve different features}
 
-% Par 4
+% Par 5
 Sensory modalities are not interchangeable. Their chains preserve different features of the world \citep[e.g.,][]{Boonman2013}. Bat echolocation preserves the distance to the nearest reflecting surface faithfully \citep{Kothari2018}, captures the spatial layout of complex scenes only lossily \citep{Vanderelst2016}, and does not carry colour at all. Vision, conversely, makes colour and the environment's two-dimensional layout immediately available but encodes distance only indirectly (i.e., it can only be partly recovered through computational processes based on disparity, motion parallax, and occlusion). Some features lie in the overlap (e.g., coarse layout, near-wall geometry) and are accessible to both modalities; others are preserved by neither.
 
-% Par 5
+% Par 6
 The features that modality $\modality$'s chain preserves, fully or partially, form the set $F_\modality$. The features both modalities carry ($F_\MA \cap F_\MB$) are where the modalities can speak to each other. This overlap is generally non-empty. Bottlenose dolphins, for example, can recognise complex objects across echolocation and vision \citep{Herman1998,Harley2003}; for a review, see \citet{Bruck2022}. In \citet{Herman1998} the dolphin matched novel objects across modalities at first trial, indicating a representation built from features accessible to both modalities rather than from learned object-specific associations. Comparable cross-modal access to spatial and shape features of nearby objects has been demonstrated in rodents using whiskers and vision \citep{Winters2010,Nikbakht2018,Guyoton2025}. Within the overlap, an agent can in principle maintain a modality-invariant readout: a single internal estimate $\estfeats$ that does not depend on which chain supplied the data \citep{Guyoton2025}.
 Each modality also brings features the other does not have. For example, vision can access features of space physically beyond the reach of whiskers. 
 
-% Par 6
+% Par 7
 This combination of asymmetric specialisation and partial overlap is what makes multi-modal sensing more than redundant duplication of single-modal sensing. Features unique to one modality supply information the others lack; features in the overlap are accessible through more than one channel, and that opens the door to cross-modal transfer.
 
 % PROPOSAL HOOK: The extent of overlap between modalities is itself an empirically
@@ -83,28 +86,28 @@ This combination of asymmetric specialisation and partial overlap is what makes 
 
 \subsection{The forward--inverse model pair}
 
-% Par 7
+% Par 8
 The readout introduced above is one half of a pair. A readout, or \emph{inverse model}, maps sensory data to an estimate of the state that produced it ($\moddata \to \estfeats$). Its converse, a \emph{forward model}, maps a hypothesised state to the sensory data that state would produce ($\estfeats \to \moddata$). The two run in opposite directions along the same channel: the inverse interprets data the world has already delivered, the forward predicts data the world has not. This pairing is not specific to cross-modal sensing. The same structure recurs, under different names, across the study of model-based agents: the inverse and forward models of a limb in sensorimotor control \citep{JordanRumelhart1992,WolpertKawato1998}, the world model or simulator used for planning in model-based reinforcement learning \citep{Sutton1990,HaSchmidhuber2018}, and the generative model whose inversion yields perception in predictive coding and active inference \citep{RaoBallard1999,Friston2010}. The cybernetic root is older still: any system that holds a goal against disturbance must contain a model of what it regulates, the formal content of the good-regulator theorem \citep{ConantAshby1970}. What changes between these traditions is only what is treated as the state: a motor command and the body's configuration, the latent dynamics of an environment, or, in the framework used here, a feature of the world ($\feats$).
 
-% Par 8
+% Par 9
 The pairing is more than two directions of a single mapping; it is a coupled structure with a division of labour. The inverse grounds the agent in present sensory data: it answers what the world is, given what is currently sensed. The forward frees the agent from the present: given any hypothesised state, it predicts the data that state would produce, whether or not the agent has ever sensed it. Grounding and prediction are complementary, and together they are what makes off-line policy training possible. A behaviour can be rehearsed against states the agent has never encountered, using the forward model in place of the world, and then deployed on the inverse model, which grounds the same behaviour in the states the agent does encounter. Neither half supports this alone: the inverse without the forward can only react to what is sensed, while the forward without the inverse can only imagine, with no anchor in the present.
 
 \subsection{Cross-modal learning lives in the overlap}
 
-% Par 9
+% Par 10
 The partial overlap, together with the gap between having information and being able to read it out, sets up three learning regimes that this paper instantiates (Figure~\ref{fig:theory}). In particular, it facilitates learning of (1) inverse models and (2) forward models. In turn, these afford (3) cross-modal vicarious learning. We detail each below.
 
 % Internally: green = Q2a (cross-modal inverse training); yellow = Q2b (forward model
 % learning); blue = Q2c (vicarious rehearsal). Presented as claims, not as open questions,
 % since the paper instantiates each one.
 
-% Par 10
+% Par 11
 First, suppose both modalities $\MA$ and $\MB$ carry the same feature in their channels, but only $\MB$ has a readout $\estfeats_\MB$ for it. Then the readout from modality $\MB$ $\estfeats_\MB$ can supply training labels for $\MA$'s inverse model, a function from $\MA$'s sensory data to that same feature estimate. In barn owls, for example, the auditory map of space is calibrated during development by vision. Prisms that displace the visual map induce a matching displacement of the auditory map \citep{Knudsen1995}. In our framework's terms, hearing ($\MA$) and vision ($\MB$) both carry a spatial feature ($\feats$). Vision's readout ($\estfeats_\MB$) supplies training labels for hearing's inverse model; this does not add information to the auditory channel but specifies which function of its data the auditory readout ($\estfeats_\MA$) should compute. The supervisory link is needed only during training; at deployment, $\MA$ runs alone. This possibility is illustrated by the green pathway in Figure~\ref{fig:theory}.
 
-% Par 11
+% Par 12
 Second, the same overlap supports learning a forward model: a mapping from feature estimates back to predicted sensory data. Given paired observations of feature estimates and sensory data ($\estfeats, \moddata$), the forward model can be fit directly. Continuing the barn owl example, the same paired exposures that calibrate the auditory readout in principle also support a forward map from estimated spatial position back to expected interaural cues, although this direction has not been directly tested in owls. In humans, the symmetric case has been directly observed: silent lip movements activate auditory cortex \citep{Calvert1997}, evidence of a forward map from visual speech features to expected auditory data, learned from paired audio-visual experience. The source of the feature estimates ($\estfeats$) during training matters: they can come from another modality, from an external map, or from the agent's own consensus estimate. What is learned is the channel's statistics: what modality $\MA$ would experience given any hypothesised state of the world. The yellow pathway in Figure~\ref{fig:theory} shows this regime.
 
-% Par 12
+% Par 13
 Third, once a forward model of modality $\MA$ exists, it can stand in for $\MA$'s physical channel during training of any downstream behaviour. The agent can mentally rehearse what modality $\MA$ would tell it, without ever invoking the real channel. The proposal that off-line cognition runs on sensorimotor machinery decoupled from the world is well-developed in the embodied-cognition literature \citep{Wilson2002,Grush2004}; for an accessible recent synthesis spanning evolutionary biology, neuroscience, and artificial intelligence, see \citet{Bennett2023}. What the present framework adds is that the simulator is a forward model learned from paired data. At deployment, the real channel is restored in the loop; the rehearsal was used only to fit the policy. The blue pathway in Figure~\ref{fig:theory} illustrates this: a desired action paired with a hypothesised state drives a synthetic stream of sensory data ($\moddata$), which trains the readout-and-action chain that will later run on real data.
 
 \begin{figure}
@@ -114,16 +117,16 @@ Third, once a forward model of modality $\MA$ exists, it can stand in for $\MA$'
 	\label{fig:theory}
 \end{figure}
 
-% Par 13
+% Par 14
 The rest of this paper is an empirical demonstration of all three regimes wired together, on a physical robot equipped with vision (overhead camera) and sonar. The robot learns a sonar readout from vision-supervised data (green), learns the forward direction from the same paired data (yellow), and uses the forward model to train a path-following policy entirely in mental rehearsal (blue). At deployment, only sonar runs in the loop. Learned world models of this kind have been identified as a central missing component of contemporary artificial intelligence \citep{Bennett2023}; the demonstration that follows is a concrete instance of cross-modal world-model learning in a low-information sensory channel.
 
 \section{Information-theoretic statement}
 \label{sec:info}
 
-% Par 14
+% Par 15
 This section restates the framework above in formal terms. The narrative argument stands without it; readers untroubled by the filter/processing collapse can skip ahead.
 
-% Par 15
+% Par 16
 Treat $\feats$, $\moddata$, and $\estfeats$ as random variables. The sensory chain of modality $\modality$ forms a Markov chain
 \[
 \feats \;\to\; \moddata \;\to\; \estfeats,
@@ -134,7 +137,7 @@ I(\feats;\estfeats) \;\le\; I(\feats;\moddata),
 \]
 where $I(\cdot\,;\cdot)$ is mutual information. The chain's information about the world is set at the front-end and can only stay the same or decrease at any downstream stage. This is the formal content of ``processing cannot create information''.
 
-% Par 16
+% Par 17
 Per feature $f$, three regimes follow:
 \begin{itemize}
 \item \emph{Preserved.} $I(f;\moddata) \approx H(f)$. The channel carries (almost) all of $f$; a readout is in principle straightforward.
@@ -143,13 +146,13 @@ Per feature $f$, three regimes follow:
 \end{itemize}
 We write $F_\modality$ for the set of features that fall in the preserved or lossy regime under modality $\modality$'s chain.
 
-% Par 17
+% Par 18
 \paragraph{Cross-modal readout supervision (green).} If a feature $f$ lies in $F_\MA \cap F_\MB$ and modality $\MB$ has a readout $\estfeats_\MB$ of $f$, then a learnable readout $\inv_\MA : \moddata[\MA] \to \estfeats_\MA$ can be fit on paired training data using $\estfeats_\MB$ as the target. The data-processing inequality is unaffected by this supervision: $I(f;\moddata[\MA])$ is fixed by physics. What changes is whether the agent has parameterised a function of $\moddata[\MA]$ that approaches that bound.
 
-% Par 18
+% Par 19
 \paragraph{Forward model (yellow).} A forward model $\fwd_\MA : \estfeats \to \moddata[\MA]$ is a learned approximation of the conditional distribution $P(\moddata[\MA] \mid \estfeats)$. Its fidelity is bounded by how well $\estfeats$ Markov-screens $\feats$ from $\moddata[\MA]$: if $\estfeats$ is a sufficient statistic of $\feats$ for $\moddata[\MA]$, then in principle the forward model can be exact in distribution. In practice $\estfeats$ is a lossy summary, and the forward model averages over the residual world variability.
 
-% Par 19
+% Par 20
 \paragraph{Vicarious rehearsal (blue).} Given $\fwd_\MA$ and any source of $\estfeats$ (for example, a teacher policy operating on a hypothesised state), one can sample synthetic $\moddata[\MA]$ from $\fwd_\MA(\estfeats)$ and train downstream computations on those samples in place of real sensory data. The data-processing inequality still binds these samples: they cannot carry more information about $\feats$ than real $\moddata[\MA]$ would. The empirical question is whether the gap between the learned conditional and the true channel is small enough that the downstream computation transfers back to the real channel at deployment.
 
 \bibliography{references}
