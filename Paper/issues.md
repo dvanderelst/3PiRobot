@@ -175,7 +175,7 @@ Reframing the contribution this way turns the paper from "a bat-inspired robot d
 |------------|--------------|
 | Par 1 → 2 | *Why* the channel/filter lens is the right abstraction for sensory chains |
 | Par 2 → 3 → 4 | Addressed: Par 3 (representation / reformatting) is the *therefore* from "channels discard information" to "perception is the construction of a representation" in the crux Par 4. |
-| Par 8 → 9 | Partly addressed: the forward--inverse subsection (Pars 9-11) now sits between the overlap discussion and the three regimes. Remaining gap is the *because* link into Par 12's "three regimes follow"; Par 11's close could carry a forward-pointing sentence. |
+| Par 8 → 9 | Addressed: the forward--inverse subsection (Pars 9-11) bridges the overlap discussion and the three regimes, and Par 11 now closes with a forward-pointing sentence into Par 12's three regimes. |
 
 ### A3. Unjustified assumptions needing a citation, caveat, or example
 
@@ -192,7 +192,6 @@ The DPI-pointer sentence (which named the data-processing inequality and pointed
 - Par 12 names regime (3) as **"cross-modal vicarious learning"**
 - Par 15 calls it **"mental rehearsal"**
 - Figure caption calls it **"in mental rehearsal"**
-- Note: Par 11 introduces **"off-line policy training"** as a generic-ML description. That is fine as the general term; the regime-specific term still needs standardising per below.
 
 **Recommended resolution:** standardise on **"vicarious rehearsal"** / **"vicarious learning"**, since the paper title is "Vicarious sonar learning." Treat "mental rehearsal" as a one-time gloss but not a primary term.
 
