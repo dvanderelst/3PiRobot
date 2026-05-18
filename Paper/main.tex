@@ -81,7 +81,20 @@ The present paper instantiates this idea on a physical robot. The robot carries 
 \section{Discussion}
 
 % Par 11
-Before turning to the literature, we make the framework's requirements explicit. Cross-modal vicarious learning, as we use the term, requires three conditions to be jointly satisfied. First, the task-relevant feature must be encoded in the sensory streams of both modalities at sufficient fidelity for it to be recoverable in principle. This is a property of the world and the senses; a feature that is physically absent from a modality's signal, or buried below the noise floor at the precision the task demands, cannot be learned cross-modally regardless of supervision. Second, an inverse model that maps raw sensor data to the feature must be in place on the receiving side, acquired either through prior natural experience or, in an experimental setting, through cross-modal supervision during the experiment. This is a property of the animal's perceptual processing. The first two conditions together are necessary for cross-modal transfer of a feature representation. Third, applicable specifically to vicarious learning of task behaviour, the animal must engage an internal scene representation to generate imagined sensor input for the deployed modality at arbitrary states, so that behaviour learned through the supervisor modality can be rehearsed against simulated input from the deployed modality. The first two conditions admit direct empirical test; the third is the most speculative for biological systems and has not been directly demonstrated in echolocating bats.
+Cross-modal vicarious learning of a given task, as we use the term, requires the following.
+%
+\begin{itemize}
+\item[1a] Task-relevant features must be encoded in the sensory data of two modalities $A$ and $B$, one of which, say A, extracts and explicitly represent them.
+\item [1b] The agent must have learned an inverse model for these features allowing their extraction from the data from modality $B$ using the feature labels provided by modality $A$.
+\end{itemize}
+%
+Together, 1a and 1b allow cross-modal perception, in the sense that a feature perceived using modality $A$ also becomes available through modality $B$. For cross-modal vicarious learning, two additional conditions need to be satisfied.
+%
+\begin{itemize}
+\item [2] The agent needs a mental representation of the required task features. We do not require this representation to be modality-specific; it can be amodal.
+\item [3] The agent needs to engage in mental rehearsal of the task in modality $B$, against the represented features.
+\end{itemize} 
+
 
 % Par 12
 Despite the potental adaptive value of cross-modal vicarious learning for animals whose sensory modalities differ sharply in what they encode, to the best of our knowledge no published experiment has demonstrated it in bats. The three studies most directly relevant to the question, \citet{Holland2005}, \citet{DanilovichYovel2019}, and \citet{Finger2025}, all report little or no transfer from vision to echolocation in \emph{Rousettus aegyptiacus}. None, however, provides a competent test of what the framework actually requires.
