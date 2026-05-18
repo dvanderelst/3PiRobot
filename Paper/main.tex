@@ -6,7 +6,7 @@
 \usepackage{lmodern}
 \usepackage{microtype}
 \usepackage[margin=1in]{geometry}
-
+\usepackage{biocon}
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{graphicx}
@@ -38,6 +38,13 @@
 \newcommand{\Mtwo}{M_2}
 \newcommand{\MA}{A}
 \newcommand{\MB}{B}
+
+\newanimal{ra}{genus=Rousettus,epithet=aegyptiacus}
+\newanimal{mm}{genus=Micronycteris,epithet=microtis}
+\newanimal{pd}{genus=Phyllostomus,epithet=discolor}
+\newanimal{ef}{genus=Eptesicus,epithet=fuscus}
+\newanimal{tb}{genus=Tadarida,epithet=brasiliensis}
+\newanimal{gs}{genus=Glossophaga,epithet=soricina}
 
 \title{Vicarious sonar learning in a bat-inspired robot}
 \author{Dieter Vanderelst}
@@ -81,32 +88,29 @@ The present paper instantiates this idea on a physical robot. The robot carries 
 \section{Discussion}
 
 % Par 11
-Cross-modal vicarious learning of a given task, as we use the term, requires the following.
+For cross-modal vicarious learning of a given observed in an experiment, the following conditions need to be met.
 %
 \begin{itemize}
-\item[1a] Task-relevant features must be encoded in the sensory data of two modalities $A$ and $B$, one of which, say A, extracts and explicitly represent them.
-\item [1b] The agent must have learned an inverse model for these features allowing their extraction from the data from modality $B$ using the feature labels provided by modality $A$.
+\item{1} A set of features $F$ must be encoded in the sensory data of two modalities $A$ and $B$, one of which, say $A$, extracts and explicitly represent them.
+\item{2} The agent must have learned an inverse model for these  features $F$ allowing their extraction from the data from modality $B$ using the feature labels provided by modality $A$.
+\item{3} The set of features $F$ must include features that are task-relevant, i.e., that allow the animal to complete the experimental task.
+\item{4} The animal must have learned to use the task-relevant bimodally accessible features.
 \end{itemize}
 %
-Together, 1a and 1b allow cross-modal perception, in the sense that a feature perceived using modality $A$ also becomes available through modality $B$. For cross-modal vicarious learning, two additional conditions need to be satisfied.
-%
-\begin{itemize}
-\item [2] The agent needs a mental representation of the required task features. We do not require this representation to be modality-specific; it can be amodal.
-\item [3] The agent needs to engage in mental rehearsal of the task in modality $B$, against the represented features.
-\end{itemize} 
+For bats, learning the inverse model for features encoded in both vision and sonar can happen developmentally through bi-modal experience of environments. As pointed out in the introduction, bats often use sonar under conditions where vision is also available. These instances would provide the necessariy training data and feature labels to train an inverse model for extracting vision-first features from sonar data (or vice versa). Alternatively, it might be possible for bats to learn an inverse model during the training for a given experimental setup, if the features required by the task are specific and idiosyncratic to the experiment.
+
+In themselves, conditions 1 and 2 are not sufficient for cross-modal learning to be observed in experiments. For an experiment to show evidence of cross-modal learning, the task used to assess the bats' performance must also hinge on features that are cross-modally available. Moreover, the bat must also opt to use them. This is especially relevant for experiments where the bat is free to learn to complete the task using a range of features, for example, because it has access to both modalities at the time of learning. As we discuss next, these strigent criteria might make observing cross-modal learning difficult. Indeed, despite the potental adaptive value of cross-modal learning convincing direct evidence is lacking \citep[see also][]{PageHofstede2021}.
+
+\citet{Danilovich2019} report two experiments testing cross-modal learning using \animal{ra}. In the first experiment, bats learned to discriminate two shapes while having access to both vision and sonar. Next, \citet{Danilovich2019} tested whether the bats could disciminate the objects using sonar alone. They found that the bats were unable to discriminate between the objects in the dark. 
+This failure to demonstrate cross-modal learning might have been due to several criteria not being satisfied. First, with additional training in darkness, only one out of four bats was eventually able to complete the task using sonar. This indicates that task might have been hard to complete accoustically, perhaps because task-relevant (criterion 3) cross-modally available features were not available (criterion 1), preventing the bats from learning or using an inverse model (criterion 2). In addition, during training with vision available, bats might have learned to use features of the objects that are not cross-modally available, leading to a failure during the testing phase when those features were removed (criterion 4).
+
+In a second experiment, \citet{Danilovich2019} trained \animal{ra} to discriminate between two shapes using sonar. Next, they tested whether the bats could perform the task using vision. After running a control experiment, only one out of five bats managed this. This limited cross-modal performance, could again be explained by a failure to satisfy the criteria outlined above. Even if bats were able to perceive task-relevant feaures usind both sonar and vision (criteria 1, 2 and 3), they might have learned to use these, except for the succesfull individual, during the training (criterion 4).
+
+Similar limitations make findings of \citet{Holland2005} inconclusive. These authors trained \animal{ra} bats to find a hidden perch in light with sonar masked by ultrasonic noise, then tested in darkness with echolocation alone. Performance dropped and bats had to relearn finding the perch, which they were able to do. The authors interpreted the need to relearn the task there is no transfer between the two sensory systems. However, as for the experiments reported by \citet{Danilovich2019}, experimental evidence supporting criteria 1, 2, 3 is lacking. Moreover, the experiment was construed to invalidate criterion 4. By masking sonar during, they might have biased the animals to use environmental features only available to vision during training.
+
+Even positive evidence needs to be scruntinized as well. \citet{Finger2025} trained one group of \animal{ra} to land on a fixed perch in light and a second only in darkness. The light-trained group later landed in darkness, while the dark-only group failed across many trials, with three of four bats never contacting the perch at all. \citet{Finger2025} interpret these findings as evidence for some form of cross-modal learning since bats that were first trained using sonar and vision managed to later find the platform using sonar alone while the sonar only group did not. However, the two of three pretrained bats required substantial additinal training when restricted to only using sonar. Hence, in these animals cross-modal learning must have been limited.
 
 
-% Par 12
-Despite the potental adaptive value of cross-modal vicarious learning for animals whose sensory modalities differ sharply in what they encode, to the best of our knowledge no published experiment has demonstrated it in bats. The three studies most directly relevant to the question, \citet{Holland2005}, \citet{DanilovichYovel2019}, and \citet{Finger2025}, all report little or no transfer from vision to echolocation in \emph{Rousettus aegyptiacus}. None, however, provides a competent test of what the framework actually requires.
-
-% Par 13
-\citet{Holland2005} trained bats to find a hidden perch in light with sonar masked by ultrasonic noise, then tested in darkness with echolocation alone. Performance dropped to chance, and the authors concluded that ``there is no transfer between the two systems''. However, the masking-noise design suppressed the supervised cross-modal pair the framework requires throughout the training phase, so the inverse from sonar to perch location had no opportunity to form. The authors themselves acknowledge that ``under light conditions, echolocation is available for at most a short time''. The result therefore probes whether transfer can occur in the absence of cross-modal supervision, not whether the framework's mechanism operates when its inputs are provided.
-
-% Par 14
-\citet{DanilovichYovel2019} and \citet{Finger2025} report a different kind of negative result with a shared confound. \citet{DanilovichYovel2019} trained bats bimodally on a shape discrimination (prism versus cylinder), then probed each modality alone. Vision alone was learned in a single session; echolocation alone produced failure in three of four bats across ten further sessions of reward. \citet{Finger2025} trained one group of bats to land on a fixed perch in light and a second only in darkness. The light-trained group later landed in darkness, while the dark-only group failed across four hundred and sixteen trials, with three of four bats never contacting the perch at all. In both designs, the echolocation-only condition itself fails. Hence the relevant features may not be reliably recoverable from echolocation at task-relevant precision in either setup, and the failure to transfer cannot be distinguished from the simpler reading that there is no sonar-side feature available for cross-modal supervision to deliver. This is exactly what the framework predicts when feature encoding capacity, not inverse-model learning, is the binding constraint, since cross-modal supervision can train an inverse for a feature only when the receiving modality physically carries the feature at sufficient fidelity.
-
-% Par 15
-A competent test of the framework's transfer prediction therefore requires three pieces. First, a feature demonstrably recoverable from sonar alone, evidenced by a sonar-naive cohort reaching criterion. Second, a training phase in which vision and echolocation are co-available without sabotage of either, so the supervised pair can form. Third, deployment under sonar alone, compared against the sonar-naive baseline on acquisition rate; the framework predicts faster acquisition for the bimodally-trained group. We are not aware that this experiment has been performed. The further prediction of full vicarious learning, that behaviour acquired through vision can be deployed through sonar via offline simulation from an internal scene representation, requires in addition that the animal engage in such simulation, and this last piece remains hypothetical for bats. The robot setup we report here instantiates the full architecture and provides an existence proof; whether bats deploy it remains open.
 
 
 \bibliography{references}
