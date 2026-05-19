@@ -87,17 +87,28 @@ The present paper instantiates this idea on a physical robot. The robot carries 
 
 \section{Discussion}
 
+% Terminology used throughout the Discussion:
+%   cross-modal inverse training — the learning event: acquisition of
+%     an inverse model in the receiver modality using feature labels
+%     supplied by the supervisor modality. Conditions 1-3.
+%   cross-modal feature transfer — the observable deployment outcome:
+%     animal uses the cross-modally trained inverse on a task that
+%     depends on the feature. Conditions 1-5 (= training + 4, 5).
+%   cross-modal vicarious learning — feature transfer plus offline
+%     mental rehearsal of task behaviour against an internal
+%     representation of the feature. Conditions 1-7 (= transfer + 6, 7).
+
 % Par 11
-For cross-modal learning of a given task to be observed in an experiment, several conditions need to be jointly satisfied. They fall into three tiers: the framework's mechanism, the experimental conditions for observing it, and the additional conditions specific to vicarious learning beyond plain cross-modal transfer. The framework's central operation, cross-modal inverse training, requires:
+For cross-modal feature transfer of a given task to be observed in an experiment, several conditions need to be jointly satisfied. They fall into three tiers: the framework's mechanism, the experimental conditions for observing it, and the additional conditions specific to vicarious learning beyond plain cross-modal feature transfer. The framework's central operation, cross-modal inverse training, requires:
 %
 \begin{itemize}
-\item[1] A task-relevant feature must be physically encoded in the sensory data of both modalities at sufficient fidelity for it to be recoverable in principle.
-\item[2] One of the two modalities, the supervisor, must already extract this feature explicitly and represent its value, so that it can supply training labels.
+\item[1] A task-relevant feature must be physically encoded in the sensory data of both modalities and be recoverable in principle.
+\item[2] One of the two modalities, the supervisor, must already extract this feature explicitly and represent it, so that it can supply training labels.
 \item[3] The other modality, the receiver, must have acquired an inverse model that recovers the feature from its raw sensory data using the supervisor's labels. This acquisition can happen developmentally through natural bimodal experience or during the training phase of an experiment.
 \end{itemize}
 
 % Par 12
-Conditions 1-3 are not sufficient to make cross-modal learning observable in an experiment. The experiment must additionally satisfy:
+Cross-modal inverse training (conditions 1-3) is not in itself observable in an experiment. For cross-modal feature transfer to be observed, two further conditions must be satisfied:
 %
 \begin{itemize}
 \item[4] The task must hinge on the cross-modally accessible feature, not on some other feature that is accessible only in the supervisor modality.
@@ -105,7 +116,7 @@ Conditions 1-3 are not sufficient to make cross-modal learning observable in an 
 \end{itemize}
 
 % Par 13
-Conditions 1-5 deliver cross-modal transfer of a feature representation. Cross-modal \emph{vicarious} learning of task behaviour requires two further conditions:
+Cross-modal feature transfer (conditions 1-5) is the observable deployment of a cross-modally trained inverse. Cross-modal \emph{vicarious} learning of task behaviour additionally requires:
 %
 \begin{itemize}
 \item[6] The agent must hold an internal representation of the required task features. This representation can be modality-specific or amodal.
@@ -122,14 +133,14 @@ Alternatively, an inverse can be acquired during the experiment itself, when the
 The two regimes carry different experimental signatures and call for different interpretations of negative results. Under the first regime, an experiment polls inverses the animal already possesses, and a failure to observe cross-modal performance suggests either that the animal did not deploy the inverse it has, or that the specific experimental setup falls outside the distribution the developmental inverse was trained on. Under the second regime, the experiment tests whether a new inverse can be acquired under the conditions provided, and a failure can reflect a violation of any of criteria 1 to 5. The bar an experiment must clear is therefore much higher under the second regime than under the first.
 
 % Par 17
-This distinction has a corollary for experimental design. The more ecologically remote the task, the more its features fall outside any developmentally-formed inverse, and the more the experiment must itself do the work of establishing the new inverse. Tasks built around laboratory-fabricated targets, geometric discriminations bats would never encounter in the wild, or arbitrary perch-in-room mappings all sit in the second regime by construction. The probability of observing cross-modal learning in such tasks decreases accordingly, not because cross-modal learning is absent in bats but because the experiment is asking the bat to acquire a new inverse from scratch under whatever cross-modal supervision the design provides. Ecologically natural tasks, by contrast, can lean on inverses the animal has already formed; the experiment then needs only to probe whether the animal deploys them.
+This distinction has a corollary for experimental design. The more ecologically remote the task, the more its features fall outside any developmentally-formed inverse, and the more the experiment must itself do the work of establishing the new inverse. Tasks built around laboratory-fabricated targets, geometric discriminations bats would never encounter in the wild, or arbitrary perch-in-room mappings all sit in the second regime by construction. The probability of observing cross-modal feature transfer in such tasks decreases accordingly, not because cross-modal feature transfer is absent in bats but because the experiment is asking the bat to acquire a new inverse from scratch under whatever cross-modal supervision the design provides. Ecologically natural tasks, by contrast, can lean on inverses the animal has already formed; the experiment then needs only to probe whether the animal deploys them.
 
 % Par 18
-The joint criteria are stringent. They are especially demanding in experiments where the bat has access to both modalities during training and is free to learn the task using any feature it finds, since the animal might converge on a strategy that does not engage the cross-modal route. Despite the potential adaptive value of cross-modal learning, convincing direct evidence in bats is lacking \citep[see also][]{PageHofstede2021}.
+The joint criteria are stringent. They are especially demanding in experiments where the bat has access to both modalities during training and is free to learn the task using any feature it finds, since the animal might converge on a strategy that does not engage the cross-modal route. Despite the potential adaptive value of cross-modal feature transfer, convincing direct evidence in bats is lacking \citep[see also][]{PageHofstede2021}.
 
 % Par 19
-\citet{Danilovich2019} report two experiments testing cross-modal learning using \animal{ra}. In the first experiment, bats learned to discriminate two shapes while having access to both vision and sonar. Next, they tested whether the bats could discriminate the objects using sonar alone. They found that the bats were unable to discriminate between the objects in the dark.
-This failure to demonstrate cross-modal learning might have been due to several criteria not being satisfied. First, with additional training in darkness, only one out of four bats was eventually able to complete the task using sonar. This indicates that the task might have been hard to complete acoustically, perhaps because task-relevant features cross-modally encoded at sufficient fidelity were not available (criterion 1), preventing the bats from learning or using an inverse model (criterion 3). In addition, during training with vision available, bats might have learned to use features of the objects that are not cross-modally available, leading to a failure during the testing phase when those features were removed (criterion 5).
+\citet{Danilovich2019} report two experiments testing cross-modal feature transfer using \animal{ra}. In the first experiment, bats learned to discriminate two shapes while having access to both vision and sonar. Next, they tested whether the bats could discriminate the objects using sonar alone. They found that the bats were unable to discriminate between the objects in the dark.
+This failure to demonstrate cross-modal feature transfer might have been due to several criteria not being satisfied. First, with additional training in darkness, only one out of four bats was eventually able to complete the task using sonar. This indicates that the task might have been hard to complete acoustically, perhaps because task-relevant features cross-modally encoded at sufficient fidelity were not available (criterion 1), preventing the bats from learning or using an inverse model (criterion 3). In addition, during training with vision available, bats might have learned to use features of the objects that are not cross-modally available, leading to a failure during the testing phase when those features were removed (criterion 5).
 
 % Par 20
 In a second experiment, \citet{Danilovich2019} trained \animal{ra} to discriminate between two textures using sonar. Next, they tested whether the bats could perform the task using vision. In a cleaner replication of the experiment, only one out of five bats managed this \citep[Round 2 in][]{Danilovich2019}. This limited cross-modal performance could again be explained by a failure to satisfy the criteria outlined above. Even if bats were able to perceive task-relevant features using both sonar and vision (criteria 1-3), they might have learned to use these, except for the successful individual, during the training (criterion 5).
@@ -138,7 +149,7 @@ In a second experiment, \citet{Danilovich2019} trained \animal{ra} to discrimina
 Similar limitations make findings of \citet{Holland2005} inconclusive. These authors trained \animal{ra} to find a hidden perch in light with sonar masked by ultrasonic noise, then tested in darkness with echolocation alone. Performance dropped and bats had to relearn finding the perch, which they were able to do. The authors interpreted the need to relearn as evidence of no transfer between the two sensory systems. However, as for the experiments reported by \citet{Danilovich2019}, experimental evidence supporting criterion 1 is lacking. More fundamentally, the masking-noise design invalidates criterion 3. With sonar suppressed during training, the supervised cross-modal pair the framework requires cannot form, and any task-specific inverse model for finding the perch in this room had no opportunity to be acquired. Pre-existing inverses developed through natural bimodal experience might have remained available, but they would not address the specific perch-in-this-room mapping the task probes.
 
 % Par 22
-Even positive evidence needs to be scrutinised. \citet{Finger2025} trained one group of \animal{ra} to land on a fixed perch in light and a second only in darkness. The light-trained group later landed in darkness, while the dark-only group failed across many trials, with three of four bats never contacting the perch at all. \citet{Finger2025} interpret these findings as evidence for some form of cross-modal learning since bats that were first trained using sonar and vision managed to later find the perch using sonar alone while the sonar-only group did not. However, the two of three pretrained bats required substantial additional training when restricted to only using sonar. Hence, in these animals cross-modal learning must have been limited.
+Even positive evidence needs to be scrutinised. \citet{Finger2025} trained one group of \animal{ra} to land on a fixed perch in light and a second only in darkness. The light-trained group later landed in darkness, while the dark-only group failed across many trials, with three of four bats never contacting the perch at all. \citet{Finger2025} interpret these findings as evidence for some form of cross-modal feature transfer since bats that were first trained using sonar and vision managed to later find the perch using sonar alone while the sonar-only group did not. However, the two of three pretrained bats required substantial additional training when restricted to only using sonar. Hence, in these animals cross-modal feature transfer must have been limited.
 
 
 \bibliography{references}
