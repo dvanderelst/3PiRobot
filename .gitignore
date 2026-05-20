@@ -5,6 +5,7 @@
 
 ############## Control_code output folders
 Control_code/Library/RobotCalibration/
+Control_code/AcquisitionArenas/
 Control_code/Cache/
 Control_code/PolicyAssessment/
 Control_code/PolicyRuns/
