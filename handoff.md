@@ -28,7 +28,7 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
 ## Where to pick up
 
 - **Paper:** on branch `direct-learning-poletask`. Empirical validation of the two-headed inverse design is the next step before Par 9 can be considered durable.
-- **Robot:** blind-ablation comparison against the sighted baseline is the outstanding empirical thread (see Robot state below). User paused robot work to do the Paper framework restructure; resumption is imminent.
+- **Code:** two-headed inverse trained end-to-end on one session (Acquisition01A). Class accuracy works (mean 73% across 4-fold quadrant CV); pole-azimuth regression is underdetermined and waiting on more data. Next: collect 2-3 more acquisition sessions, expect class acc → high 70s/low 80s and pole-az RMSE → ≤ 15° at ~200 pole-class samples.
 
 ---
 
@@ -47,6 +47,16 @@ Par 9 commits the paper to a specific direct-learning task: a Holland/Finger-mim
 2. **Selector logic is "class of nearest object."** User accepted the trade-off (robot has to wander a bit if a wall is closer than the pole). Pole-priority would be more aligned with the policy's needs but adds complexity.
 3. **No short-term memory in the direct-learning policy.** Geometry suggests a single 3-point profile + class label is enough. If empirics force a window, both vision-teacher and sonar-student get the same window.
 
+### Methods drafting started (2026-05-20)
+
+First Methods subsection drafted: `\subsection{Arena and Robot}` (Par 11–17), placed between Introduction and Discussion. Covers arena geometry (panel walls with foam facing, pole obstacles), robot platform (Pololu 3pi+ 2040 + HiLetgo ESP8266 ES), MaxBotix sonar payload geometry and acoustic parameters, overhead-camera tracking, and arena-layout digitisation by back-projection. Past tense throughout per corpus convention. Discussion paragraphs renumbered to Par 18–29.
+
+Remaining Methods subsections (sonar data acquisition protocol, two-headed inverse training, direct-learning policy, vicarious-learning policy training) not yet drafted; will be filled in as the empirical work settles.
+
+### Drafting note macros
+
+`\cnote{N}{...}` (Dieter → Claude, blue) and `\dnote{N}{...}` (Claude → Dieter, red), defined in the preamble. Use inline at the point the note refers to; the numeric tag N is for cross-reference in conversation. Greppable via `grep -n '\\cnote\|\\dnote' Paper/main.tex`. Sublime Text highlighting is provided by `~/Dropbox/Scripts_and_Settings/SublimeText/DraftNoteHighlight.py` (symlinked into every machine's `Packages/User/`). Replaces the older `% >>> Cn:` line-comment convention.
+
 ### Branch reasoning
 
 `direct-learning-poletask` exists because the Par 9 task commitment is empirically contingent. If the inverse turns out untrainable in the current configuration, Par 9 (and the Methods that follow) need revision. The naming rename is general improvement and stays on `main` either way. If the empirical work succeeds, merge back; if it fails, revert Par 9 on `main` and rethink.
@@ -54,10 +64,11 @@ Par 9 commits the paper to a specific direct-learning task: a Holland/Finger-mim
 ### Open items
 
 - **Par 10 typos.** `off`→`of`, `readility`→`readily`, `emssions`→`emissions`, `opossed`→`opposed`, `typocally`→`typically`, `freqency`→`frequency`.
-- **C5 at Par 7.** Open marker: "We should probably add some more arguments for the existence of internal models supported by vision." Scratchpad §2 and §3 material likely lands here.
+- **C5 at Par 7** (now `\cnote{5}{...}`): "We should probably add some more arguments for the existence of internal models supported by vision." Scratchpad §2 and §3 material likely lands here.
+- **Pole material/diameter inconsistency.** Methods Par 13 calls them *wooden dowel of 25 mm diameter*; Intro Par 9 still calls them *cardboard pole*. Reconcile once the physical setup is final. (Code side resolved 2026-05-20: `POLE_RADIUS_MM = 12.5` in `SCRIPT_BuildArenaGeometry.py`.)
 - **Scratchpad §6 (Neuweiler & Möhres 1967) Discussion landing.** Strong precedent passage (§6.A — the "Raumbild" quote) and the wing-folding finding (§6.2) deserve prominent placement; suggested lead per §6.4.
 - **Scratchpad §2 (rich-sense / specialised-sense architecture)** and **§4 (vision-as-calibrator bias)** — proposal-direction material, not yet drafted.
-- **Methods, Results, Abstract** — not drafted.
+- **Remaining Methods subsections, Results, Abstract** — not drafted.
 
 ### Suggested first move (next paper session)
 
@@ -65,46 +76,52 @@ Depends on the empirical state:
 
 - **If the inverse trained successfully:** draft Results section 1 (inverse training). Per-head performance, the cross-modal supervision protocol, and the choice of overhead-camera-derived ground-truth labels all live here.
 - **If the inverse failed:** discuss with the user before doing anything. Candidate diagnoses: cardboard-vs-wall acoustic discriminability too weak under the current sonar configuration; class imbalance in the training set; or the nearest-class selector producing ambiguous labels in mixed-object scenes.
-- **If no robot data yet:** Par 10 typo cleanup → C5 at Par 7 → §6 Neuweiler & Möhres landing. Three independent, tractable paper-only tasks.
+- **If no robot data yet:** Par 10 typo cleanup → `\cnote{5}` at Par 7 → §6 Neuweiler & Möhres landing → reconcile Par 9 pole material against Methods. Four independent, tractable paper-only tasks.
 
 ---
 
-## Robot state
+## Code state
 
-*Last updated: 2026-05-11 by a prior Claude. Probably stale relative to the recent paper-focused work; verify against `git log Control_code/` before acting on the specifics.*
+*Last updated: 2026-05-20.*
+*Current branch for ongoing work: `direct-learning-poletask`.*
 
 ### Active thread
 
-Blind ablation. `SCRIPT_TrainPolicy.py` has a top-level `BLIND` constant; `True` strips all sonar channels from the policy observation, leaving only `prev_rot`. Plumbing in `Library/Policy.py` (`make_obs_layout`, `encode_obs`, `make_policy_dict`, `Policy.__init__`) all accept a `blind` flag. Saved blind policies load and deploy through the same `Policy.load` path as sighted variants; `meas_dict` is allowed to be `None` so the sonar measurement call is skipped in blind rollouts.
+**Cross-modal direct-learning inverse for the pole/wall Par 9 task.** End-to-end pipeline now exists:
 
-**Hypothesis being tested:** with motor-noise injection (`motion_rot_gain_range_pct=0.15`, `motion_drive_gain_range_pct=0.05`, plus per-step Gaussians) a blind policy cannot use sonar feedback to correct sustained execution bias. Expected: blind underperforms sighted. Intended as publication evidence that the sighted policy's success is sonar-driven rather than pure dead-reckoning.
+1. `SCRIPT_BuildArenaGeometry.py` extracts walls (green polylines) AND poles (blue dabs → blob centroid → back-projected through z = 610 mm) per camera, merged across cameras at 50 mm radius. Output: `arena_features.npz` with `x_mm`, `y_mm`, `kind` (0=wall, 1=pole), `source_camera`, `pole_radius_mm`. Pole radius = 12.5 mm (25 mm-diameter wooden dowels).
+2. `Library/AcquisitionPlanner` reads walls + poles + radius, enforces pole clearance at `clearance_mm + pole_radius_mm` for waypoints and segments. Plans draw poles as purple circles.
+3. `Library/AcquisitionSessionLoader` gained `load_session_inverse` / `load_data_inverse` returning per-ping `class_label` and `pole_azimuth_deg` via `nearest_reflector_in_cone`. Cone matches the model's ±35° slice cone; tie on distance goes to wall; pole distance measured to surface (centre − radius).
+4. `Library/SonarModel.SonarSlicesUQ_TwoHeaded` shares the wall-only trunk and adds a class head (symmetric under L↔R) and pole-azimuth head (mean antisymmetric, log_var symmetric). Symmetry verified by construction.
+5. `SCRIPT_TrainInverseModel.py` trains the combined model with CE(class) + masked GNLL(wall slices) + masked GNLL(pole az). Pole-az normalised by /CONE_HALF_DEG to keep antisymmetry exact. Writes to `SonarModel/` with prefix `inverse_`. Legacy `SCRIPT_TrainSonarModel.py` is untouched.
+6. `SCRIPT_CheckPoleSignal.py` is a standalone hand-feature LR diagnostic. Rerun after each new acquisition as a signal-floor sanity check before retraining.
 
-**Concrete next steps:**
+### First-session results (Acquisition01A — 240 pings, 237 valid, 35% pole)
 
-1. `BLIND = True` at the top of `SCRIPT_TrainPolicy.py`, run training. Artifact lands at `PolicyTraining/default_Target02_blind/`.
-2. Decide how to present the comparison — on-robot deploy (most direct, requires robot time) or `SCRIPT_Ablations.py` extension (sim only, instant). Default to asking before doing an on-robot run.
-3. If deploying: update `SCRIPT_RunPolicy.POLICY` to `default_Target02_blind`, bump `REPEAT`; flip back to `default_Target02` for sighted comparisons.
+- **4-fold quadrant CV class accuracy: 73.1% ± 11.4%** (per-fold: 55%, 85%, 85%, 73%). The 55% snapshot first reported was the unlucky fold — mean is solidly above the 65% wall prior.
+- **Pole azimuth RMSE: 19.9° ± 1.7°** — basically uninformative; matches the data's azimuth std. Regression head is data-starved (~53 pole training samples per fold).
+- **Wall recall: 82% ± 4%.** Pole recall: 58% ± 19% (small-n variance).
+- **Hand-feature LR diagnostic: 66%.** Above the 65% wall prior. Confirms signal-in-envelope is real but ceiling-limited. Discrimination collapses at TOA 60-100 samples (mid-range pole pings are at chance) — physical limit, not data limit. Wider label cones (50°, 65°) hurt accuracy; ±35° is the empirical sweet spot.
 
-### Milestone — first clean policy deploy (2026-05-10)
+### Bisect targets
 
-`PolicyRuns/default_Target02_run06/trajectory.png` — full 354-step figure-8 on Target02, both loops tightly on path, no second-lap divergence. First deploy that didn't unravel by lap 2 since training started for this arena. Companion ablation sweep (`PolicyTraining/default_Target02/ablations.png`) ran end-to-end and shows the expected ranking (full > center/sides > blind / no_prev_rot).
+- **First clean policy deploy: `eef35c7`** (wall-only-policy milestone from the pre-pole era). What unblocked it: recalibrated drive curl (`drive_yaw_curl_deg_per_mm` −0.03693 → −0.01243) and distance scale (0.992 → 0.9972); quantified tracker noise (σ_yaw ≈ 0.6° per fresh frame, fresh-frame rate ≈ 0.8 Hz) and relaxed `wait_for_stable_pose` defaults (`yaw_tol_deg` 0.5 → 2.0, `timeout_s` 5 → 8). The 0.8 Hz cap is a DVR/RTSP bottleneck tracked in `PyLorex/TODO.md`.
+- **Pole feature pipeline first end-to-end run: `a7328bc`** (two-headed inverse loader + architecture + trainer; this is the commit that produced the first results above).
 
-**Bisect target if anything regresses: `eef35c7`.** The commit message spells out exactly what unblocked the run; don't squash or rewrite it.
+### Naming convention
 
-What unblocked the run:
-
-- Recalibrated drive curl (`drive_yaw_curl_deg_per_mm` −0.03693 → −0.01243) and distance scale (0.992 → 0.9972). Friday-eve curl was inflated by uncorrected residuals.
-- Quantified tracker noise (`SCRIPT_MeasureTrackerNoise.py`, since removed — output preserved in `Control_code/Diagnostics/tracker_noise_*`): σ_yaw ≈ 0.6° per fresh frame, fresh-frame rate ≈ 0.8 Hz. Relaxed `wait_for_stable_pose` defaults `yaw_tol_deg` 0.5 → 2.0 (~3σ) and `timeout_s` 5 → 8. The 0.8 Hz cap is a DVR/RTSP bottleneck tracked in `PyLorex/TODO.md`.
-
-### Naming convention (current)
-
-`<CONDITION>_<TARGET_ARENA>[_blind]` → e.g. `default_Target02`, `default_Target02_blind`. The historical `default_Target02_h32_nosigma` naming was simplified on 2026-05-11.
+- Wall-only policy training: `<CONDITION>_<TARGET_ARENA>[_blind]` → e.g. `default_Target02`, `default_Target02_blind`.
+- Two-headed inverse artifacts: prefix `inverse_` under `SonarModel/`, parallel to the wall-only `slices_` prefix.
 
 The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the old name on purpose — frozen records of the deploy at the time. **Do not rename or modify these.**
 
 ### Open items
 
+- **Collect more acquisition sessions.** 2-3 additional sessions in different arena layouts should pull class accuracy into the high 70s / low 80s and start giving the pole-az head usable signal.
+- **Rebuild Acquisition01 `arena_features.npz`** with `POLE_RADIUS_MM = 12.5` before the next training run. The on-disk file has 25 mm baked in; effect on existing training labels is small (~5 pings might have mis-tied at the wall/pole distance boundary).
+- **Decision threshold tuning.** Current classifier uses default 0.5 P(pole). The P(pole) distribution suggests a lower threshold would lift pole recall meaningfully without much wall-recall cost. Wait until more sessions firm the picture.
+- **Blind ablation thread is paused.** Plumbing exists (`BLIND` flag in `SCRIPT_TrainPolicy.py`; `blind` flag in `Library/Policy.py` accepted everywhere; `meas_dict` allowed to be `None`). Resume after the pole/wall inverse has a stable Acquisition baseline.
 - **PyLorex frame-rate bottleneck.** Server reports 7-8 Hz internally; client sees ~0.8 Hz of distinct reads. Tracked in `PyLorex/TODO.md`. Once fixed, tighten `wait_for_stable_pose` defaults back toward the pre-2026-05-10 values (yaw_tol 0.5°, timeout 5s).
 - **Per-robot calibration.** `Settings.py` `ClientConfig` `default_factory` carries Robot01's calibration table; `client2` / `client3` inherit it. Only matters when actually deploying on those robots.
 - **Diagnostics directory.** `Control_code/Diagnostics/` is currently untracked. If outputs there ever become worth versioning, add to `.gitignore` explicitly so the policy is intentional.
-- **Uncommitted working-tree changes (carried over from before 2026-05-20 paper session):** `Control_code/Library/Settings.py`, `SCRIPT_CalibrateRobot.py`, `SCRIPT_RunPolicy.py`, `SCRIPT_TrainPolicy.py`. Predate the current paper session; the user has not committed yet. Don't bundle them into paper commits.
+- **Uncommitted working-tree changes (long-standing user WIP, do not bundle into agent commits):** `Library/Settings.py`, `SCRIPT_CalibrateRobot.py`, `SCRIPT_RunPolicy.py` (REPEAT/MAX_STEPS), `SCRIPT_TakeEnvSnapshot.py`, `SCRIPT_TrainPolicy.py`, plus newer this-session deltas in `SCRIPT_BuildAcquisitionPlan.py` (ARENA_NAME → Acquisition01) and `SCRIPT_VisualDataAcquisition.py` (ARENA_NAME/SESSION_NAME → Acquisition01/Acquisition01A).
