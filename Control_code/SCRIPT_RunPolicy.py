@@ -201,7 +201,7 @@ def _install_training_walls(arena: str, deploy_env_dir: str) -> None:
     pole_sel = kind == 1
     wx, wy = x_all[wall_sel], y_all[wall_sel]
     px, py = x_all[pole_sel], y_all[pole_sel]
-    pole_radius_mm = float(features["pole_radius_mm"]) if "pole_radius_mm" in features.files else 25.0
+    pole_radius_mm = float(features["pole_radius_mm"]) if "pole_radius_mm" in features.files else 12.5
 
     # Inverse of mask2coordinates pixel-centre convention (X = min_x + (c+0.5)·mm_per_px).
     def world_to_pixel(x, y):
@@ -251,7 +251,7 @@ _arena_walls_x = None
 _arena_walls_y = None
 _arena_poles_x = None
 _arena_poles_y = None
-_arena_pole_radius_mm = 25.0
+_arena_pole_radius_mm = 12.5
 _env_dir = snapshot.get("rundir")
 if _env_dir:
     _features_path = os.path.join(_env_dir, "arena_features.npz")

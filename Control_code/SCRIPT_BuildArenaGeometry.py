@@ -92,15 +92,18 @@ WALL_HEIGHT_MM: float = 295.0
 # blue dabs. Same back-projection logic as walls but at this height.
 POLE_HEIGHT_MM: float = 610.0
 
-# Pole radius (mm) — physical radius of the cardboard pole. Carried into the
-# arena_features.npz output so downstream consumers (planner clearance,
-# nearest-reflector labelling) don't have to hard-code it.
-POLE_RADIUS_MM: float = 25.0
+# Pole radius (mm) — physical radius of the wooden-dowel pole (25 mm diameter
+# → 12.5 mm radius). Carried into the arena_features.npz output so downstream
+# consumers (planner clearance, nearest-reflector labelling) don't have to
+# hard-code it.
+POLE_RADIUS_MM: float = 12.5
 
 # Cross-camera merge radius (mm) — pole centroids from different cameras whose
 # back-projected (X, Y) are within this distance are merged into a single pole
-# at their mean position. 2 × POLE_RADIUS_MM is a comfortable margin for
-# typical calibration residuals.
+# at their mean position. Set as an absolute calibration-noise budget, not
+# derived from POLE_RADIUS_MM: residuals come from camera calibration drift
+# and back-projection through z = POLE_HEIGHT_MM, both independent of the
+# pole's own size.
 POLE_MERGE_RADIUS_MM: float = 50.0
 
 # Source of per-camera calibration (pose_{cam}.npz, pose_{cam}.json). Copied
