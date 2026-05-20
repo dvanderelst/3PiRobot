@@ -186,6 +186,108 @@ class SonarSlicesUQ(nn.Module):
         }
 
 
+class SonarSlicesUQ_TwoHeaded(nn.Module):
+    """
+    Two-headed inverse: SonarSlicesUQ's wall 3-slice (mean, log_var) heads
+    plus a wall/pole class head and a pole-azimuth (mean, log_var) head.
+
+    Shares the same shared trunk (encoder + pool + fc) as SonarSlicesUQ, so
+    when poles aren't present in training data this reduces to the same
+    expressive power as the wall-only model.
+
+    Symmetry under L↔R sonar swap, enforced by construction (not by data
+    augmentation):
+
+      Wall heads (same as SonarSlicesUQ):
+        center is symmetric (uses (zL+zR)/2),
+        left/right share weights with channels swapped → exact L↔R flip.
+
+      Class head: symmetric — wall vs pole label is invariant to which side
+      the object is on. We achieve invariance by averaging the head's output
+      on (L,R) and (R,L) inputs. The head can still read the asymmetry that
+      discriminates pole from wall (a small pole gives strong L/R imbalance,
+      a fronto-parallel wall does not) because it sees both orderings.
+
+      Pole azimuth mean: antisymmetric — swapping L↔R flips the pole's side
+      and therefore the sign of its bearing. Constructed as
+      0.5·(head(L,R) − head(R,L)).
+
+      Pole azimuth log_var: symmetric — uncertainty about bearing should not
+      depend on which side. Constructed as 0.5·(head(L,R) + head(R,L)).
+
+    `class_logits` has shape (B, 2); apply softmax/CE downstream.
+    `pole_az_mean` / `pole_az_log_var` are in the same normalised space the
+    trainer was set up with; trainers usually divide pole azimuth by
+    cone_half_deg so the model outputs roughly [-1, 1].
+    """
+    def __init__(self, samples, conv_channels, conv_kernel, pool_out,
+                 fc_hidden, head_hidden, n_classes: int = 2):
+        super().__init__()
+        layers = []
+        in_ch = 1
+        for out_ch in conv_channels:
+            layers += [
+                nn.Conv1d(in_ch, out_ch, conv_kernel, padding=conv_kernel // 2),
+                nn.ReLU(),
+            ]
+            in_ch = out_ch
+        self.encoder = nn.Sequential(*layers)
+        self.pool    = nn.AdaptiveAvgPool1d(pool_out)
+        feat_dim     = conv_channels[-1] * pool_out
+        self.fc      = nn.Sequential(nn.Linear(feat_dim, fc_hidden), nn.ReLU())
+
+        def make_head(in_dim, hidden, out_dim=1):
+            return nn.Sequential(
+                nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, out_dim)
+            )
+
+        # Wall slice heads (mirror SonarSlicesUQ)
+        self.center_mean_head    = make_head(fc_hidden, head_hidden)
+        self.center_log_var_head = make_head(fc_hidden, head_hidden)
+        self.side_mean_head      = make_head(2 * fc_hidden, head_hidden)
+        self.side_log_var_head   = make_head(2 * fc_hidden, head_hidden)
+
+        # Class head (wall vs pole)
+        self.class_head          = make_head(2 * fc_hidden, head_hidden, out_dim=n_classes)
+
+        # Pole-azimuth heads
+        self.pole_az_mean_head    = make_head(2 * fc_hidden, head_hidden)
+        self.pole_az_log_var_head = make_head(2 * fc_hidden, head_hidden)
+
+        self.n_classes = n_classes
+
+    def _embed(self, ch):
+        z = self.encoder(ch.unsqueeze(1))
+        z = self.pool(z).flatten(1)
+        return self.fc(z)
+
+    def forward(self, left, right):
+        zL = self._embed(left)
+        zR = self._embed(right)
+        z_sym = 0.5 * (zL + zR)
+        LR = torch.cat([zL, zR], dim=-1)
+        RL = torch.cat([zR, zL], dim=-1)
+
+        # Class — symmetric averaging
+        class_logits = 0.5 * (self.class_head(LR) + self.class_head(RL))
+
+        # Pole azimuth — antisymmetric mean, symmetric log_var
+        pole_az_mean    = 0.5 * (self.pole_az_mean_head(LR)    - self.pole_az_mean_head(RL))
+        pole_az_log_var = 0.5 * (self.pole_az_log_var_head(LR) + self.pole_az_log_var_head(RL))
+
+        return {
+            "right_mean":      self.side_mean_head(LR),
+            "right_log_var":   self.side_log_var_head(LR),
+            "center_mean":     self.center_mean_head(z_sym),
+            "center_log_var":  self.center_log_var_head(z_sym),
+            "left_mean":       self.side_mean_head(RL),
+            "left_log_var":    self.side_log_var_head(RL),
+            "class_logits":    class_logits,       # (B, n_classes)
+            "pole_az_mean":    pole_az_mean,       # (B, 1) in normalised space
+            "pole_az_log_var": pole_az_log_var,    # (B, 1)
+        }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Loadable wrapper with sim and deploy interfaces
 # ══════════════════════════════════════════════════════════════════════════════
