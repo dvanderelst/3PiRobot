@@ -46,6 +46,14 @@
 \newanimal{tb}{genus=Tadarida,epithet=brasiliensis}
 \newanimal{gs}{genus=Glossophaga,epithet=soricina}
 
+% Inline drafting notes — C = Dieter -> Claude, D = Claude -> Dieter.
+% Rendered coloured in the draft PDF for visibility; redefine to gobble
+% both arguments for a clean camera-ready build.
+% Greppable: grep -n '\\dnote\|\\cnote' main.tex
+% Jump to a specific note: grep -n '\\cnote{5}' main.tex
+\newcommand{\cnote}[2]{\textcolor{blue}{[C#1: #2]}}
+\newcommand{\dnote}[2]{\textcolor{red}{[D#1: #2]}}
+
 \title{Vicarious sonar learning in a bat-inspired robot}
 \author{Dieter Vanderelst}
 \date{\today}
@@ -58,11 +66,11 @@
 \noindent\textit{[Abstract to be written once the framework and results sections settle.]}
 \end{abstract}
 
-
-% Note convention: standalone "% >>> Cn: ..." lines for Dieter -> Claude,
-% "% >>> Dn: ..." for Claude -> Dieter. Place adjacent to the paragraph they
-% refer to; number them (C1, C2, ...) for easy reference. Greppable with:
-%     grep -n "^% >>>" main.tex
+% Note convention: inline macros defined in the preamble.
+%   \cnote{N}{...}  Dieter -> Claude, rendered blue as [CN: ...]
+%   \dnote{N}{...}  Claude -> Dieter, rendered red  as [DN: ...]
+% N is a stable numeric tag for cross-reference (e.g. "see C5").
+% Greppable with: grep -n '\\cnote\|\\dnote' main.tex
 
 \section{Introduction}
 
@@ -82,11 +90,10 @@ Bats provide a particularly interesting case for cross-modal inverse training. T
 Echolocating bats also see. Most echolocating species have functional vision \citep{Boonman2013,Hoffmann2019}, with behaviourally measured visual acuity in microchiropterans roughly comparable to that of similarly sized small mammals such as rats and deer mice \citep{Manske1976,Bell1986,Cechetto2020}. Their luminance sensitivity is within an order of magnitude of that of mice, sufficient for navigation under starlight \citep{Cechetto2023}. Therefore, the cross-modal calibration mechanism described above suggests how vision could supply spatial labels for learning an inverse model for specific features carried by but not easily extracted from sonar. A bat could learn this inverse model while having access to both vision and sonar, e.g., while exploring environments not in complete darkness. Indeed, many bats emerge from their roosts at dusk and forage under intermediate light levels of 1--10\,lux \citep{Boonman2013}, echolocate even in bright light \citep{Holland2005,Eitan2022}, modify their echolocation in response to available visual cues \citep{McGowan2020}, and preferentially recruit visual cues for prey detection when these are available \citep{Eklof2003,Holland2009}. Early field experiments established that vision contributes to long-distance homing in bats \citep[e.g.,][]{Mueller1957,Williams1966a,Williams1966b,Williams1967,Williams1970}.
 
 % Par 6
-The overlap in feature encoding across modalities also gives rise to a second opportunity. Sensory modalities differ not only in feature accessibility but also in how richly they support internal modelling of the environment. Vision is particularly well suited to this role. Its long operating range gives advance information about distal events, a property argued to have underwritten the evolution of planning and prospective cognition in land vertebrates \citep{Mugan2020,Bennett2023}. We do not have direct evidence that bats build internal spatial representations from vision specifically, but if any modality supports such a representation in this clade, vision is the most plausible candidate.
+The overlap in feature encoding across modalities also gives rise to a second opportunity. Sensory modalities differ not only in feature accessibility but also in how richly they support internal modelling of the environment. Vision is particularly well suited to this role. Its long operating range gives advance information about distal events, a property argued to have underwritten the evolution of planning and prospective cognition in land vertebrates \citep{Mugan2020,Bennett2023}. We do not have direct evidence that bats build internal spatial representations from vision specifically, but if any modality supports such a representation in this clade, vision is the most plausible candidate. \cnote{x}{Perhaps we can draw on data from rodents and navigation here to suggest that some animals related top bats are capable of internal modelling. We might want to look at the Bennett2023 book. He might list some evidence}
 
 % Par 7
-% >>> C5 We should probably add some more arguments for the existence of internal models supported by vision.
-A bat with a visual representation of an environment and an inverse model for features available to both sonar and vision could engage in offline rehearsal of behaviours that will later be deployed by sonar alone. In other words, an inverse model for features shared across sonar and vision could support \emph{cross-modal vicarious learning}, i.e., training a behaviour through one modality and deploying it through another.
+A bat with a visual representation of an environment and an inverse model for features available to both sonar and vision could engage in offline rehearsal of behaviours that will later be deployed by sonar alone. In other words, an inverse model for features shared across sonar and vision could support \emph{cross-modal vicarious learning}, i.e., training a behaviour through one modality and deploying it through another. \cnote{5}{We should probably add some more arguments for the existence of internal models supported by vision.}
 
 % Par 8
 Cross-modal vicarious learning would specifically benefit sensory modalities with low informational throughput that are ill-suited to build a coherent environmental representation, such as whisking, sonar, or tactile sensing. Effectively, the representation built using the richer sensory modality (e.g., vision) can be used to train the animal in its use of the more proximate sense.
@@ -104,7 +111,28 @@ Finally, we demonstrate cross-modal vicarious learning. Assuming that the bat ha
 
 % Par 10
 
-In this paper, we do not claim to model any specific bat experimental finding. Instead, this paper presents a robotic demonstration of cross-modal inverse training and direct learning in echolocating bats, for which there is some evidence (see discussion). In addition, we also demonstrate how this, in turn, could support vicarious learning. Note that our robotic model operates in biologically plausible conditions in terms off environmental complexity and sensing noise. Moreover, its sonar system is limited compared biosonar of bats. We a narrowband emitter (as opposed to the broadband emssions typically used by bats in dense environments) which produces long pulses (as opossed to the very brief pulses bats would use under these conditions) at a fairly low carrier freqency (as opposed to the higher frequencies bats typocally use). Hence, successfully demonstrating these mechanisms under such constraints establishes that they are feasible for bats in principle, without claiming that bats actually employ them. 
+In this paper, we do not claim to model any specific bat experimental finding. Instead, this paper presents a robotic demonstration of cross-modal inverse training and direct learning in echolocating bats, for which there is some evidence (see discussion). In addition, we also demonstrate how this, in turn, could support vicarious learning. Note that our robotic model operates in biologically plausible conditions in terms off environmental complexity and sensing noise. Moreover, its sonar system is limited compared biosonar of bats. We a narrowband emitter (as opposed to the broadband emssions typically used by bats in dense environments) which produces long pulses (as opossed to the very brief pulses bats would use under these conditions) at a fairly low carrier freqency (as opposed to the higher frequencies bats typocally use). Hence, successfully demonstrating these mechanisms under such constraints establishes that they are feasible for bats in principle, without claiming that bats actually employ them.
+
+
+\section{Methods}
+
+\subsection{Arena and Robot}
+
+% Par 11
+The experiments reported below shared a common physical setup: a small wheeled robot operating inside a walled arena, under an overhead camera system that tracked its pose. The arena was approximately 3.5 by 3.5 m. The backing of the walls was formed by cardboard panels, each about 80 cm wide and about 30 cm high. Onto the cardboard, we glued foam tiles sold as decorative background for terraria. These panels had a variety of surface textures simulating different types of natural rock. The tiles were fixed to the cardboard with 5 cm gaps between them. The gaps and the textured tile surfaces together produced complex, overlapping reflections.
+
+The arena walls were light and could easily be repositioned so the arena layout could be reconfigured rapidly between data-collection runs. Sub-assemblies built from four panels fixed at right angles were also used as freestanding rectangular obstacles inside the arena. In addition to the panel walls and panel sub-assemblies, we used vertical poles as a second class of in-arena obstacle. Each pole was a wooden dowel of 25 mm diameter and approximately 60 cm height, held upright by a low-profile metal base so that it stood unaided on the floor. Poles could be placed anywhere within the arena. The arena floor consisted of interlocking high-density foam tiles with a smooth top surface, chosen to give the wheels reliable traction and to provide a uniform background contrast for the overhead tracker.
+
+% Par 14
+The robot was a Pololu 3pi+~2040 (Pololu Robotics \& Electronics, Las Vegas, NV), a commercially available differential-drive platform built around an RP2040 microcontroller (diameter: 90 mm). We added a HiLetgo ESP8266 ES Wi-Fi module so that all higher-level control logic could run off-board on a host computer, while the robot executed low-level motion and acoustic commands on request. Communication with the host was by JSON-framed messages over a TCP link.
+
+% Par 15
+Three MaxBotix MB1360 XL-MaxSonar-AEL0 ultrasonic transducers (MaxBotix Inc., Brainerd, MN) were mounted on the robot in a 3D-printed housing. Two transducers acted as left and right ``ears'': their centres sat 37 mm apart and each was angled outward by 15$^{\circ}$ in azimuth, so that their main axes diverged by 30$^{\circ}$. The third transducer was mounted on the midline, 15 mm below the ears, and pointed straight ahead; it acted as the emitter, or ``mouth''. Emissions were tone bursts at a carrier frequency of 42 kHz and a duration of approximately 2.5 ms. Each ear recorded the resulting echoes as the demodulated envelope, sampled by the robot's analogue-to-digital converters at 10 kHz for 200 samples per ping, i.e., a 20 ms acquisition window per ear.
+
+% Par 16
+The robot's pose in the arena was read out from an overhead camera system. Two ceiling-mounted cameras covered complementary halves of the arena with a strip of overlap near the centre. The robot carried a unique ArUco fiducial marker on its top plate, which the cameras detected frame by frame. Per-camera intrinsics were calibrated from images of a circular-dot calibration target; a homography was then fitted from a single image of a board placed on the floor, which fixed the world origin, the in-plane axis directions and the floor-plane pixel-to-millimetre scale for each camera. The two camera frames were aligned by measuring the in-plane offset between their floor-plane origins, so that one camera acted as the reference frame and the other's detections were translated into it by a fixed displacement. The output of this pipeline, queried at run time over a TCP link, was the robot's floor-plane position ($x$, $y$, in millimetres) and yaw angle, in a single shared coordinate frame across both cameras. The same coordinate frame was used by every component of the system, including the sonar-training labels, the trained policies, and the trajectory analyses presented later. The overhead camera system was also used to digitise the layout of the arena for each experiment. 
+
+%D: I think this might be too much detail. Commenting out for now Before a session, we captured a top-down warped view from each camera and stitched them into a shared arena grid. We then annotated each per-camera view by hand: green polylines traced the top edge of every panel wall, and blue marks indicated the top of every pole. Because each annotated pixel originated from a camera with a known pose, we back-projected it as a ray from the camera centre through the corresponding world point, and intersected that ray with the horizontal plane at the known feature height. The wall-top height was used for green pixels and the pole-top height for blue marks. Since panels and poles were both vertical, the intersection point was also the (X, Y) location of the feature's base on the floor. The procedure yielded a point cloud of wall samples and a list of pole centres for each arena configuration, expressed in the same coordinate frame as the live tracker output. This digitised geometry served as the ground-truth layout against which the sonar inverse was trained and against which the robot's deployed trajectories were evaluated. Annotating each camera's view separately, rather than annotating the stitched composite, avoided parallax artefacts: tall features such as poles cast slightly different apparent positions in the two camera views, and back-projecting each view through the correct feature height recovered the base coordinates without the averaging ghost that the stitched image carried. 
 
 
 \section{Discussion}
@@ -121,7 +149,7 @@ In this paper, we do not claim to model any specific bat experimental finding. I
 %     offline mental rehearsal of task behaviour against an internal
 %     representation. Conditions 1-7 (= direct + 6, 7).
 
-% Par 11
+% Par 18
 For cross-modal direct learning of a given task to be observed in an experiment, several conditions need to be jointly satisfied. They fall into three tiers: the framework's mechanism, the experimental conditions for observing it, and the additional conditions specific to vicarious learning beyond plain cross-modal direct learning. The framework's central operation, cross-modal inverse training, requires:
 %
 \begin{itemize}
@@ -130,7 +158,7 @@ For cross-modal direct learning of a given task to be observed in an experiment,
 \item[3] The other modality, the receiver, must have acquired an inverse model that recovers the feature from its raw sensory data using the supervisor's labels. This acquisition can happen developmentally through natural bimodal experience or during the training phase of an experiment.
 \end{itemize}
 
-% Par 12
+% Par 19
 Cross-modal inverse training (conditions 1-3) is not in itself observable in an experiment. For cross-modal direct learning to be observed, two further conditions must be satisfied:
 %
 \begin{itemize}
@@ -138,7 +166,7 @@ Cross-modal inverse training (conditions 1-3) is not in itself observable in an 
 \item[5] The animal must engage the receiver-side inverse at test rather than bypass it via a different strategy.
 \end{itemize}
 
-% Par 13
+% Par 20
 Cross-modal direct learning (conditions 1-5) is the observable deployment of a cross-modally trained inverse: the receiver modality engages the environment in real time, and the inverse makes the cross-modally accessible features available for task learning or performance. Cross-modal \emph{vicarious} learning of task behaviour additionally requires:
 %
 \begin{itemize}
@@ -146,32 +174,32 @@ Cross-modal direct learning (conditions 1-5) is the observable deployment of a c
 \item[7] The agent must engage in mental rehearsal of the task against this representation, generating imagined input for the receiver modality at arbitrary states of the world.
 \end{itemize}
 
-% Par 14
+% Par 21
 For bats, the inverse model for features encoded in both vision and sonar can be acquired at two distinct times, with different consequences for what an experiment can show. First, an inverse can be learned developmentally, through cumulative bimodal experience of natural environments. Bats often use sonar under conditions where vision is also available, and these instances provide the supervised cross-modal pairs the framework requires. The inverses formed this way are general and ecologically relevant. They cover features the animal regularly encounters across many environments, such as the presence and approximate distance of nearby obstacles, the coarse spatial layout of cluttered scenes, and the presence of familiar landmark types. Once developmentally acquired, these inverses are available to the bat in any subsequent task that probes the same features.
 
-% Par 15
+% Par 22
 Alternatively, an inverse can be acquired during the experiment itself, when the task hinges on features that are specific to the experimental setup, idiosyncratic, or otherwise not covered by the bat's developmental inverses. Finding a particular perch placed in an unfamiliar room is one such case; discriminating between two laboratory-fabricated targets is another. For these tasks, the framework's conditions for cross-modal inverse training must be satisfied within the experiment itself. Vision and sonar must be co-available and consistently paired during the training phase so that vision's labels can supervise the sonar-side inverse. If the experimental design suppresses or limits this co-availability, the new inverse cannot form.
 
-% Par 16
+% Par 23
 The two regimes carry different experimental signatures and call for different interpretations of negative results. Under the first regime, an experiment polls inverses the animal already possesses, and a failure to observe cross-modal performance suggests either that the animal did not deploy the inverse it has, or that the specific experimental setup falls outside the distribution the developmental inverse was trained on. Under the second regime, the experiment tests whether a new inverse can be acquired under the conditions provided, and a failure can reflect a violation of any of criteria 1 to 5. The bar an experiment must clear is therefore much higher under the second regime than under the first.
 
-% Par 17
+% Par 24
 This distinction has a corollary for experimental design. The more ecologically remote the task, the more its features fall outside any developmentally-formed inverse, and the more the experiment must itself do the work of establishing the new inverse. Tasks built around laboratory-fabricated targets, geometric discriminations bats would never encounter in the wild, or arbitrary perch-in-room mappings all sit in the second regime by construction. The probability of observing cross-modal direct learning in such tasks decreases accordingly, not because cross-modal direct learning is absent in bats but because the experiment is asking the bat to acquire a new inverse from scratch under whatever cross-modal supervision the design provides. Ecologically natural tasks, by contrast, can lean on inverses the animal has already formed; the experiment then needs only to probe whether the animal deploys them.
 
-% Par 18
+% Par 25
 The joint criteria are stringent. They are especially demanding in experiments where the bat has access to both modalities during training and is free to learn the task using any feature it finds, since the animal might converge on a strategy that does not engage the cross-modal route. Despite its potential adaptive value, convincing evidence for cross-modal direct learning in bats is lacking \citep[see also][]{Page2021}.
 
-% Par 19
+% Par 26
 \citet{Danilovich2019} report two experiments testing cross-modal direct learning using \animal{ra}. In the first experiment, bats learned to discriminate two shapes while having access to both vision and sonar. Next, they tested whether the bats could discriminate the objects using sonar alone. They found that the bats were unable to discriminate between the objects in the dark.
 This failure to demonstrate cross-modal direct learning might have been due to several criteria not being satisfied. First, with additional training in darkness, only one out of four bats was eventually able to complete the task using sonar. This indicates that the task might have been hard to complete acoustically, perhaps because task-relevant features cross-modally encoded at sufficient fidelity were not available (criterion 1), preventing the bats from learning or using an inverse model (criterion 3). In addition, during training with vision available, bats might have learned to use features of the objects that are not cross-modally available, leading to a failure during the testing phase when those features were removed (criterion 5).
 
-% Par 20
+% Par 27
 In a second experiment, \citet{Danilovich2019} trained \animal{ra} to discriminate between two textures using sonar. Next, they tested whether the bats could perform the task using vision. In a cleaner replication of the experiment, only one out of five bats managed this \citep[Round 2 in][]{Danilovich2019}. This limited cross-modal performance could again be explained by a failure to satisfy the criteria outlined above. Even if bats were able to perceive task-relevant features using both sonar and vision (criteria 1-3), they might have learned to use these, except for the successful individual, during the training (criterion 5).
 
-% Par 21
+% Par 28
 Similar limitations make findings of \citet{Holland2005} inconclusive. These authors trained \animal{ra} to find a hidden perch in light with sonar masked by ultrasonic noise, then tested in darkness with echolocation alone. Performance dropped and bats had to relearn finding the perch, which they were able to do. The authors interpreted the need to relearn as evidence of no transfer between the two sensory systems. However, as for the experiments reported by \citet{Danilovich2019}, experimental evidence supporting criterion 1 is lacking. More fundamentally, the masking-noise design invalidates criterion 3. With sonar suppressed during training, the supervised cross-modal pair the framework requires cannot form, and any task-specific inverse model for finding the perch in this room had no opportunity to be acquired. Pre-existing inverses developed through natural bimodal experience might have remained available, but they would not address the specific perch-in-this-room mapping the task probes.
 
-% Par 22
+% Par 29
 Even positive evidence needs to be scrutinised. \citet{Finger2025} trained one group of \animal{ra} to land on a fixed perch in light and a second only in darkness. The light-trained group later landed in darkness, while the dark-only group failed across many trials, with three of four bats never contacting the perch at all. \citet{Finger2025} interpret these findings as evidence for some form of cross-modal direct learning since bats that were first trained using sonar and vision managed to later find the perch using sonar alone while the sonar-only group did not. However, the two of three pretrained bats required substantial additional training when restricted to only using sonar. Hence, in these animals cross-modal direct learning must have been limited.
 
 
