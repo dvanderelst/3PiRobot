@@ -477,17 +477,22 @@ def ingest_real(run_dir: str):
 
     commanded = {"dθ_rad": dθ_rad, "dr_mm": dr_mm_}
 
-    # Walls for plotting — prefer arena_walls.npz (new per-camera extraction,
-    # matches the emulator training convention); otherwise fall back to the
-    # arena-bounds rectangle from meta.json.
+    # Walls for plotting — prefer arena_features.npz (per-camera back-projected
+    # walls + poles); otherwise fall back to the arena-bounds rectangle from
+    # meta.json. Pole points are excluded here because the SLAM plot wants
+    # wall geometry only.
     env_dirs = sorted(p for p in os.listdir(run_dir)
                       if p.startswith("env_") and os.path.isdir(os.path.join(run_dir, p)))
     walls = None
     if env_dirs:
-        npz_path = os.path.join(run_dir, env_dirs[0], "arena_walls.npz")
+        npz_path = os.path.join(run_dir, env_dirs[0], "arena_features.npz")
         if os.path.isfile(npz_path):
             data = np.load(npz_path)
-            walls = np.column_stack([data["x_mm"], data["y_mm"]]).astype(np.float32)
+            x_all = np.asarray(data["x_mm"])
+            y_all = np.asarray(data["y_mm"])
+            kind = np.asarray(data["kind"]) if "kind" in data.files else np.zeros_like(x_all, dtype=np.uint8)
+            wall_sel = kind == 0
+            walls = np.column_stack([x_all[wall_sel], y_all[wall_sel]]).astype(np.float32)
     if walls is None:
         bounds = None
         if env_dirs:

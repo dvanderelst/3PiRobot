@@ -81,14 +81,16 @@ def min_dist_segment_to_walls(p1, p2, walls) -> float:
 # ─── Arena loading ───────────────────────────────────────────────────────────
 
 def load_arena(arena_dir):
-    """Load wall point cloud and bounds from `<arena_dir>/env_*/`.
+    """Load feature point cloud + poles and bounds from `<arena_dir>/env_*/`.
 
     Picks the most recent env_* by name (which sorts by ISO timestamp),
     so re-snapshotting the arena into a fresh env_* folder takes effect
     without code changes. Returns a dict with keys:
-        walls   (N, 2) float32 array of wall points in world mm
-        bounds  dict with min_x, max_x, min_y, max_y
-        env_dir Path to the env folder used (for plot reference)
+        walls           (N, 2) float32 array of wall points in world mm
+        poles           (M, 2) float32 array of pole centres in world mm
+        pole_radius_mm  float, physical pole radius (0.0 if no poles)
+        bounds          dict with min_x, max_x, min_y, max_y
+        env_dir         Path to the env folder used (for plot reference)
     """
     arena_dir = Path(arena_dir)
     env_dirs = sorted(p for p in arena_dir.iterdir()
@@ -96,18 +98,31 @@ def load_arena(arena_dir):
     if not env_dirs:
         raise FileNotFoundError(f"No env_* subfolder under {arena_dir}")
     env_dir = env_dirs[-1]
-    walls_path = env_dir / "arena_walls.npz"
+    features_path = env_dir / "arena_features.npz"
     meta_path = env_dir / "meta.json"
-    if not walls_path.exists():
+    if not features_path.exists():
         raise FileNotFoundError(
-            f"{walls_path} not found — run SCRIPT_BuildArenaGeometry.py first")
+            f"{features_path} not found — run SCRIPT_BuildArenaGeometry.py first")
     if not meta_path.exists():
         raise FileNotFoundError(f"{meta_path} not found")
-    d = np.load(walls_path)
-    walls = np.column_stack([d["x_mm"], d["y_mm"]]).astype(np.float32)
+    d = np.load(features_path)
+    x_all = np.asarray(d["x_mm"], dtype=np.float32)
+    y_all = np.asarray(d["y_mm"], dtype=np.float32)
+    kind = np.asarray(d["kind"], dtype=np.uint8)
+    wall_mask = kind == 0
+    pole_mask = kind == 1
+    walls = np.column_stack([x_all[wall_mask], y_all[wall_mask]]).astype(np.float32)
+    poles = np.column_stack([x_all[pole_mask], y_all[pole_mask]]).astype(np.float32)
+    pole_radius_mm = float(d["pole_radius_mm"]) if "pole_radius_mm" in d.files else 0.0
     with open(meta_path) as f:
         meta = json.load(f)
-    return {"walls": walls, "bounds": meta["arena_bounds_mm"], "env_dir": env_dir}
+    return {
+        "walls": walls,
+        "poles": poles,
+        "pole_radius_mm": pole_radius_mm,
+        "bounds": meta["arena_bounds_mm"],
+        "env_dir": env_dir,
+    }
 
 
 # ─── Plan dataclass and IO ───────────────────────────────────────────────────
@@ -181,12 +196,16 @@ def yaw_set(n_yaws: int, rng) -> List[float]:
 
 # ─── Plan construction ───────────────────────────────────────────────────────
 
-def _find_feasible_start(walls, arena_path, clearance_mm, rng,
+def _find_feasible_start(walls, poles, pole_clearance_mm, arena_path,
+                         clearance_mm, rng,
                          max_tries: int = 2000) -> np.ndarray:
     for _ in range(max_tries):
         cand = _sample_in_polygon(arena_path, rng)
-        if min_dist_point_to_walls(cand, walls) >= clearance_mm:
-            return cand
+        if min_dist_point_to_walls(cand, walls) < clearance_mm:
+            continue
+        if poles.size and min_dist_point_to_walls(cand, poles) < pole_clearance_mm:
+            continue
+        return cand
     raise RuntimeError(
         f"Could not find a start position with clearance {clearance_mm:.0f} mm "
         f"inside the arena polygon after {max_tries} tries; arena may be too "
@@ -217,12 +236,18 @@ def build_plan(arena,
     """
     rng = np.random.default_rng(seed)
     walls = arena["walls"]
+    poles = arena.get("poles", np.empty((0, 2), dtype=np.float32))
+    pole_radius_mm = float(arena.get("pole_radius_mm", 0.0))
+    pole_clearance_mm = clearance_mm + pole_radius_mm
+
     arena_path = arena_polygon(walls)
 
-    rejections = {"position_clearance": 0,
-                  "min_step": 0, "min_neighbor": 0, "segment_clearance": 0}
+    rejections = {"position_clearance": 0, "pole_clearance": 0,
+                  "min_step": 0, "min_neighbor": 0,
+                  "segment_clearance": 0, "pole_segment": 0}
 
-    start = _find_feasible_start(walls, arena_path, clearance_mm, rng)
+    start = _find_feasible_start(walls, poles, pole_clearance_mm,
+                                 arena_path, clearance_mm, rng)
     positions: List[np.ndarray] = [start]
     yaws: List[List[float]] = [yaw_set(n_yaws, rng)]
 
@@ -234,6 +259,9 @@ def build_plan(arena,
             if min_dist_point_to_walls(cand, walls) < clearance_mm:
                 rejections["position_clearance"] += 1
                 continue
+            if poles.size and min_dist_point_to_walls(cand, poles) < pole_clearance_mm:
+                rejections["pole_clearance"] += 1
+                continue
             if np.linalg.norm(cand - positions[-1]) < min_step_mm:
                 rejections["min_step"] += 1
                 continue
@@ -243,6 +271,10 @@ def build_plan(arena,
                     continue
             if min_dist_segment_to_walls(positions[-1], cand, walls) < clearance_mm:
                 rejections["segment_clearance"] += 1
+                continue
+            if poles.size and min_dist_segment_to_walls(
+                    positions[-1], cand, poles) < pole_clearance_mm:
+                rejections["pole_segment"] += 1
                 continue
             positions.append(cand)
             yaws.append(yaw_set(n_yaws, rng))
@@ -255,9 +287,11 @@ def build_plan(arena,
 
     print(f"  rejections during build: "
           f"position={rejections['position_clearance']}, "
+          f"pole={rejections['pole_clearance']}, "
           f"min_step={rejections['min_step']}, "
           f"min_neighbor={rejections['min_neighbor']}, "
-          f"segment={rejections['segment_clearance']}")
+          f"segment={rejections['segment_clearance']}, "
+          f"pole_segment={rejections['pole_segment']}")
 
     return AcquisitionPlan(
         arena_name=arena_name,
@@ -279,6 +313,9 @@ def plot_plan(plan: AcquisitionPlan, arena, out_path) -> None:
     and waypoints coloured by min-wall-distance so close-wall coverage is
     obvious at a glance."""
     walls = arena["walls"]
+    poles = arena.get("poles", np.empty((0, 2), dtype=np.float32))
+    pole_radius_mm = float(arena.get("pole_radius_mm", 0.0))
+    pole_clearance_mm = plan.clearance_mm + pole_radius_mm
     bounds = arena["bounds"]
     env_dir = Path(arena["env_dir"])
 
@@ -308,6 +345,15 @@ def plot_plan(plan: AcquisitionPlan, arena, out_path) -> None:
     # Walls
     ax.scatter(walls[:, 0], walls[:, 1], s=0.6, c="black", alpha=0.35, zorder=1)
 
+    # Poles
+    if poles.size:
+        for px, py in poles:
+            ax.add_patch(plt.Circle(
+                (px, py), pole_radius_mm,
+                facecolor="#984ea3", edgecolor="black", linewidth=0.6,
+                alpha=0.85, zorder=2.2,
+            ))
+
     # Arena polygon (convex hull of walls; the planner's "inside" region)
     hull_path = arena_polygon(walls)
     hull_pts = hull_path.vertices
@@ -323,13 +369,17 @@ def plot_plan(plan: AcquisitionPlan, arena, out_path) -> None:
     if len(positions) >= 2:
         n_infeas = 0
         for i in range(len(positions) - 1):
-            d = min_dist_segment_to_walls(positions[i], positions[i + 1], walls)
-            colour = "#888" if d >= plan.clearance_mm else "#d62728"
-            lw = 0.8 if d >= plan.clearance_mm else 2.0
-            alpha = 0.55 if d >= plan.clearance_mm else 0.95
+            d_wall = min_dist_segment_to_walls(positions[i], positions[i + 1], walls)
+            feasible = d_wall >= plan.clearance_mm
+            if feasible and poles.size:
+                d_pole = min_dist_segment_to_walls(positions[i], positions[i + 1], poles)
+                feasible = d_pole >= pole_clearance_mm
+            colour = "#888" if feasible else "#d62728"
+            lw = 0.8 if feasible else 2.0
+            alpha = 0.55 if feasible else 0.95
             ax.plot(positions[i:i + 2, 0], positions[i:i + 2, 1],
                     color=colour, alpha=alpha, linewidth=lw, zorder=2)
-            if d < plan.clearance_mm:
+            if not feasible:
                 n_infeas += 1
         if n_infeas > 0:
             ax.text(0.02, 0.98, f"WARNING: {n_infeas} infeasible leg(s)",
@@ -404,6 +454,8 @@ def reorder_tour(plan: AcquisitionPlan, arena) -> AcquisitionPlan:
     case at O(n²) checks rather than per-step recomputation.
     """
     walls = arena["walls"]
+    poles = arena.get("poles", np.empty((0, 2), dtype=np.float32))
+    pole_clearance_mm = plan.clearance_mm + float(arena.get("pole_radius_mm", 0.0))
     positions = np.asarray(plan.positions, dtype=np.float64)
     n = positions.shape[0]
     if n <= 2:
@@ -414,8 +466,12 @@ def reorder_tour(plan: AcquisitionPlan, arena) -> AcquisitionPlan:
     def is_feasible(i: int, j: int) -> bool:
         key = (i, j) if i < j else (j, i)
         if key not in feas_cache:
-            d = min_dist_segment_to_walls(positions[i], positions[j], walls)
-            feas_cache[key] = d >= plan.clearance_mm
+            d_wall = min_dist_segment_to_walls(positions[i], positions[j], walls)
+            ok = d_wall >= plan.clearance_mm
+            if ok and poles.size:
+                d_pole = min_dist_segment_to_walls(positions[i], positions[j], poles)
+                ok = d_pole >= pole_clearance_mm
+            feas_cache[key] = ok
         return feas_cache[key]
 
     visited = [0]

@@ -11,8 +11,11 @@ Differences from the legacy DataProcessor pipeline:
     alongside `sonar_package`, not from a separate `position` field. If the
     tracker missed at ping time we fall back to the planned pose.
   - Ground-truth profile is computed at load time from the session's copy
-    of arena_walls.npz + the executed pose; we don't precompute and stash
-    profiles. Cost is negligible at SonarModel-training data sizes.
+    of arena_features.npz (wall points only) + the executed pose; we don't
+    precompute and stash profiles. Cost is negligible at SonarModel-training
+    data sizes. Poles in arena_features.npz are ignored here — the legacy
+    SonarModel is a wall-only profile predictor; pole-aware label generation
+    for the two-headed inverse lives in a separate (future) loader.
   - Quadrants for train/val split are by sign of (x − x_med, y − y_med)
     inside each session, so each session's held-out quadrant carries
     roughly 25% of its pings regardless of the arena's shape.
@@ -55,17 +58,27 @@ def _read_ping(path: Path) -> dict:
 
 
 def _load_walls_for_session(session_dir: Path) -> np.ndarray:
-    """Load arena_walls.npz for this session.
+    """Load wall points from arena_features.npz for this session.
 
     Preferred location is the session root itself (newer runs copy the file in
     so each session is self-contained). For older sessions that predate the
     auto-copy, fall back to the arena referenced in `session_meta.json`,
-    walking its env_*/ subfolder for the walls file.
+    walking its env_*/ subfolder for the features file.
+
+    Pole entries (kind == 1) are filtered out: this loader feeds the wall-only
+    SonarModel training pipeline.
     """
-    walls_path = session_dir / "arena_walls.npz"
-    if walls_path.exists():
-        d = np.load(walls_path)
-        return np.column_stack([d["x_mm"], d["y_mm"]]).astype(np.float32)
+    def _walls_from_npz(path: Path) -> np.ndarray:
+        d = np.load(path)
+        x_all = np.asarray(d["x_mm"])
+        y_all = np.asarray(d["y_mm"])
+        kind = np.asarray(d["kind"]) if "kind" in d.files else np.zeros_like(x_all, dtype=np.uint8)
+        wall_sel = kind == 0
+        return np.column_stack([x_all[wall_sel], y_all[wall_sel]]).astype(np.float32)
+
+    features_path = session_dir / "arena_features.npz"
+    if features_path.exists():
+        return _walls_from_npz(features_path)
 
     meta_path = session_dir / "session_meta.json"
     if meta_path.exists():
@@ -77,13 +90,12 @@ def _load_walls_for_session(session_dir: Path) -> np.ndarray:
             env_dirs = sorted(p for p in arena_dir.iterdir()
                               if p.is_dir() and p.name.startswith("env_"))
             for env in reversed(env_dirs):  # newest first
-                wp = env / "arena_walls.npz"
+                wp = env / "arena_features.npz"
                 if wp.exists():
-                    d = np.load(wp)
-                    return np.column_stack([d["x_mm"], d["y_mm"]]).astype(np.float32)
+                    return _walls_from_npz(wp)
 
     raise FileNotFoundError(
-        f"arena_walls.npz not found in {session_dir} or via session_meta.json's "
+        f"arena_features.npz not found in {session_dir} or via session_meta.json's "
         f"arena_dir reference."
     )
 

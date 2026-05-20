@@ -1,12 +1,16 @@
 """
 Build a sampling plan for vision-guided sonar data acquisition in a target arena.
 
-Reads AcquisitionArenas/<ARENA_NAME>/env_*/arena_walls.npz (most recent env_*),
-samples a tour of feasible (x, y) waypoints subject to:
-  - position clearance: each waypoint >= CLEARANCE_MM from any wall
+Reads AcquisitionArenas/<ARENA_NAME>/env_*/arena_features.npz (most recent env_*),
+which carries both wall points and pole centres + radius. Samples a tour of
+feasible (x, y) waypoints subject to:
+  - wall clearance:     each waypoint and each segment stays >= CLEARANCE_MM
+                        from any wall point
+  - pole clearance:     each waypoint and each segment stays
+                        >= CLEARANCE_MM + pole_radius_mm from any pole centre
   - step length:        each new waypoint >= MIN_STEP_MM from its predecessor
-  - segment clearance:  the straight line connecting consecutive waypoints
-                        stays >= CLEARANCE_MM from every wall
+  - neighbour spacing:  each new waypoint >= MIN_NEIGHBOR_MM from every prior
+                        waypoint (spreads coverage)
 
 Writes plan_<timestamp>.json (full spec) and plan_<timestamp>.png (diagnostic
 plot) into AcquisitionArenas/<ARENA_NAME>/plans/. Run multiple times and

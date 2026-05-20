@@ -165,6 +165,23 @@ def read_wall_mask(image_path, ref_rgb=(46, 194, 126), tol=35):
     return mask_u8.astype(bool)
 
 
+def read_pole_mask(image_path, ref_rgb=(53, 132, 228), tol=50):
+    # Looser tolerance than walls because pole annotations are hand-dabbed
+    # blobs, not pen lines — colour varies more across a single blob.
+    img_bgr = cv2.imread(str(image_path))
+    if img_bgr is None:
+        raise FileNotFoundError(f"Could not read image from {image_path}")
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.int16)
+    ref = np.array(ref_rgb, dtype=np.int16)
+    dist = np.linalg.norm(img_rgb - ref, axis=2)
+    mask = dist <= tol
+    mask_u8 = (mask.astype(np.uint8) * 255)
+    kernel = np.ones((3, 3), np.uint8)
+    mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
+    mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
+    return mask_u8.astype(bool)
+
+
 def read_path_mask(image_path, ref_rgb=(220, 40, 40), tol=80):  # distance threshold in RGB space
     min_area = 20
     max_area = 2000
@@ -206,13 +223,15 @@ def read_path_mask(image_path, ref_rgb=(220, 40, 40), tol=80):  # distance thres
 def load_arena_masks(data_reader):
     """Return (wall_x, wall_y, path_mask, meta) for the env folder.
 
-    Wall geometry comes from ``arena_walls.npz`` when present (produced by
+    Wall geometry comes from ``arena_features.npz`` when present (produced by
     SCRIPT_BuildArenaGeometry.py from per-camera annotations, avoiding the
-    stitching-ghost problem of the legacy single-image annotation). Falls
-    back to extracting green pixels from ``arena_annotated.png`` otherwise.
-    The path mask is read from ``arena_annotated.png`` when that file exists
-    and is used only by trajectory plotting; if the file is missing the path
-    mask is empty.
+    stitching-ghost problem of the legacy single-image annotation). Pole
+    entries (kind == 1) are filtered out — this loader is wall-only by
+    contract; downstream pole-aware consumers read arena_features.npz
+    directly. Falls back to extracting green pixels from ``arena_annotated.png``
+    otherwise. The path mask is read from ``arena_annotated.png`` when that
+    file exists and is used only by trajectory plotting; if the file is
+    missing the path mask is empty.
     """
     base_folder = data_reader.base_folder if is_data_reader(data_reader) else str(data_reader)
     base_folder = Path(base_folder)
@@ -221,12 +240,16 @@ def load_arena_masks(data_reader):
     meta_path = env_dir / "meta.json"
     meta = json.load(open(meta_path))
 
-    walls_npz = env_dir / "arena_walls.npz"
+    features_npz = env_dir / "arena_features.npz"
     annotation_path = env_dir / "arena_annotated.png"
-    if walls_npz.exists():
-        data = np.load(walls_npz)
-        wall_x = data["x_mm"].astype(float)
-        wall_y = data["y_mm"].astype(float)
+    if features_npz.exists():
+        data = np.load(features_npz)
+        x_all = np.asarray(data["x_mm"])
+        y_all = np.asarray(data["y_mm"])
+        kind = np.asarray(data["kind"]) if "kind" in data.files else np.zeros_like(x_all, dtype=np.uint8)
+        wall_sel = kind == 0
+        wall_x = x_all[wall_sel].astype(float)
+        wall_y = y_all[wall_sel].astype(float)
     else:
         wall_mask = read_wall_mask(annotation_path)
         wall_x, wall_y = mask2coordinates(wall_mask, meta)

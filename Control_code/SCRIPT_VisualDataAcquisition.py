@@ -23,7 +23,7 @@ Per-ping artifact (one DataWriter file per ping):
     nav_yaw_err_deg    final yaw error (deg)
 
 Ground-truth profiles are NOT computed at acquisition time — they're
-deterministic given `(executed_pose, arena_walls)`, and computing offline
+deterministic given `(executed_pose, arena_features)`, and computing offline
 keeps the session decoupled from any future change to profile geometry.
 """
 

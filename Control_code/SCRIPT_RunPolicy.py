@@ -171,14 +171,14 @@ def _install_training_walls(arena: str, deploy_env_dir: str) -> None:
                          and os.path.isdir(os.path.join(src_root, d)))
     if not env_subdirs:
         raise FileNotFoundError(f"No env_* folder under {src_root}")
-    src_env   = os.path.join(src_root, env_subdirs[-1])
-    src_walls = os.path.join(src_env, "arena_walls.npz")
-    if not os.path.exists(src_walls):
-        raise FileNotFoundError(f"arena_walls.npz not found in {src_env}")
+    src_env      = os.path.join(src_root, env_subdirs[-1])
+    src_features = os.path.join(src_env, "arena_features.npz")
+    if not os.path.exists(src_features):
+        raise FileNotFoundError(f"arena_features.npz not found in {src_env}")
 
-    dst_walls = os.path.join(deploy_env_dir, "arena_walls.npz")
-    shutil.copy(src_walls, dst_walls)
-    print(f"Copied training arena walls: {src_walls} → {dst_walls}")
+    dst_features = os.path.join(deploy_env_dir, "arena_features.npz")
+    shutil.copy(src_features, dst_features)
+    print(f"Copied training arena features: {src_features} → {dst_features}")
 
     meta_path = os.path.join(deploy_env_dir, "meta.json")
     arena_png = os.path.join(deploy_env_dir, "arena.png")
@@ -193,25 +193,46 @@ def _install_training_walls(arena: str, deploy_env_dir: str) -> None:
     min_x     = float(bounds["min_x"])
     max_y     = float(bounds["max_y"])
 
-    walls = np.load(dst_walls)
-    wx, wy = walls["x_mm"], walls["y_mm"]
+    features = np.load(dst_features)
+    x_all = np.asarray(features["x_mm"])
+    y_all = np.asarray(features["y_mm"])
+    kind  = np.asarray(features["kind"]) if "kind" in features.files else np.zeros_like(x_all, dtype=np.uint8)
+    wall_sel = kind == 0
+    pole_sel = kind == 1
+    wx, wy = x_all[wall_sel], y_all[wall_sel]
+    px, py = x_all[pole_sel], y_all[pole_sel]
+    pole_radius_mm = float(features["pole_radius_mm"]) if "pole_radius_mm" in features.files else 25.0
+
     # Inverse of mask2coordinates pixel-centre convention (X = min_x + (c+0.5)·mm_per_px).
-    col = (wx - min_x) / mm_per_px - 0.5
-    row = (max_y - wy) / mm_per_px - 0.5
+    def world_to_pixel(x, y):
+        c = (x - min_x) / mm_per_px - 0.5
+        r = (max_y - y) / mm_per_px - 0.5
+        return c, r
+
+    wall_col, wall_row = world_to_pixel(wx, wy)
 
     img = plt.imread(arena_png)
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.imshow(img)
-    ax.scatter(col, row, color="lime", s=2, alpha=0.6, label="training walls")
-    ax.set_title(f"{arena}: training walls over current arena view "
+    ax.scatter(wall_col, wall_row, color="lime", s=2, alpha=0.6, label="training walls")
+    if px.size:
+        pole_col, pole_row = world_to_pixel(px, py)
+        radius_px = pole_radius_mm / mm_per_px
+        for c, r in zip(pole_col, pole_row):
+            ax.add_patch(plt.Circle((c, r), radius_px,
+                                    facecolor="#984ea3", edgecolor="black",
+                                    linewidth=0.6, alpha=0.85))
+        ax.scatter([], [], s=40, c="#984ea3", edgecolor="black", linewidth=0.6,
+                   label=f"poles (n={px.size})")
+    ax.set_title(f"{arena}: training features over current arena view "
                  f"(boxes should align with green points)")
     ax.legend(loc="best")
     ax.set_axis_off()
     fig.tight_layout()
-    out_path = os.path.join(deploy_env_dir, "arena_walls_overlay.png")
+    out_path = os.path.join(deploy_env_dir, "arena_features_overlay.png")
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-    print(f"Wrote walls overlay: {out_path}")
+    print(f"Wrote features overlay: {out_path}")
 
 
 control = PauseControl.PauseControl()
@@ -225,19 +246,32 @@ _install_training_walls(ARENA, snapshot["rundir"])
 CodeLogger.log_code(f"{DATA_FOLDER}/{SESSION}", [".", "Library"], label=SESSION)
 
 
-# Arena walls for live trajectory plotting
+# Arena features for live trajectory plotting (walls + poles)
 _arena_walls_x = None
 _arena_walls_y = None
+_arena_poles_x = None
+_arena_poles_y = None
+_arena_pole_radius_mm = 25.0
 _env_dir = snapshot.get("rundir")
 if _env_dir:
-    _walls_path = os.path.join(_env_dir, "arena_walls.npz")
-    if os.path.exists(_walls_path):
-        _w = np.load(_walls_path)
-        _arena_walls_x = _w["x_mm"]
-        _arena_walls_y = _w["y_mm"]
-        print(f"Arena walls loaded: {len(_arena_walls_x)} points from {_walls_path}")
+    _features_path = os.path.join(_env_dir, "arena_features.npz")
+    if os.path.exists(_features_path):
+        _f = np.load(_features_path)
+        _x_all = np.asarray(_f["x_mm"])
+        _y_all = np.asarray(_f["y_mm"])
+        _kind = np.asarray(_f["kind"]) if "kind" in _f.files else np.zeros_like(_x_all, dtype=np.uint8)
+        _wall_sel = _kind == 0
+        _pole_sel = _kind == 1
+        _arena_walls_x = _x_all[_wall_sel]
+        _arena_walls_y = _y_all[_wall_sel]
+        _arena_poles_x = _x_all[_pole_sel]
+        _arena_poles_y = _y_all[_pole_sel]
+        if "pole_radius_mm" in _f.files:
+            _arena_pole_radius_mm = float(_f["pole_radius_mm"])
+        print(f"Arena features loaded: {len(_arena_walls_x)} wall pts, "
+              f"{len(_arena_poles_x)} poles from {_features_path}")
     else:
-        print("No arena_walls.npz found — trajectory plot will show path only")
+        print("No arena_features.npz found — trajectory plot will show path only")
 
 _traj_x:   list = []
 _traj_y:   list = []
@@ -358,6 +392,13 @@ def _save_trajectory_plot() -> None:
     if _arena_walls_x is not None:
         ax.scatter(_arena_walls_x, _arena_walls_y,
                    color="green", s=2, alpha=0.3, label="Walls")
+    if _arena_poles_x is not None and len(_arena_poles_x):
+        for px, py in zip(_arena_poles_x, _arena_poles_y):
+            ax.add_patch(plt.Circle((px, py), _arena_pole_radius_mm,
+                                    facecolor="#984ea3", edgecolor="black",
+                                    linewidth=0.6, alpha=0.7))
+        ax.scatter([], [], s=40, c="#984ea3", edgecolor="black",
+                   linewidth=0.6, label="Poles")
     ax.plot(xs, ys, color="black", alpha=0.5, linewidth=1, label="Trajectory")
     ax.scatter(xs, ys, color="blue", s=15, zorder=3)
     for i, (x, y) in enumerate(zip(xs, ys)):
@@ -511,6 +552,11 @@ def _preview_rollouts(start_pose, n=PREVIEW_N, n_steps=PREVIEW_STEPS,
     if _arena_walls_x is not None:
         ax.scatter(_arena_walls_x, _arena_walls_y, color="green", s=2, alpha=0.3,
                    label="walls")
+    if _arena_poles_x is not None and len(_arena_poles_x):
+        for px, py in zip(_arena_poles_x, _arena_poles_y):
+            ax.add_patch(plt.Circle((px, py), _arena_pole_radius_mm,
+                                    facecolor="#984ea3", edgecolor="black",
+                                    linewidth=0.6, alpha=0.6))
     end_counts = {"ok": 0, "collision": 0, "profile_fail": 0}
     rot_gains:   List[float] = []
     drive_gains: List[float] = []

@@ -2,7 +2,8 @@
 """
 SCRIPT_BuildArenaGeometry.py
 
-Build a per-env wall geometry artifact from per-camera annotated images.
+Build a per-env arena-features artifact (walls + poles) from per-camera
+annotated images.
 
 Motivation
 ----------
@@ -10,40 +11,45 @@ The stitched arena image (arena.png) averages overlapping pixels from the two
 cameras, which produces visible ghosting for tall obstacles that aren't on the
 floor plane. Annotating that stitched image bakes the ghost into the training
 geometry. Annotating each camera's individual top-down warp separately, and
-back-projecting the annotations through the z = WALL_HEIGHT_MM plane using each
+back-projecting the annotations through the appropriate height plane using each
 camera's calibration, avoids the averaging artifact and correctly recovers the
-wall base coordinates even when the base is occluded in the image.
+base coordinates of vertical features even when the base is occluded in the
+image.
 
 Annotation convention
 ---------------------
-Draw green polylines along the **wall tops** on arena_{cam}_mask.png and save as
-arena_{cam}_annotated.png. The builder back-projects each green pixel through
-z = WALL_HEIGHT_MM to recover the (X, Y) of the wall at that height; because
-walls are vertical, that equals the base (X, Y).
+On arena_{cam}_annotated.png:
+  - **Green polylines** trace the wall tops. Each green pixel is back-projected
+    through z = WALL_HEIGHT_MM to recover (X, Y) at that height; because walls
+    are vertical, that equals the base (X, Y).
+  - **Blue dabs** mark the top of each cardboard pole. Each connected blue blob
+    is reduced to one centroid (pixel space) and back-projected through
+    z = POLE_HEIGHT_MM to recover the pole's (X, Y) at the top, which for a
+    vertical pole equals its base (X, Y). Centroids visible from both cameras
+    are merged across cameras (cluster radius POLE_MERGE_RADIUS_MM).
 
 Input per env folder
 --------------------
-    arena_shark_annotated.png    green polylines drawn on arena_shark_mask.png
-    arena_tiger_annotated.png    green polylines drawn on arena_tiger_mask.png
+    arena_shark_annotated.png    green polylines + blue dabs on arena_shark_mask.png
+    arena_tiger_annotated.png    green polylines + blue dabs on arena_tiger_mask.png
 
-At least one must exist. Both are optional — if only one camera's annotation
-is available, the output contains only that camera's walls.
+At least one must exist. Both are optional. Either the green or blue layer
+can be absent on a given camera.
 
 Output per env folder
 ---------------------
-    arena_walls.npz    keys:
-        x_mm           (N,) float32   wall x-coordinates in world mm
-        y_mm           (N,) float32   wall y-coordinates in world mm
-        source_camera  (N,) uint8     0 = shark, 1 = tiger
-    arena_walls_plot.png   diagnostic overlay: new per-camera points on the
-                           stitched arena image, with legacy annotation for
-                           visual comparison when available.
+    arena_features.npz    keys:
+        x_mm           (N,) float32   feature x-coordinates in world mm
+        y_mm           (N,) float32   feature y-coordinates in world mm
+        kind           (N,) uint8     0 = wall point, 1 = pole centre
+        source_camera  (N,) uint8     0 = shark, 1 = tiger, 255 = merged (poles only)
+        pole_radius_mm scalar float32 physical pole radius (carried for downstream
+                                      clearance and labelling)
+    arena_features_plot.png    diagnostic overlay: per-camera wall points and
+                               merged pole centres on the stitched arena image.
     calibration/pose_{cam}.npz, pose_{cam}.json
         snapshotted camera calibration (K, R, t, H_img2mm) — copied in on first
         build so each env folder is a self-contained geometry record.
-
-Downstream (DataProcessor.load_arena_masks) prefers arena_walls.npz over the
-legacy arena_annotated.png path when present.
 """
 
 import os
@@ -56,10 +62,11 @@ import json
 import matplotlib
 if not os.environ.get("DISPLAY") and os.name != "nt":
     matplotlib.use("Agg")
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
-from Library.DataProcessor import read_wall_mask, mask2coordinates
+from Library.DataProcessor import read_wall_mask, read_pole_mask, mask2coordinates
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -80,6 +87,21 @@ ROOTS: List[str] = [
 # Wall height (mm) — used to back-project annotated wall tops to their (X, Y)
 # location. Walls are vertical, so top (X, Y) = base (X, Y).
 WALL_HEIGHT_MM: float = 295.0
+
+# Pole height (mm) — height of the cardboard poles whose tops are marked with
+# blue dabs. Same back-projection logic as walls but at this height.
+POLE_HEIGHT_MM: float = 610.0
+
+# Pole radius (mm) — physical radius of the cardboard pole. Carried into the
+# arena_features.npz output so downstream consumers (planner clearance,
+# nearest-reflector labelling) don't have to hard-code it.
+POLE_RADIUS_MM: float = 25.0
+
+# Cross-camera merge radius (mm) — pole centroids from different cameras whose
+# back-projected (X, Y) are within this distance are merged into a single pole
+# at their mean position. 2 × POLE_RADIUS_MM is a comfortable margin for
+# typical calibration residuals.
+POLE_MERGE_RADIUS_MM: float = 50.0
 
 # Source of per-camera calibration (pose_{cam}.npz, pose_{cam}.json). Copied
 # into each env folder's calibration/ subdir on first build. Subsequent builds
@@ -146,31 +168,25 @@ def load_camera_calibration(calibration_dir: Path, camera: str) -> Dict[str, np.
 
 # ─── Geometry helpers ────────────────────────────────────────────────────────
 
-def backproject_annotation(
-    annotated_path: Path,
+def _pixels_to_world_at_height(
+    cols: np.ndarray,
+    rows: np.ndarray,
     calibration: Dict[str, np.ndarray],
     meta: dict,
     offset_xy: Optional[Tuple[float, float]],
-    wall_height_mm: float,
+    height_mm: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract green pixels from *annotated_path* and return their (X, Y) in world mm.
+    """Back-project annotated arena pixels to world (X, Y) at z = height_mm.
 
     Pipeline:
-      1. Each green arena pixel → (X_0, Y_0, 0) world mm via the arena-grid
-         affine (same as mask2coordinates — this is correct by construction in
-         the unified/tiger frame; shark's offset is already baked into the grid).
+      1. Each arena pixel → (X_0, Y_0, 0) world mm via the arena-grid affine
+         (same as mask2coordinates — correct by construction in the unified
+         /tiger frame; shark's offset is already baked into the grid).
       2. Camera centre C_world (from R, t) is translated into the same unified
          frame by adding the shark offset when applicable.
       3. Parametric ray P(λ) = C + λ(A − C) with A = (X_0, Y_0, 0); solve for
-         the λ that gives P.z = wall_height_mm and evaluate (P.x, P.y).
+         the λ that gives P.z = height_mm and evaluate (P.x, P.y).
     """
-    wall_mask = read_wall_mask(annotated_path)
-    rows, cols = np.nonzero(wall_mask)
-    if rows.size == 0:
-        return np.empty(0, np.float32), np.empty(0, np.float32)
-
-    # Step 1: arena pixel → (X_0, Y_0) at z=0 in the unified/arena frame.
-    # Matches mask2coordinates exactly (including the +0.5 pixel-centre offset).
     bounds = meta["arena_bounds_mm"]
     min_x = float(bounds["min_x"])
     max_y = float(bounds["max_y"])
@@ -178,24 +194,99 @@ def backproject_annotation(
     X0 = min_x + cols * mm_per_px + 0.5 * mm_per_px
     Y0 = max_y - rows * mm_per_px + 0.5 * mm_per_px
 
-    # Step 2: camera centre in the unified frame.
-    C = calibration["C_world"].copy()  # in the camera's own world frame
+    C = calibration["C_world"].copy()
     if offset_xy is not None:
         C[0] += offset_xy[0]
         C[1] += offset_xy[1]
 
-    # Step 3: ray interpolation to z = wall_height_mm.
-    # P(λ) = C + λ (A − C).  P.z = C_z + λ (0 − C_z) = wall_height_mm
-    #   ⇒ λ = 1 − wall_height_mm / C_z
     if C[2] <= 0:
         raise ValueError(
             f"Camera Z ({C[2]:.1f} mm) must be above the floor for back-projection."
         )
-    lam = 1.0 - wall_height_mm / C[2]
+    # P(λ) = C + λ (A − C). P.z = C_z + λ (0 − C_z) = height_mm
+    #   ⇒ λ = 1 − height_mm / C_z
+    lam = 1.0 - height_mm / C[2]
     Xh = C[0] + lam * (X0 - C[0])
     Yh = C[1] + lam * (Y0 - C[1])
-
     return Xh.astype(np.float32), Yh.astype(np.float32)
+
+
+def backproject_walls(
+    annotated_path: Path,
+    calibration: Dict[str, np.ndarray],
+    meta: dict,
+    offset_xy: Optional[Tuple[float, float]],
+    wall_height_mm: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract green pixels from *annotated_path* and return their (X, Y) in world mm."""
+    wall_mask = read_wall_mask(annotated_path)
+    rows, cols = np.nonzero(wall_mask)
+    if rows.size == 0:
+        return np.empty(0, np.float32), np.empty(0, np.float32)
+    return _pixels_to_world_at_height(cols, rows, calibration, meta, offset_xy, wall_height_mm)
+
+
+def backproject_poles(
+    annotated_path: Path,
+    calibration: Dict[str, np.ndarray],
+    meta: dict,
+    offset_xy: Optional[Tuple[float, float]],
+    pole_height_mm: float,
+    min_blob_area_px: int = 5,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Find blue blobs on *annotated_path*, take centroid per blob, back-project
+    each centroid through z = pole_height_mm. Returns (X_mm, Y_mm) per pole as
+    seen by this camera (cross-camera merge happens upstream).
+
+    Blobs smaller than `min_blob_area_px` are dropped as paint speckle.
+    """
+    pole_mask = read_pole_mask(annotated_path)
+    if not pole_mask.any():
+        return np.empty(0, np.float32), np.empty(0, np.float32)
+
+    n_labels, _labels, stats, centroids = cv2.connectedComponentsWithStats(
+        pole_mask.astype(np.uint8), connectivity=8
+    )
+    # Label 0 is background — skip it.
+    if n_labels <= 1:
+        return np.empty(0, np.float32), np.empty(0, np.float32)
+
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    keep = areas >= min_blob_area_px
+    if not keep.any():
+        return np.empty(0, np.float32), np.empty(0, np.float32)
+
+    cx = centroids[1:, 0][keep]  # column (float)
+    cy = centroids[1:, 1][keep]  # row (float)
+    return _pixels_to_world_at_height(cx, cy, calibration, meta, offset_xy, pole_height_mm)
+
+
+def merge_pole_centroids(
+    xs: np.ndarray, ys: np.ndarray, merge_radius_mm: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Greedy single-pass clustering: any centroid within *merge_radius_mm* of
+    an existing cluster centre joins that cluster (centre updated to the mean
+    of its members). Returns (x_merged, y_merged).
+
+    With only a handful of poles per arena this is O(N·K) and trivially fast.
+    """
+    if xs.size == 0:
+        return xs, ys
+    clusters: List[List[Tuple[float, float]]] = []
+    for x, y in zip(xs.astype(np.float64), ys.astype(np.float64)):
+        joined = False
+        for c in clusters:
+            cx = float(np.mean([p[0] for p in c]))
+            cy = float(np.mean([p[1] for p in c]))
+            if (x - cx) ** 2 + (y - cy) ** 2 <= merge_radius_mm ** 2:
+                c.append((x, y))
+                joined = True
+                break
+        if not joined:
+            clusters.append([(x, y)])
+    out_x = np.array([np.mean([p[0] for p in c]) for c in clusters], dtype=np.float32)
+    out_y = np.array([np.mean([p[1] for p in c]) for c in clusters], dtype=np.float32)
+    return out_x, out_y
 
 
 # ─── Build per env ───────────────────────────────────────────────────────────
@@ -240,17 +331,19 @@ def camera_offset(camera: str) -> Optional[Tuple[float, float]]:
     return None
 
 
-def build_walls_for_env(env_dir: Path, pylorex_calib_dir: Path) -> Optional[Path]:
-    """Build arena_walls.npz in *env_dir* from per-camera annotated images.
+def build_features_for_env(env_dir: Path, pylorex_calib_dir: Path) -> Optional[Path]:
+    """Build arena_features.npz in *env_dir* from per-camera annotated images.
 
     Returns the output path on success, None if no annotated image was found.
     """
     meta = load_meta(env_dir)
     calibration_dir = ensure_calibration_snapshot(env_dir, pylorex_calib_dir)
 
-    xs_parts: List[np.ndarray] = []
-    ys_parts: List[np.ndarray] = []
-    src_parts: List[np.ndarray] = []
+    wall_xs_parts: List[np.ndarray] = []
+    wall_ys_parts: List[np.ndarray] = []
+    wall_src_parts: List[np.ndarray] = []
+    pole_xs_per_cam: List[np.ndarray] = []
+    pole_ys_per_cam: List[np.ndarray] = []
     found_cameras: List[str] = []
 
     for camera, code in CAMERA_CODES.items():
@@ -258,33 +351,83 @@ def build_walls_for_env(env_dir: Path, pylorex_calib_dir: Path) -> Optional[Path
         if not ann_path.exists():
             continue
         calibration = load_camera_calibration(calibration_dir, camera)
-        x_mm, y_mm = backproject_annotation(
-            ann_path, calibration, meta, camera_offset(camera), WALL_HEIGHT_MM
-        )
-        if x_mm.size == 0:
-            print(f"    {camera}: {ann_path.name} found but no green pixels")
-            continue
-        xs_parts.append(x_mm)
-        ys_parts.append(y_mm)
-        src_parts.append(np.full(x_mm.shape, code, dtype=np.uint8))
-        found_cameras.append(camera)
-        print(f"    {camera}: {x_mm.size:,} wall points")
+        offset = camera_offset(camera)
 
-    if not xs_parts:
-        print(f"    no annotated per-camera images found in {env_dir.name}")
+        wx, wy = backproject_walls(ann_path, calibration, meta, offset, WALL_HEIGHT_MM)
+        if wx.size:
+            wall_xs_parts.append(wx)
+            wall_ys_parts.append(wy)
+            wall_src_parts.append(np.full(wx.shape, code, dtype=np.uint8))
+            print(f"    {camera}: {wx.size:,} wall points")
+        else:
+            print(f"    {camera}: no green wall pixels")
+
+        px, py = backproject_poles(ann_path, calibration, meta, offset, POLE_HEIGHT_MM)
+        if px.size:
+            pole_xs_per_cam.append(px)
+            pole_ys_per_cam.append(py)
+            print(f"    {camera}: {px.size} pole blob(s)")
+        else:
+            print(f"    {camera}: no blue pole blobs")
+
+        found_cameras.append(camera)
+
+    if not wall_xs_parts and not pole_xs_per_cam:
+        print(f"    no usable annotations in {env_dir.name}")
         return None
 
-    x_all = np.concatenate(xs_parts)
-    y_all = np.concatenate(ys_parts)
-    src_all = np.concatenate(src_parts)
+    # Walls: concatenate as-is (per-camera duplicates are expected in the
+    # overlap region and downstream consumers tolerate the point cloud).
+    if wall_xs_parts:
+        wall_x = np.concatenate(wall_xs_parts)
+        wall_y = np.concatenate(wall_ys_parts)
+        wall_src = np.concatenate(wall_src_parts)
+    else:
+        wall_x = np.empty(0, np.float32)
+        wall_y = np.empty(0, np.float32)
+        wall_src = np.empty(0, np.uint8)
 
-    out_path = env_dir / "arena_walls.npz"
-    np.savez(out_path, x_mm=x_all, y_mm=y_all, source_camera=src_all)
+    # Poles: merge across cameras.
+    if pole_xs_per_cam:
+        all_px = np.concatenate(pole_xs_per_cam)
+        all_py = np.concatenate(pole_ys_per_cam)
+        merged_px, merged_py = merge_pole_centroids(all_px, all_py, POLE_MERGE_RADIUS_MM)
+        pole_src = np.full(merged_px.shape, 255, dtype=np.uint8)
+        print(f"    merged poles across cameras: {all_px.size} detections → "
+              f"{merged_px.size} unique poles")
+    else:
+        merged_px = np.empty(0, np.float32)
+        merged_py = np.empty(0, np.float32)
+        pole_src = np.empty(0, np.uint8)
+
+    x_all = np.concatenate([wall_x, merged_px])
+    y_all = np.concatenate([wall_y, merged_py])
+    kind_all = np.concatenate([
+        np.zeros(wall_x.shape, dtype=np.uint8),
+        np.ones(merged_px.shape, dtype=np.uint8),
+    ])
+    src_all = np.concatenate([wall_src, pole_src])
+
+    out_path = env_dir / "arena_features.npz"
+    np.savez(
+        out_path,
+        x_mm=x_all,
+        y_mm=y_all,
+        kind=kind_all,
+        source_camera=src_all,
+        pole_radius_mm=np.float32(POLE_RADIUS_MM),
+    )
     print(f"    saved {out_path.name}  "
-          f"({x_all.size:,} points, cameras={','.join(found_cameras)})")
+          f"({wall_x.size:,} wall pts, {merged_px.size} poles, "
+          f"cameras={','.join(found_cameras)})")
 
-    plot_path = env_dir / "arena_walls_plot.png"
-    plot_walls(env_dir, meta, xs_parts, ys_parts, found_cameras, plot_path)
+    plot_path = env_dir / "arena_features_plot.png"
+    plot_features(
+        env_dir, meta,
+        wall_xs_parts, wall_ys_parts,
+        merged_px, merged_py,
+        found_cameras, plot_path,
+    )
     print(f"    saved {plot_path.name}")
 
     return out_path
@@ -304,15 +447,18 @@ def _load_legacy_walls(env_dir: Path, meta: dict) -> Optional[Tuple[np.ndarray, 
     return x, y
 
 
-def plot_walls(
+def plot_features(
     env_dir: Path,
     meta: dict,
-    xs_parts: List[np.ndarray],
-    ys_parts: List[np.ndarray],
+    wall_xs_parts: List[np.ndarray],
+    wall_ys_parts: List[np.ndarray],
+    pole_xs: np.ndarray,
+    pole_ys: np.ndarray,
     cameras: List[str],
     out_path: Path,
 ) -> None:
-    """Save a diagnostic overlay of the new geometry (and legacy, if present)."""
+    """Save a diagnostic overlay of the extracted features (walls + poles, plus
+    the legacy arena_annotated.png pass when available for comparison)."""
     bounds = meta["arena_bounds_mm"]
     min_x, max_x = float(bounds["min_x"]), float(bounds["max_x"])
     min_y, max_y = float(bounds["min_y"]), float(bounds["max_y"])
@@ -345,16 +491,36 @@ def plot_walls(
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
 
-    # Panel 1: new per-camera geometry
+    # Panel 1: new per-camera geometry + merged poles
     ax_new = panels[0]
     draw_background(ax_new)
-    for xs, ys, cam in zip(xs_parts, ys_parts, cameras):
+    for xs, ys, cam in zip(wall_xs_parts, wall_ys_parts, cameras):
         ax_new.scatter(
             xs, ys, s=1.5, c=CAMERA_COLOURS.get(cam, "k"),
-            label=f"{cam} (n={xs.size:,})", alpha=0.8, zorder=2,
+            label=f"{cam} walls (n={xs.size:,})", alpha=0.8, zorder=2,
         )
-    ax_new.set_title(f"Per-camera walls (tops @ z={WALL_HEIGHT_MM:.0f} mm)\n{env_dir.name}")
-    ax_new.legend(loc="upper right", markerscale=4, fontsize=8)
+    pole_handle = None
+    if pole_xs.size:
+        for px, py in zip(pole_xs, pole_ys):
+            circ = plt.Circle(
+                (px, py), POLE_RADIUS_MM,
+                facecolor="#984ea3", edgecolor="black", linewidth=0.6,
+                alpha=0.85, zorder=3,
+            )
+            ax_new.add_patch(circ)
+        pole_handle = mpatches.Patch(
+            facecolor="#984ea3", edgecolor="black", linewidth=0.6,
+            label=f"poles (n={pole_xs.size}, r={POLE_RADIUS_MM:.0f} mm)",
+        )
+    ax_new.set_title(
+        f"Walls @ z={WALL_HEIGHT_MM:.0f} mm + poles @ z={POLE_HEIGHT_MM:.0f} mm\n"
+        f"{env_dir.name}"
+    )
+    handles, labels = ax_new.get_legend_handles_labels()
+    if pole_handle is not None:
+        handles.append(pole_handle)
+        labels.append(pole_handle.get_label())
+    ax_new.legend(handles, labels, loc="upper right", markerscale=4, fontsize=8)
 
     # Panel 2: legacy comparison
     if has_legacy:
@@ -379,7 +545,7 @@ def process(root: Path, pylorex_calib_dir: Path) -> None:
     print(f"Processing {len(env_dirs)} env folder(s) under {root}")
     for env_dir in env_dirs:
         print(f"  {env_dir.relative_to(root.parent) if root.parent in env_dir.parents else env_dir}")
-        build_walls_for_env(env_dir, pylorex_calib_dir)
+        build_features_for_env(env_dir, pylorex_calib_dir)
 
 
 def _resolve(path_str: str) -> Path:
