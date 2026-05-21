@@ -28,7 +28,7 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
 ## Where to pick up
 
 - **Paper:** on branch `direct-learning-poletask`. Par 9 restructured into two parallel blocks (direct + vicarious learning), each leading with its inverse-model scope. Asymmetric scope between direct (specialised, single arena) and vicarious (general, multi-arena) is now an explicit design contrast. Empirical close-range pole/wall result is firming up — see Code state.
-- **Code:** two-headed inverse now trained on Acq01A + Acq02A, restricted to close-range pings (`MAX_RANGE_MM = 1000` in `SCRIPT_TrainInverseModel.py`). 4-fold CV: 80% class acc, 87% wall recall, 64% pole recall, pole-az RMSE 16.6°. Pole-az regression head doesn't localise yet, but its *sign* (left/right) is robustly above chance (~68%) — keep the regression head and threshold at 0 for sign; explicit sign-BCE training is worse. New larger ArUco marker on the robot, used for Acquisition03/04 collection (in progress). Next: more sessions to tighten pole recall (still high variance across folds, esp. fold q=0).
+- **Code:** two-headed inverse now trained on Acq01A + Acq02B (02B is a 02A redo with the new 81 mm marker; 02A was cut off mid-run), restricted to close-range pings (`MAX_RANGE_MM = 1000` in `SCRIPT_TrainInverseModel.py`). 4-fold CV: 83% class acc ± 5.9, 88% wall recall, 70% pole recall ± 17, pole precision 71% ± 0.8 (cross-fold variance collapsed), pole-az RMSE 17.2°. Pole-az regression head doesn't localise yet, but its *sign* (left/right) is robustly above chance (~68%) — keep the regression head and threshold at 0 for sign; explicit sign-BCE training is worse. Acquisition03/04 collection in progress with the new marker. Next: more sessions to tighten pole recall (q=0 is still the weak fold, but no longer an outlier).
 
 ---
 
@@ -101,17 +101,17 @@ The inverse has trained successfully under the canonical close-range setup (see 
 2. `Library/AcquisitionPlanner` reads walls + poles + radius, enforces pole clearance at `clearance_mm + pole_radius_mm` for waypoints and segments. Plans draw poles as purple circles.
 3. `Library/AcquisitionSessionLoader` gained `load_session_inverse` / `load_data_inverse` returning per-ping `class_label`, `pole_azimuth_deg`, and (as of 2026-05-21) `near_dist_mm` via `nearest_reflector_in_cone`. Cone matches the model's ±35° slice cone; tie on distance goes to wall; pole distance measured to surface (centre − radius).
 4. `Library/SonarModel.SonarSlicesUQ_TwoHeaded` shares the wall-only trunk and adds a class head (symmetric under L↔R) and pole-azimuth head (mean antisymmetric, log_var symmetric). Symmetry verified by construction.
-5. `SCRIPT_TrainInverseModel.py` trains the combined model with CE(class) + masked GNLL(wall slices) + masked GNLL(pole az). Pole-az normalised by /CONE_HALF_DEG to keep antisymmetry exact. Writes to `SonarModel/` with prefix `inverse_`. **Canonical config (2026-05-21):** `ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A"]`, `MAX_RANGE_MM = 1000.0` (drops pings whose nearest reflector is beyond 1 m — see [Distance dependence] below). Legacy `SCRIPT_TrainSonarModel.py` is untouched.
+5. `SCRIPT_TrainInverseModel.py` trains the combined model with CE(class) + masked GNLL(wall slices) + masked GNLL(pole az). Pole-az normalised by /CONE_HALF_DEG to keep antisymmetry exact. Writes to `SonarModel/` with prefix `inverse_`. **Canonical config (2026-05-21):** `ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02B"]`, `MAX_RANGE_MM = 1000.0` (drops pings whose nearest reflector is beyond 1 m — see [Distance dependence] below). Legacy `SCRIPT_TrainSonarModel.py` is untouched.
 6. `SCRIPT_CheckPoleSignal.py` is a standalone hand-feature LR diagnostic. Rerun after each new acquisition as a signal-floor sanity check before retraining.
 
-### Close-range results, Acq01A + Acq02A (2026-05-21)
+### Close-range results, Acq01A + Acq02B (2026-05-21)
 
-Two-session 4-fold quadrant CV with `MAX_RANGE_MM = 1000.0`:
+Two-session 4-fold quadrant CV with `MAX_RANGE_MM = 1000.0`. 02B replaces 02A in the canonical set — same arena, redone with the new 81 mm marker, and a complete run rather than the cut-off 02A. 435 close-range pings total (127 pole, 308 wall).
 
-- **Class accuracy: 79.8% ± 7.8%** (per-fold 69 / 83 / 88 / 79). q=0 is the persistent weak fold.
-- **Wall recall: 86.9% ± 3.9%**, **pole recall: 63.6% ± 21.9%**, **pole precision: 65.6% ± 9.0%**. Pole recall variance is the main weak point — q=0 is 32%, others 70–81%.
-- **Pole-az RMSE: 16.62° ± 1.66°**, MAE 13.22°. Regression head doesn't localise well yet, but it has started to do something beyond predicting the mean (empirical pole-az std is ~20°).
-- **Pole-az sign accuracy: 67.5% ± 8.5%** when the existing regression head's output is thresholded at 0. Tried training a sign-targeted head with BCE on `sign(az)` — it's *worse* (61.6% ± 4.5%). The regression loss carries denser supervision than the binary sign loss, and the architecture's antisymmetric mean head already encodes sign for free. Keep the regression head, threshold at 0 to read sign.
+- **Class accuracy: 82.7% ± 5.9%** (per-fold 75 / 84 / 89 / 83). q=0 is the persistent weak fold but no longer an outlier.
+- **Wall recall: 87.9% ± 4.4%**, **pole recall: 69.8% ± 16.6%**, **pole precision: 70.6% ± 0.8%**. Pole-precision cross-fold variation has collapsed compared to the 02A run (σ 0.8 vs 9.0). Pole recall σ also tightened (17 vs 22). q=0 pole recall = 47.5%; others 70–88%.
+- **Pole-az RMSE: 17.19° ± 1.98°**, MAE 13.37°. Regression head still data-starved (empirical pole-az std ≈ 20°).
+- **Pole-az sign accuracy: 67.5% ± 8.5%** (from the earlier 02A experiment; not re-measured for 02B but the regression head behaviour is similar). Keep the regression head, threshold at 0 to read sign — explicit sign-BCE training is worse.
 
 ### Distance dependence — CNN out-of-fold (2026-05-21)
 
