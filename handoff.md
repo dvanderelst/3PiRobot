@@ -128,6 +128,10 @@ CNN beats LR at every distance < 1700 mm; both collapse beyond. The 1000–1700 
 
 Sign accuracy is **flat across distance** (0.69, 0.69, 0.67, 0.47-on-n=17). The L–R asymmetry cue isn't preferentially short-range — interesting, and consistent with it being geometric rather than amplitude-dependent.
 
+### Acquisition notifications (2026-05-21)
+
+`SCRIPT_VisualDataAcquisition.py` now sends a Pushover progress notification every `PUSHOVER_EVERY_N_POSITIONS` completed positions (default 10), with elapsed-based ETA. Switched from the old per-ping cadence because positions are the failure-prone step — once at a waypoint the robot only rotates between pings. Also sends a "Resumed" notification after each manual unpause so the pause cycle gets a closing bracket on the phone. `Library/PushOver.send` now has a 10 s timeout, catches request exceptions (returns None instead of propagating), and prints a `WARNING` on any non-200 HTTP response, so silent server-side failures are visible in the console next time. Smoke test: `SCRIPT_TestPushover.py` — sends a timestamped message and prints status + body.
+
 ### First-session results (Acquisition01A — 240 pings, 237 valid, 35% pole)
 
 - **4-fold quadrant CV class accuracy: 73.1% ± 11.4%** (per-fold: 55%, 85%, 85%, 73%). The 55% snapshot first reported was the unlucky fold — mean is solidly above the 65% wall prior.
