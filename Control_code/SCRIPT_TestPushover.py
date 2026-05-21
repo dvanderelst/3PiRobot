@@ -20,11 +20,13 @@ def main():
            f"from {socket.gethostname()}")
     print(f"Sending: {msg}")
     response = PushOver.send(msg)
-    status = response.status
-    body = response.read().decode("utf-8", errors="replace")
-    print(f"HTTP {status}")
-    print(f"Body : {body}")
-    if status == 200:
+    if response is None:
+        print("send raised an exception (see line above). "
+              "Check network connectivity from the host.")
+        return
+    print(f"HTTP {response.status}")
+    print(f"Body : {response.body}")
+    if response.status == 200:
         print("\nServer accepted the message. If it doesn't arrive on the "
               "phone, check device-side: silent mode, focus, Pushover app "
               "notification permissions, or Quiet Hours in the Pushover app.")

@@ -54,7 +54,9 @@ ARENA_NAME            = "Acquisition04"
 PLAN_PATH             = None    # None → most recent AcquisitionArenas/<ARENA_NAME>/plans/plan_*.json
 SESSION_NAME          = "Acquisition04A"
 DO_PLOT_PINGS         = True    # per-ping sonar plot (debug only — slow)
-PUSHOVER_EVERY_N      = 100
+PUSHOVER_EVERY_N_POSITIONS = 10  # progress notification every N completed positions.
+                                  # Position-nav is the failure-prone step; once at a
+                                  # position the robot just rotates between pings.
 NAV_HALT_AFTER        = 2       # halt + Pushover after N consecutive position-nav failures
                                 # (typically the marker has left camera coverage and every
                                 # subsequent waypoint will fail until the robot is moved).
@@ -208,52 +210,67 @@ def main():
                 print(f"  Move robot back into camera coverage, then press "
                       f"Enter to resume.")
                 input()
+                PushOver.send(
+                    f"Resumed: {SESSION_NAME} at pos {pos_idx + 1}/{n_positions}"
+                )
                 consecutive_nav_failures = 0
-            continue
-        consecutive_nav_failures = 0
+        else:
+            consecutive_nav_failures = 0
 
-        for yaw_idx, yaw in enumerate(yaws):
-            control.wait_if_paused()
+            for yaw_idx, yaw in enumerate(yaws):
+                control.wait_if_paused()
 
-            # Rotate to the planned yaw. The position phase inside go_to_pose
-            # is essentially a no-op since we're already there from the outer
-            # drive call (or the previous yaw); only the yaw alignment runs.
-            res_yaw = nav.go_to_pose(xy[0], xy[1], yaw)
-            if not res_yaw.success:
-                print(f"  rotate failed: {res_yaw.reason}; pinging anyway")
+                # Rotate to the planned yaw. The position phase inside go_to_pose
+                # is essentially a no-op since we're already there from the outer
+                # drive call (or the previous yaw); only the yaw alignment runs.
+                res_yaw = nav.go_to_pose(xy[0], xy[1], yaw)
+                if not res_yaw.success:
+                    print(f"  rotate failed: {res_yaw.reason}; pinging anyway")
 
-            executed_pose = _quick_pose(tracker, ROBOT_NUMBER)
+                executed_pose = _quick_pose(tracker, ROBOT_NUMBER)
 
-            sonar_package = client.read_and_process(do_ping=True, plot=DO_PLOT_PINGS)
-            if sonar_package is None:
-                print(f"  ping failed at pos {pos_idx}, yaw {yaw_idx}")
-                ping_failures += 1
+                sonar_package = client.read_and_process(do_ping=True, plot=DO_PLOT_PINGS)
+                if sonar_package is None:
+                    print(f"  ping failed at pos {pos_idx}, yaw {yaw_idx}")
+                    ping_failures += 1
+                    ping_idx += 1
+                    continue
+
+                writer.save_data(
+                    sonar_package=sonar_package,
+                    executed_pose=executed_pose,
+                    planned_position=list(xy),
+                    planned_yaw=float(yaw),
+                    position_index=pos_idx,
+                    yaw_index=yaw_idx,
+                    ping_index=ping_idx,
+                    nav_success=res_yaw.success,
+                    nav_pos_err_mm=float(res_yaw.final_pos_err_mm),
+                    nav_yaw_err_deg=float(res_yaw.final_yaw_err_deg),
+                )
                 ping_idx += 1
-                continue
 
-            writer.save_data(
-                sonar_package=sonar_package,
-                executed_pose=executed_pose,
-                planned_position=list(xy),
-                planned_yaw=float(yaw),
-                position_index=pos_idx,
-                yaw_index=yaw_idx,
-                ping_index=ping_idx,
-                nav_success=res_yaw.success,
-                nav_pos_err_mm=float(res_yaw.final_pos_err_mm),
-                nav_yaw_err_deg=float(res_yaw.final_yaw_err_deg),
+                d = sonar_package.get("corrected_distance")
+                i = sonar_package.get("corrected_iid")
+                d_str = f"{d:.2f} m" if isinstance(d, (int, float)) else "N/A"
+                i_str = f"{i:+.2f} dB" if isinstance(i, (int, float)) else "N/A"
+                print(f"  ping {ping_idx}/{n_pings_total}: yaw={yaw:+.1f}°, "
+                      f"d={d_str}, iid={i_str}")
+
+        # End-of-position progress notification. Fires regardless of
+        # whether the position succeeded or failed nav, so the cadence
+        # stays predictable even during runs with many failures.
+        positions_done = pos_idx + 1
+        if (PUSHOVER_EVERY_N_POSITIONS > 0
+                and positions_done % PUSHOVER_EVERY_N_POSITIONS == 0):
+            elapsed = time.time() - t_start
+            secs_per_pos = elapsed / max(positions_done, 1)
+            remaining_min = (n_positions - positions_done) * secs_per_pos / 60.0
+            PushOver.send(
+                f"Acquisition: pos {positions_done}/{n_positions}, "
+                f"{ping_idx}/{n_pings_total} pings, "
+                f"ETA ~{remaining_min:.0f} min"
             )
-            ping_idx += 1
-
-            d = sonar_package.get("corrected_distance")
-            i = sonar_package.get("corrected_iid")
-            d_str = f"{d:.2f} m" if isinstance(d, (int, float)) else "N/A"
-            i_str = f"{i:+.2f} dB" if isinstance(i, (int, float)) else "N/A"
-            print(f"  ping {ping_idx}/{n_pings_total}: yaw={yaw:+.1f}°, "
-                  f"d={d_str}, iid={i_str}")
-
-            if PUSHOVER_EVERY_N > 0 and ping_idx % PUSHOVER_EVERY_N == 0:
-                PushOver.send(f"Acquisition: {ping_idx}/{n_pings_total} pings")
 
     elapsed = time.time() - t_start
     print(f"\n=== Done ===")
