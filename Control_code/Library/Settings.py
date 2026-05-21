@@ -39,8 +39,8 @@ class ClientConfig:
     drive_yaw_curl_deg_per_mm:  float = -0.01243
     drive_distance_scale:       float = 0.9972
     
-client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101", aruco_id=0)
-client2 = ClientConfig(robot_name="Robot02", ip="192.168.0.102", aruco_id=1)
-client3 = ClientConfig(robot_name="Robot03", ip="192.168.0.103", aruco_id=2)
+client1 = ClientConfig(robot_name="Robot01", ip="192.168.0.101", aruco_id=1)
+client2 = ClientConfig(robot_name="Robot02", ip="192.168.0.102", aruco_id=2)
+client3 = ClientConfig(robot_name="Robot03", ip="192.168.0.103", aruco_id=3)
 client_list = [client1, client2, client3]
 def get_client_config(index): return client_list[index]
