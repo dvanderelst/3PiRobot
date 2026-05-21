@@ -41,7 +41,7 @@ from sklearn.pipeline import Pipeline
 from Library.AcquisitionSessionLoader import load_data_inverse
 
 
-ACQUISITION_SESSIONS = ["Acquisition01A"]
+ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A"]
 ACQUISITIONS_ROOT    = "AcquisitionSessions"
 CONE_HALF_DEG        = 35.0
 
@@ -171,7 +171,7 @@ def plot_confusion(y, y_pred, out_path, acc):
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     print("[1/4] Loading data")
-    sonar, profiles, classes, pole_az, quads, sess, bin_centers = load_data_inverse(
+    sonar, profiles, classes, pole_az, near_dist, quads, sess, bin_centers = load_data_inverse(
         ACQUISITION_SESSIONS,
         acquisitions_root=ACQUISITIONS_ROOT,
         cone_half_deg=CONE_HALF_DEG,

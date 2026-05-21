@@ -47,18 +47,23 @@ from Library.SonarModel import SonarSlicesUQ_TwoHeaded, SLICE_NAMES as _LIB_SLIC
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-ACQUISITION_SESSIONS = ["Acquisition01A"]
+ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A"]
 ACQUISITIONS_ROOT    = "AcquisitionSessions"
 
 OPENING_ANGLE  = 270.0
 PROFILE_STEPS  = 90
 PROFILE_METHOD = "ray_center"
 CONE_HALF_DEG  = 35.0   # also used to normalise pole azimuth
+MAX_RANGE_MM   = 1000.0  # drop pings whose nearest reflector is beyond this.
+                         # Restricts the task to the close-range regime where
+                         # the narrowband sonar carries discriminative pole
+                         # signal (mid-range 1-1.7 m is the empirical dead zone).
 
 # Validation: hold out one quadrant per session, same convention as the
-# wall-only trainer. With one session this gives ~25% val / 75% train.
+# wall-only trainer.
 VALIDATION_QUADRANTS = {
     "Acquisition01A": [0],
+    "Acquisition02A": [0],
 }
 
 # Architecture (mirrors SCRIPT_TrainSonarModel.py defaults)
@@ -149,8 +154,9 @@ def masked_gnll(pred_mean, pred_log_var, target, mask,
 
 def load_and_filter():
     """Returns sonar, slice_targets, classes, pole_az_deg, quads, sess, bin_centers
-    with NaN-class rows dropped (cone-empty pings)."""
-    sonar, profiles, classes, pole_az, quads, sess, bin_centers = load_data_inverse(
+    with NaN-class rows dropped (cone-empty pings) and out-of-range pings
+    dropped (nearest reflector beyond MAX_RANGE_MM)."""
+    sonar, profiles, classes, pole_az, near_dist, quads, sess, bin_centers = load_data_inverse(
         ACQUISITION_SESSIONS,
         acquisitions_root=ACQUISITIONS_ROOT,
         opening_angle=OPENING_ANGLE,
@@ -159,9 +165,16 @@ def load_and_filter():
         cone_half_deg=CONE_HALF_DEG,
     )
     keep = ~np.isnan(classes)
-    n_dropped = int((~keep).sum())
-    if n_dropped:
-        print(f"  dropping {n_dropped} pings with empty cone")
+    n_empty = int((~keep).sum())
+    if n_empty:
+        print(f"  dropping {n_empty} pings with empty cone")
+    if np.isfinite(MAX_RANGE_MM):
+        in_range = np.isfinite(near_dist) & (near_dist <= MAX_RANGE_MM)
+        n_too_far = int(((~in_range) & keep).sum())
+        if n_too_far:
+            print(f"  dropping {n_too_far} pings with nearest reflector beyond "
+                  f"{MAX_RANGE_MM:.0f} mm")
+        keep = keep & in_range
     slice_t = compute_slice_targets(profiles, bin_centers, CONE_HALF_DEG)
     return (sonar[keep], slice_t[keep], classes[keep].astype(np.int64),
             pole_az[keep], quads[keep], sess[keep], bin_centers)

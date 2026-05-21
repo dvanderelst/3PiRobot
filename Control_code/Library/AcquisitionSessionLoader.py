@@ -201,9 +201,10 @@ def nearest_reflector_in_cone(walls: np.ndarray,
                               poles: np.ndarray,
                               pole_radius_mm: float,
                               rob_x: float, rob_y: float, rob_yaw_deg: float,
-                              cone_half_deg: float) -> Tuple[float, float]:
-    """Class of the nearest physical reflector in the forward ±cone, and the
-    pole's signed bearing if a pole is the nearest.
+                              cone_half_deg: float) -> Tuple[float, float, float]:
+    """Class of the nearest physical reflector in the forward ±cone, the
+    pole's signed bearing if a pole is the nearest, and the distance (mm)
+    to whichever reflector is nearest.
 
     Per-ping label for the two-headed inverse:
       - Walls represented by their point cloud; distance is to the nearest
@@ -222,6 +223,8 @@ def nearest_reflector_in_cone(walls: np.ndarray,
         pole_azimuth_deg  signed bearing to the nearest pole if class == pole,
                           NaN otherwise. Angle convention matches
                           `compute_profile`: +ccw from robot forward, in [-180, 180).
+        near_dist_mm      distance to whichever reflector won (wall point or
+                          pole surface). NaN if cone is empty.
     """
     yaw_rad = np.deg2rad(rob_yaw_deg)
     cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
@@ -256,10 +259,10 @@ def nearest_reflector_in_cone(walls: np.ndarray,
             pole_min_az = float(ang_in[j])
 
     if not np.isfinite(wall_min_dist) and not np.isfinite(pole_min_dist):
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), float("nan")
     if wall_min_dist <= pole_min_dist:  # tie → wall
-        return 0.0, float("nan")
-    return 1.0, pole_min_az
+        return 0.0, float("nan"), wall_min_dist
+    return 1.0, pole_min_az, pole_min_dist
 
 
 # ─── Public loader API ───────────────────────────────────────────────────────
@@ -394,13 +397,15 @@ def load_session_inverse(session_name: str,
                          drop_pose_fallback: bool = True,
                          verbose: bool = True
                          ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
-                                    np.ndarray, np.ndarray, np.ndarray]:
+                                    np.ndarray, np.ndarray, np.ndarray,
+                                    np.ndarray]:
     """Load one session for two-headed inverse training.
 
     Same per-ping pipeline as `load_session`, but also computes the
-    nearest-reflector class and pole azimuth from the env's poles. Walls
-    used for `profiles` are wall-only (kind == 0); the class label is
-    against the wall + pole geometry in the ±cone_half_deg forward cone.
+    nearest-reflector class, pole azimuth, and nearest-reflector distance
+    from the env's poles. Walls used for `profiles` are wall-only
+    (kind == 0); the class label is against the wall + pole geometry in
+    the ±cone_half_deg forward cone.
 
     Returns:
         sonar         (N, samples, 2)
@@ -408,6 +413,8 @@ def load_session_inverse(session_name: str,
         class_labels  (N,) float32 — 0.0=wall, 1.0=pole, NaN if cone empty
         pole_az_deg   (N,) float32 — bearing to nearest pole when class==pole;
                                      NaN otherwise. Same +ccw convention.
+        near_dist_mm  (N,) float32 — distance (mm) to whichever reflector
+                                     won the nearest contest. NaN if cone empty.
         quads         (N,) int32   — per-session median-split quadrant
         poses         (N, 3) float32 — (x, y, yaw_deg)
     """
@@ -431,6 +438,7 @@ def load_session_inverse(session_name: str,
     profile_list:  List[np.ndarray]      = []
     class_list:    List[float]           = []
     pole_az_list:  List[float]           = []
+    near_dist_list: List[float]          = []
     pose_list:     List[Tuple[float, float, float]] = []
     fallback_pose_count = 0
     dropped_pose_count = 0
@@ -453,11 +461,12 @@ def load_session_inverse(session_name: str,
             compute_profile(walls, x, y, yaw,
                             opening_angle, profile_steps, profile_method)
         )
-        cls, pole_az = nearest_reflector_in_cone(
+        cls, pole_az, near_dist = nearest_reflector_in_cone(
             walls, poles, pole_radius_mm, x, y, yaw, cone_half_deg
         )
         class_list.append(cls)
         pole_az_list.append(pole_az)
+        near_dist_list.append(near_dist)
         pose_list.append((x, y, yaw))
 
     if verbose:
@@ -472,6 +481,7 @@ def load_session_inverse(session_name: str,
     profiles    = np.stack(profile_list, axis=0).astype(np.float32)
     class_arr   = np.asarray(class_list, dtype=np.float32)
     pole_az_arr = np.asarray(pole_az_list, dtype=np.float32)
+    near_dist_arr = np.asarray(near_dist_list, dtype=np.float32)
     poses       = np.asarray(pose_list, dtype=np.float32)
 
     x_med = float(np.median(poses[:, 0]))
@@ -488,7 +498,7 @@ def load_session_inverse(session_name: str,
               f"empty_cone={len(class_arr) - n_valid}  "
               f"(pole frac = {n_pole / max(n_valid, 1):.1%})")
 
-    return sonar, profiles, class_arr, pole_az_arr, quads, poses
+    return sonar, profiles, class_arr, pole_az_arr, near_dist_arr, quads, poses
 
 
 def load_data_inverse(session_names: List[str],
@@ -500,7 +510,8 @@ def load_data_inverse(session_names: List[str],
                       drop_pose_fallback: bool = True,
                       verbose: bool = True
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
-                                 np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                                 np.ndarray, np.ndarray, np.ndarray,
+                                 np.ndarray, np.ndarray]:
     """Multi-session two-headed-inverse loader.
 
     Returns:
@@ -508,13 +519,15 @@ def load_data_inverse(session_names: List[str],
         profiles     (N, profile_steps) — wall-only
         class_labels (N,) float32 — 0.0=wall, 1.0=pole, NaN=empty cone
         pole_az_deg  (N,) float32 — bearing to nearest pole (NaN if class != pole)
+        near_dist_mm (N,) float32 — distance to whichever reflector won
+                                    (wall point or pole surface). NaN if cone empty.
         quads        (N,) int32
         sess         (N,) object array of session names
         bin_centers  (profile_steps,) azimuth bin centers (deg)
     """
-    s_l, p_l, c_l, az_l, q_l, sess_l = [], [], [], [], [], []
+    s_l, p_l, c_l, az_l, d_l, q_l, sess_l = [], [], [], [], [], [], []
     for name in session_names:
-        sonar, profiles, classes, pole_az, quads, _ = load_session_inverse(
+        sonar, profiles, classes, pole_az, near_dist, quads, _ = load_session_inverse(
             name, acquisitions_root,
             opening_angle, profile_steps, profile_method,
             cone_half_deg=cone_half_deg,
@@ -525,12 +538,14 @@ def load_data_inverse(session_names: List[str],
         p_l.append(profiles)
         c_l.append(classes)
         az_l.append(pole_az)
+        d_l.append(near_dist)
         q_l.append(quads)
         sess_l.append(np.array([name] * len(sonar)))
     return (np.concatenate(s_l, axis=0),
             np.concatenate(p_l, axis=0),
             np.concatenate(c_l, axis=0),
             np.concatenate(az_l, axis=0),
+            np.concatenate(d_l, axis=0),
             np.concatenate(q_l, axis=0),
             np.concatenate(sess_l, axis=0),
             profile_bin_centers(opening_angle, profile_steps))
