@@ -17,13 +17,23 @@ At the end of each session, proactively offer to update `handoff.md`:
 
 ## Handoff structure
 
-Keep `handoff.md` organised into two top-level state sections:
+Keep `handoff.md` organised into three top-level state sections:
   - **Code state** — work in `Control_code/` and `Robot_code/`.
   - **Paper state** — work in `Paper/`.
+  - **Performance notes** — chronological log of model/robot
+    performance numbers, append-only at the top so the most recent is
+    read first. Each entry: date, what was measured, config (sessions,
+    flags, model), commit at time of measurement, metrics. Don't edit
+    older entries; if a measurement is redone, write a new entry that
+    references the prior one. This section is the canonical record —
+    `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are gitignored,
+    so per-run JSONs get overwritten and would otherwise be lost.
 
 Plus a "Where to pick up" pointer near the top that briefly says what's
 next in each. When updating, edit only the section that matches what the
-session actually shifted; the other section stays untouched.
+session actually shifted; the other sections stay untouched. Whenever a
+model is trained or a robot experiment yields numbers worth keeping,
+add a Performance-notes entry — that's the durable record.
 
 ## Workflow rules
 

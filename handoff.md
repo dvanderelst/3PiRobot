@@ -164,3 +164,61 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 - **Per-robot calibration.** `Settings.py` `ClientConfig` `default_factory` carries Robot01's calibration table; `client2` / `client3` inherit it. Only matters when actually deploying on those robots.
 - **Diagnostics directory.** `Control_code/Diagnostics/` is currently untracked. If outputs there ever become worth versioning, add to `.gitignore` explicitly so the policy is intentional.
 - **Uncommitted working-tree changes (long-standing user WIP, do not bundle into agent commits):** `Library/Settings.py` (recent rotation table + `drive_yaw_curl_deg_per_mm` = −0.02426 + `drive_distance_scale` = 1.0182, plus the older entries), `SCRIPT_CalibrateRobot.py`, `SCRIPT_RunPolicy.py` (REPEAT/MAX_STEPS), `SCRIPT_TakeEnvSnapshot.py`, `SCRIPT_TrainPolicy.py`, `SCRIPT_BuildAcquisitionPlan.py`, `SCRIPT_VisualDataAcquisition.py`. Also `Paper/main.tex` has the user's Par 10 "even though the robotic experiments are inspired by the behavioral task used by \citet{Holland2005} and \citet{Finger2025}" insertion uncommitted.
+
+---
+
+## Performance notes
+
+Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
+
+This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-05-21 — Two-headed inverse, Acq01A + Acq02B, close-range
+
+- Commit: `088c16d` (canonical at time of measurement)
+- Config: `MAX_RANGE_MM = 1000.0`, `CONE_HALF_DEG = 35°`, `SonarSlicesUQ_TwoHeaded`, 4-fold quadrant CV (`SCRIPT_TrainInverseModel.py`)
+- Data: 435 close-range pings retained (308 wall, 127 pole) from 460 raw
+- **Class accuracy: 82.7% ± 5.9%** (per-fold 75 / 84 / 89 / 83)
+- **Wall recall: 87.9% ± 4.4%** • **Pole recall: 69.8% ± 16.6%** • **Pole precision: 70.6% ± 0.8%**
+- **Pole-az RMSE: 17.19° ± 1.98°** (still data-starved; empirical pole-az std ≈ 20°)
+- Wall slice RMSE (q=3 fold only, val n=81): right 328, center 357, left 334 mm — no aggregated multi-fold number recorded
+- q=0 is the persistent weakest fold but no longer an outlier
+
+### 2026-05-21 — Two-headed inverse, Acq01A + Acq02A, close-range (superseded)
+
+- Commit: `f9d4222`
+- Same config as the entry above; 379 close-range pings (265 wall, 114 pole)
+- Class accuracy: 79.8% ± 7.8% (per-fold 69 / 83 / 88 / 79)
+- Wall recall: 86.9% ± 3.9% • Pole recall: 63.6% ± 21.9% • Pole precision: 65.6% ± 9.0%
+- Pole-az RMSE: 16.62° ± 1.66°
+- Sign-of-azimuth experiment (regression-trained, threshold at 0): 67.5% ± 8.5%. Sign-BCE-trained instead: 61.6% ± 4.5% (worse — denser supervision wins).
+- Superseded by the entry above when 02A was replaced by the 02B redo.
+
+### 2026-05-21 — CNN out-of-fold distance stratification
+
+- Trained on all data (full range, Acq01A + Acq02A), OOF predictions stratified by TOA-derived one-way distance:
+
+| range (mm)   | n_wall | n_pole | CNN acc | wall_rec | pole_rec | sign_acc | LR-baseline acc |
+|--------------|--------|--------|---------|----------|----------|----------|-----------------|
+| 0 – 500      | 53     | 26     | 0.87    | 0.92     | 0.77     | 0.69     | 0.79            |
+| 500 – 1000   | 155    | 61     | 0.81    | 0.89     | 0.61     | 0.69     | 0.66            |
+| 1000 – 1700  | 88     | 45     | 0.65    | 0.60     | 0.76     | 0.67     | 0.50            |
+| 1700 – 3250  | 10     | 17     | 0.52    | 0.40     | 0.59     | 0.47     | 0.70 (n=10)     |
+
+This is the empirical basis for `MAX_RANGE_MM = 1000.0` in the canonical training config.
+
+### 2026-05-20 — Two-headed inverse, Acquisition01A only (initial baseline)
+
+- Commit: `a7328bc` (two-headed pipeline first end-to-end run)
+- Config: no range filter, `CONE_HALF_DEG = 35°`, 4-fold quadrant CV; 237 valid pings, 35% pole
+- Class accuracy: 73.1% ± 11.4% (per-fold 55, 85, 85, 73)
+- Pole-az RMSE: 19.9° ± 1.7° (uninformative; matches data std)
+- Wall recall: 82% ± 4% • Pole recall: 58% ± 19%
+- Hand-feature LR signal-floor diagnostic: 66% (vs 65% wall prior — barely above)
+
+### 2026-05-11 — Wall-only policy first clean deploy (pre-pole)
+
+- Commit: `eef35c7` (wall-only-policy milestone, last in the pre-pole era)
+- No on-disk wall-only RMSE preserved (`SonarModel/slices_results.json` was overwritten when the two-headed pipeline landed). `SCRIPT_TrainSonarModel.py` references a hardcoded baseline ("distance-only model: 142 mm") but the wall-only slices RMSE itself is not recorded anywhere committed.
+- Drive recalibration that unblocked the deploy: `drive_yaw_curl_deg_per_mm` −0.03693 → −0.01243, `drive_distance_scale` 0.992 → 0.9972.
+- Tracker noise: σ_yaw ≈ 0.6° per fresh frame; fresh-frame rate ≈ 0.8 Hz (DVR/RTSP bottleneck, see `PyLorex/TODO.md`).
