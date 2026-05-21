@@ -47,7 +47,7 @@ from Library.SonarModel import SonarSlicesUQ_TwoHeaded, SLICE_NAMES as _LIB_SLIC
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A"]
+ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02B"]
 ACQUISITIONS_ROOT    = "AcquisitionSessions"
 
 OPENING_ANGLE  = 270.0
@@ -63,7 +63,7 @@ MAX_RANGE_MM   = 1000.0  # drop pings whose nearest reflector is beyond this.
 # wall-only trainer.
 VALIDATION_QUADRANTS = {
     "Acquisition01A": [0],
-    "Acquisition02A": [0],
+    "Acquisition02B": [0],
 }
 
 # Architecture (mirrors SCRIPT_TrainSonarModel.py defaults)
