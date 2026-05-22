@@ -50,11 +50,11 @@ from Library.TrackerNav import TrackerNav
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 ROBOT_NUMBER          = 1
-ARENA_NAME            = "Acquisition04"
+ARENA_NAME            = "Acquisition03"
 PLAN_PATH             = None    # None → most recent AcquisitionArenas/<ARENA_NAME>/plans/plan_*.json
-SESSION_NAME          = "Acquisition04A"
+SESSION_NAME          = "Acquisition03A"
 DO_PLOT_PINGS         = True    # per-ping sonar plot (debug only — slow)
-PUSHOVER_EVERY_N_POSITIONS = 10  # progress notification every N completed positions.
+PUSHOVER_EVERY_N_POSITIONS = 5  # progress notification every N completed positions.
                                   # Position-nav is the failure-prone step; once at a
                                   # position the robot just rotates between pings.
 NAV_HALT_AFTER        = 2       # halt + Pushover after N consecutive position-nav failures
@@ -130,12 +130,51 @@ def main():
         verbose=True,
     )
 
-    writer = DataStorage.DataWriter(SESSION_NAME, autoclear=True, verbose=False)
+    # Detect whether a previous run of this SESSION_NAME left data on disk,
+    # and offer to resume from the next position rather than wiping.
+    session_root = _resolve(_settings.data_folder) / SESSION_NAME
+    resume_from_position = 0
+    autoclear_writer = True
+    resume_writer = False
+    if session_root.is_dir():
+        existing_files = sorted(session_root.glob("data*.dill"))
+        if existing_files:
+            try:
+                with open(existing_files[-1], "rb") as f:
+                    import dill as _dill
+                    last_record = _dill.load(f)
+                last_payload = last_record.get("data", last_record) if isinstance(last_record, dict) else {}
+                last_pos_idx = int(last_payload.get("position_index", -1))
+            except Exception as exc:
+                print(f"Could not read last data file ({existing_files[-1].name}): {exc}")
+                last_pos_idx = -1
+            print(f"\nFound existing session at {session_root}")
+            print(f"  pings saved : {len(existing_files)}")
+            print(f"  last position_index in latest file: {last_pos_idx}")
+            print(f"\nPress Enter to resume from position {last_pos_idx + 1}/{n_positions},")
+            print(f"type 'restart' to wipe and start over, or Ctrl-C to abort.")
+            response = input().strip().lower()
+            if response == "restart":
+                print("Wiping existing session and starting from position 0.")
+                resume_from_position = 0
+            else:
+                resume_from_position = last_pos_idx + 1
+                autoclear_writer = False
+                resume_writer = True
+                if resume_from_position >= n_positions:
+                    raise SystemExit(
+                        f"Last saved position ({last_pos_idx}) is already the final "
+                        f"position; nothing to resume."
+                    )
+
+    writer = DataStorage.DataWriter(SESSION_NAME,
+                                    autoclear=autoclear_writer,
+                                    resume=resume_writer,
+                                    verbose=False)
     writer.add_file(str(Path(__file__).resolve()))
     writer.add_file('Library/Settings.py')
     writer.add_file(str(plan_path))
 
-    session_root = _resolve(_settings.data_folder) / SESSION_NAME
     CodeLogger.log_code(str(session_root), ['.', 'Library'], label=SESSION_NAME)
 
     # Copy the plan and its companion plots into the session root so the
@@ -170,20 +209,34 @@ def main():
         client.acquire('ping')
         time.sleep(0.5)
 
-    start_xy = plan.positions[0]
-    print(f"\nPlace the robot near (x={start_xy[0]:.0f}, y={start_xy[1]:.0f}) mm. "
-          f"Press Enter to begin (Ctrl-C to abort).")
+    start_xy = plan.positions[resume_from_position]
+    if resume_from_position == 0:
+        print(f"\nPlace the robot near (x={start_xy[0]:.0f}, y={start_xy[1]:.0f}) mm. "
+              f"Press Enter to begin (Ctrl-C to abort).")
+    else:
+        print(f"\nPlace the robot at position {resume_from_position}/{n_positions - 1}: "
+              f"(x={start_xy[0]:.0f}, y={start_xy[1]:.0f}) mm. "
+              f"Press Enter to resume (Ctrl-C to abort).")
     input()
 
-    PushOver.send(f"Acquisition started: {SESSION_NAME} ({n_pings_total} pings)")
+    if resume_from_position == 0:
+        PushOver.send(f"Acquisition started: {SESSION_NAME} ({n_pings_total} pings)")
+    else:
+        PushOver.send(f"Acquisition resumed: {SESSION_NAME} at position "
+                      f"{resume_from_position}/{n_positions - 1}")
 
-    ping_idx = 0
+    # ping_idx is the absolute index in the plan (not the saved-file count).
+    # On resume, skip the pings that belong to positions before resume_from_position
+    # so the printed "ping K/Total" line stays aligned with the plan.
+    ping_idx = sum(len(y) for y in plan.yaws_at_position[:resume_from_position])
     nav_failures = 0
     ping_failures = 0
     consecutive_nav_failures = 0
     t_start = time.time()
 
-    for pos_idx, (xy, yaws) in enumerate(zip(plan.positions, plan.yaws_at_position)):
+    for pos_idx in range(resume_from_position, n_positions):
+        xy = plan.positions[pos_idx]
+        yaws = plan.yaws_at_position[pos_idx]
         control.wait_if_paused()
         print(f"\n=== position {pos_idx + 1}/{n_positions}: "
               f"({xy[0]:.0f}, {xy[1]:.0f}) ===")
@@ -264,7 +317,10 @@ def main():
         if (PUSHOVER_EVERY_N_POSITIONS > 0
                 and positions_done % PUSHOVER_EVERY_N_POSITIONS == 0):
             elapsed = time.time() - t_start
-            secs_per_pos = elapsed / max(positions_done, 1)
+            # Rate is measured over THIS run only — on resume, t_start covers
+            # the resumed segment, not positions completed before it.
+            positions_this_run = positions_done - resume_from_position
+            secs_per_pos = elapsed / max(positions_this_run, 1)
             remaining_min = (n_positions - positions_done) * secs_per_pos / 60.0
             PushOver.send(
                 f"Acquisition: pos {positions_done}/{n_positions}, "

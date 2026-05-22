@@ -21,10 +21,11 @@ class DataWriter:
     
     def __init__(self, base_folder: str = "data",
                  prefix: str = "data", padding: int = 5, autoclear: bool = False,
+                 resume: bool = False,
                  verbose: bool = True):
         """
         Initialize the DataWriter object.
-        
+
         Parameters
         ----------
         base_folder : str
@@ -35,20 +36,26 @@ class DataWriter:
             The number of digits for file numbering with zero-padding
         autoclear : bool
             If True, clear existing folder if it exists. If False, raise exception if folder exists.
+        resume : bool
+            If True and the folder exists, keep existing files and continue numbering from
+            the highest-numbered file. Mutually exclusive with autoclear.
         verbose : bool
             If True, print status messages. If False, silence output.
         """
+        if autoclear and resume:
+            raise ValueError("autoclear=True and resume=True are mutually exclusive")
         self.base_folder = path.join(Settings.data_folder, base_folder)
         self.prefix = prefix
         self.padding = padding
         self.file_counter = 0
         self.created_at = None
         self.autoclear = autoclear
+        self.resume = resume
         self.verbose = verbose
-        
+
         # Create the base folder
         self._create_folder()
-    
+
     def _create_folder(self):
         """Create the base folder if it doesn't exist."""
         if not os.path.exists(self.base_folder):
@@ -69,11 +76,19 @@ class DataWriter:
                     print(f"Cleared and recreated data storage folder: {self.base_folder}")
                 # Start fresh with file counter
                 self.file_counter = 0
+            elif self.resume:
+                # Keep existing files; continue numbering from the highest-numbered file.
+                self.created_at = datetime.now()
+                self._update_file_counter()
+                if self.verbose:
+                    print(f"Resuming data storage folder: {self.base_folder} "
+                          f"(next file number = {self.file_counter + 1})")
             else:
-                # Raise exception if folder exists and autoclear is False
+                # Raise exception if folder exists and neither autoclear nor resume is set
                 raise FileExistsError(
                     f"Data storage folder already exists: {self.base_folder}. "
-                    f"Set autoclear=True to clear existing folder, or use a different folder name."
+                    f"Set autoclear=True to clear existing folder, resume=True to append, "
+                    f"or use a different folder name."
                 )
     
     def _update_file_counter(self):
