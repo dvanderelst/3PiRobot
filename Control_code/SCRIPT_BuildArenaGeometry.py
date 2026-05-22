@@ -85,8 +85,9 @@ ROOTS: List[str] = [
 ]
 
 # Wall height (mm) — used to back-project annotated wall tops to their (X, Y)
-# location. Walls are vertical, so top (X, Y) = base (X, Y).
-WALL_HEIGHT_MM: float = 295.0
+# location. Walls are vertical, so top (X, Y) = base (X, Y). Caliper-measured
+# 2026-05-22 at 300 mm.
+WALL_HEIGHT_MM: float = 300.0
 
 # Pole height (mm) — height of the cardboard poles whose tops are marked with
 # blue dabs. Same back-projection logic as walls but at this height.
