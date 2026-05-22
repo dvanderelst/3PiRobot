@@ -397,7 +397,8 @@ def plot_plan(plan: AcquisitionPlan, arena, out_path) -> None:
     cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("min wall distance (mm)")
 
-    # Annotate start, end, and every 10th
+    # Annotate every position with its tour index so the runner's
+    # "place the robot at position K" prompt can be located on the plot.
     for i, p in enumerate(positions):
         if i == 0:
             ax.annotate("START", (p[0], p[1]), fontsize=9, weight="bold",
@@ -407,7 +408,7 @@ def plot_plan(plan: AcquisitionPlan, arena, out_path) -> None:
             ax.annotate("END", (p[0], p[1]), fontsize=9, weight="bold",
                         color="red", xytext=(6, 6), textcoords="offset points",
                         zorder=4)
-        elif i % 10 == 0:
+        else:
             ax.annotate(str(i), (p[0], p[1]), fontsize=6, color="#444",
                         xytext=(3, 3), textcoords="offset points", zorder=4)
 
