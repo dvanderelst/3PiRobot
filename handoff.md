@@ -8,6 +8,7 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
 
 - **Paper:** *Vicarious sonar learning in a bat-inspired robot* (`Paper/main.tex`). Framework: cross-modal inverse training → cross-modal direct learning → cross-modal vicarious learning, instantiated on a bat-like robot.
 - **Robot:** Pololu 3pi+ 2040 with three MaxBotix MB1360 sonars (two ears + emitter). Control code under `Control_code/`. Firmware under `Robot_code/`.
+- **Compute topology:** code lives in Dropbox so it syncs across the user's dev machines; the project's authoritative remotes are on GitHub. The **PyLorex tracking server runs on a separate dedicated computer**, not on the dev machine the user is currently typing on. When PyLorex code or calibration changes, the server-computer needs a `git pull` + a tracker restart before any data acquisition — otherwise the server keeps serving whatever it loaded at last startup. Control scripts in `Control_code/` connect to both the robot and the tracker server.
 - **Key docs:**
   - `rationale.md` (root) — stable architecture doc for the robot pipeline (SonarModel, simulator, policy, deployment). Do not edit without explicit user consent.
   - `Paper/style.md` — writing-style reference for `main.tex`. UK English, no em-dashes, hand-numbered paragraphs. Read before editing the paper.
