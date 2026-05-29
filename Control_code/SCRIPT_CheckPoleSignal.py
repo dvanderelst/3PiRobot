@@ -52,6 +52,18 @@ OUT_DIR = Path("TempOutput") / "check_pole_signal"
 FEATURE_NAMES = ["peak_max", "peak_min", "lr_asym",
                  "width_max", "width_min", "toa"]
 
+# Per-feature print format. lr_asym lives in [0, 1] so a 1-decimal format
+# (used for the ~25 000-range peaks) rounds typical values to 0.0; .4f keeps
+# the actual signal visible.
+FEATURE_FORMATS = {
+    "peak_max":  ".1f",
+    "peak_min":  ".1f",
+    "lr_asym":   ".4f",
+    "width_max": ".1f",
+    "width_min": ".1f",
+    "toa":       ".1f",
+}
+
 
 # ── Feature extraction ────────────────────────────────────────────────────────
 
@@ -197,8 +209,9 @@ def main():
     print(f"  feature matrix: {X.shape}")
     for i, name in enumerate(FEATURE_NAMES):
         w = X[y == 0, i]; p = X[y == 1, i]
-        print(f"    {name:>9}: wall μ={w.mean():.1f} σ={w.std():.1f}   "
-              f"pole μ={p.mean():.1f} σ={p.std():.1f}")
+        fmt = FEATURE_FORMATS[name]
+        print(f"    {name:>9}: wall μ={w.mean():{fmt}} σ={w.std():{fmt}}   "
+              f"pole μ={p.mean():{fmt}} σ={p.std():{fmt}}")
     print()
 
     print("[3/4] 5-fold stratified logistic regression")
