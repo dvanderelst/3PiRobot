@@ -203,8 +203,7 @@ def main():
     with open(meta_path, "w") as f:
         json.dump(session_meta, f, indent=2)
 
-    # Warm-up pings (matches SCRIPT_DataAcquisition pattern — wakes the
-    # acoustic chain and flushes any stale buffers).
+    # Warm-up pings (wakes the acoustic chain and flushes any stale buffers).
     for _ in range(5):
         client.acquire('ping')
         time.sleep(0.5)
