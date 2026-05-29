@@ -1,6 +1,6 @@
 from Library import Client
 from Library import FileOperations
-from Library import Callibration
+from Library import Calibration
 from Library import AcousticProcessing
 import numpy as np
 import easygui
@@ -36,7 +36,7 @@ easygui.msgbox(message)
 if collect_baseline:
     user_message = "Starting baseline collection.\nPlease ensure no objects are in front of the robot and press OK."
     easygui.msgbox(user_message)
-    baseline_data = Callibration.get_baseline_data(client, nr_repeats=repeats)
+    baseline_data = Calibration.get_baseline_data(client, nr_repeats=repeats)
     calibration['baseline_present'] = True
     calibration['raw_distance_axis'] = baseline_data['raw_distance_axis']
     calibration['left_baseline'] = baseline_data['left_mean']
@@ -54,14 +54,14 @@ AcousticProcessing.plot_sonar_package(sonar_package)
 # Raise error if the client configuration does not match the calibration file
 # In theory, this is not strictly necessary, but in practice it allows all data in the calibration
 # file to be correctly interpreted
-Callibration.compare_sampling(client, calibration)
+Calibration.compare_sampling(client, calibration)
 
 if collect_distance_calibration:
     easygui.msgbox(f"Place the object at {real_distance1} meters and press OK.")
-    distance_data1 = Callibration.get_distance_data(client, calibration, real_distance1, nr_repeats=repeats)
+    distance_data1 = Calibration.get_distance_data(client, calibration, real_distance1, nr_repeats=repeats)
 
     easygui.msgbox(f"Place the object at {real_distance2} meters and press OK.")
-    distance_data2 = Callibration.get_distance_data(client, calibration, real_distance2, nr_repeats=repeats)
+    distance_data2 = Calibration.get_distance_data(client, calibration, real_distance2, nr_repeats=repeats)
 
     raw_distances1 = distance_data1['raw_distances']
     raw_distances2 = distance_data2['raw_distances']
@@ -69,7 +69,7 @@ if collect_distance_calibration:
     raw_iid2 = distance_data2['raw_iid']
     zero_iids = np.concatenate((raw_iid1, raw_iid2))
 
-    distance_fit_results = Callibration.distance_fit(robot_name, real_distance1, real_distance2, raw_distances1, raw_distances2)
+    distance_fit_results = Calibration.distance_fit(robot_name, real_distance1, real_distance2, raw_distances1, raw_distances2)
     calibration['distance_present'] = True
     calibration['iid_present'] = True
     calibration['distance_coefficient'] = distance_fit_results['distance_coefficient']
@@ -80,15 +80,15 @@ if collect_distance_calibration:
 # Raise error if the client configuration does not match the calibration file
 # In theory, this is not strictly necessary, but in practice it allows all data in the calibration
 # file to be correctly interpreted
-Callibration.compare_sampling(client, calibration)
+Calibration.compare_sampling(client, calibration)
 
 # Sweep data collection does not contribute to calibration but
 # is useful for visualizing the robot's sonar transfer function
 
 if collect_sweep_data:
     easygui.msgbox(f"Press ok to start the sweep.")
-    sweep_results = Callibration.get_sweep_data(client, calibration, angles)
-    Callibration.plot_sweep_data(robot_name, sweep_results, calibration)
+    sweep_results = Calibration.get_sweep_data(client, calibration, angles)
+    Calibration.plot_sweep_data(robot_name, sweep_results, calibration)
     # We could save the sweep data as well because it might be useful for later plotting
     # calibration['sweep_all_data'] =  sweep_results['sweep_all_data']
     calibration['sweep_onsets'] = sweep_results['sweep_onsets']
@@ -97,4 +97,4 @@ if collect_sweep_data:
     FileOperations.save_calibration(robot_name, calibration)
 
 
-Callibration.print_calibration_content(calibration)
+Calibration.print_calibration_content(calibration)
