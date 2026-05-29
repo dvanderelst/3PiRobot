@@ -47,7 +47,7 @@ from Library.SonarModel import SonarSlicesUQ_TwoHeaded, SLICE_NAMES as _LIB_SLIC
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02B"]
+ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A","Acquisition03A"]
 ACQUISITIONS_ROOT    = "AcquisitionSessions"
 
 OPENING_ANGLE  = 270.0
@@ -59,12 +59,11 @@ MAX_RANGE_MM   = 1000.0  # drop pings whose nearest reflector is beyond this.
                          # the narrowband sonar carries discriminative pole
                          # signal (mid-range 1-1.7 m is the empirical dead zone).
 
-# Validation: hold out one quadrant per session, same convention as the
-# wall-only trainer.
-VALIDATION_QUADRANTS = {
-    "Acquisition01A": [0],
-    "Acquisition02B": [0],
-}
+# 4-fold cross-validation: for each q in CV_QUADRANTS, hold out that quadrant
+# from every session as the val set and train on the rest. Same per-fold
+# convention as the wall-only trainer; here the loop is wired directly in main()
+# rather than requiring four separate runs.
+CV_QUADRANTS = [0, 1, 2, 3]
 
 # Architecture (mirrors SCRIPT_TrainSonarModel.py defaults)
 SONAR_CONV_CHANNELS = [8, 16]
@@ -80,7 +79,7 @@ LOSS_W_POLE  = 1.0
 
 LR             = 1e-3
 BATCH_SIZE     = 64
-EPOCHS         = 150
+EPOCHS         = 60
 WARMUP_EPOCHS  = 20
 LOG_VAR_MIN    = -6.0
 LOG_VAR_MAX    = 4.0
@@ -180,9 +179,28 @@ def load_and_filter():
             pole_az[keep], quads[keep], sess[keep], bin_centers)
 
 
-def split_indices(quads, sess):
+def split_indices(quads, sess, val_quadrants):
+    # Guard against config drift: val_quadrants keys must exactly match the
+    # loaded sessions. Otherwise a renamed/missing key silently leaks the whole
+    # session into training (no holdout) or references nothing.
+    sess_loaded = set(np.unique(sess).tolist())
+    vq_keys = set(val_quadrants)
+    extra   = vq_keys - sess_loaded
+    missing = sess_loaded - vq_keys
+    if extra or missing:
+        msgs = []
+        if extra:
+            msgs.append(f"val_quadrants references sessions not loaded: "
+                        f"{sorted(extra)}")
+        if missing:
+            msgs.append(f"Loaded sessions missing from val_quadrants "
+                        f"(would leak entirely into training): {sorted(missing)}")
+        raise ValueError(
+            "val_quadrants keys must exactly match the loaded sessions.\n  "
+            + "\n  ".join(msgs)
+        )
     is_val = np.zeros(len(quads), dtype=bool)
-    for s_name, val_q in VALIDATION_QUADRANTS.items():
+    for s_name, val_q in val_quadrants.items():
         is_val |= (sess == s_name) & np.isin(quads, list(val_q))
     return is_val
 
@@ -494,52 +512,38 @@ def plot_calibration(true_w, pred_w, std_w, true_az, pred_az, pred_az_std,
     plt.tight_layout(); plt.savefig(out_path, dpi=120); plt.close()
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Per-fold runner ───────────────────────────────────────────────────────────
 
-def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    np.random.seed(SEED); torch.manual_seed(SEED)
+def run_fold(q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
+             quads, sess, device, sub_prefix):
+    """Train + evaluate one CV fold (hold out quadrant `q` from every session).
 
-    print("[1/5] Loading data")
-    sonar, slice_t, classes, pole_az_deg, quads, sess, bin_centers = load_and_filter()
-    print(f"  {len(sonar)} pings retained, "
-          f"wall={int((classes == 0).sum())}, pole={int((classes == 1).sum())}")
-
-    pole_az_n = (pole_az_deg / CONE_HALF_DEG).astype(np.float32)
-    # NaN azimuth (wall-class samples) is fine — the masked loss ignores it.
-    # But torch.as_tensor doesn't like NaN propagation in CE so we fill with 0.
-    pole_az_n_safe = np.where(np.isnan(pole_az_n), 0.0, pole_az_n).astype(np.float32)
-
-    is_val = split_indices(quads, sess)
-    tr_s, va_s         = sonar[~is_val],         sonar[is_val]
-    tr_tw, va_tw       = slice_t[~is_val],       slice_t[is_val]
-    tr_c, va_c         = classes[~is_val],       classes[is_val]
-    tr_tp_n, va_tp_n   = pole_az_n_safe[~is_val], pole_az_n_safe[is_val]
+    Saves model, plots, and per-fold JSON to OUTPUT_DIR with file prefix
+    `{ARTIFACT_PREFIX}_{sub_prefix}`. Returns a metrics dict.
+    """
+    val_quadrants = {s: [q] for s in ACQUISITION_SESSIONS}
+    is_val = split_indices(quads, sess, val_quadrants)
+    tr_s, va_s       = sonar[~is_val],         sonar[is_val]
+    tr_tw, va_tw     = slice_t[~is_val],       slice_t[is_val]
+    tr_c, va_c       = classes[~is_val],       classes[is_val]
+    tr_tp_n, va_tp_n = pole_az_n_safe[~is_val], pole_az_n_safe[is_val]
     print(f"  train: {len(tr_s)} (wall={int((tr_c==0).sum())}, pole={int((tr_c==1).sum())})")
     print(f"  val:   {len(va_s)} (wall={int((va_c==0).sum())}, pole={int((va_c==1).sum())})")
 
     s_mean = float(tr_s.mean()); s_std = max(float(tr_s.std()), 1e-8)
-    # Wall target stats: pool over wall-class training rows + non-NaN bins
     tr_wall_only = tr_tw[tr_c == 0]
     valid = ~np.isnan(tr_wall_only)
     t_mean = float(tr_wall_only[valid].mean()) if valid.any() else 0.0
     t_std  = max(float(tr_wall_only[valid].std()), 1e-8) if valid.any() else 1.0
-    print(f"  sonar  mean={s_mean:.0f}, std={s_std:.0f}")
-    print(f"  wall   target mean={t_mean:.0f} mm, std={t_std:.0f} mm")
-    print(f"  pole   az normalised by /{CONE_HALF_DEG:.0f}°")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    save_path = os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_best_model.pth")
-    print(f"\n[2/5] Training on {device} ({EPOCHS} epochs, {WARMUP_EPOCHS} warmup)")
+    save_path = os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_{sub_prefix}_best_model.pth")
     model, best_val, best_epoch = train(
         tr_s, tr_tw, tr_c, tr_tp_n,
         va_s, va_tw, va_c, va_tp_n,
         (s_mean, s_std), (t_mean, t_std), device, save_path)
 
-    print("\n[3/5] Evaluating on val")
     pred = predict(model, va_s, (s_mean, s_std), (t_mean, t_std), device)
 
-    # Class metrics
     cls_acc = float(np.mean(pred["cls_pred"] == va_c))
     per_class = {}
     for ci, name in enumerate(CLASS_NAMES):
@@ -552,7 +556,6 @@ def main():
     for name, m in per_class.items():
         print(f"    {name:>5}: precision={m['precision']:.3f}  recall={m['recall']:.3f}  n_true={m['n_true']}")
 
-    # Pole azimuth metrics (pole-class val samples only)
     pole_val = (va_c == 1)
     pole_metrics = {}
     if pole_val.any():
@@ -569,13 +572,12 @@ def main():
               f"RMSE={pole_metrics['rmse_deg']:.2f}°  MAE={pole_metrics['mae_deg']:.2f}°  "
               f"σ_med={pole_metrics['pred_std_median_deg']:.2f}°")
 
-    # Wall slice metrics (wall-class val samples, non-NaN)
     wall_val = (va_c == 0)
     wall_metrics = {}
     for i, name in enumerate(SLICE_NAMES):
         t = va_tw[wall_val, i]; m = pred["wall_pred_mean"][wall_val, i]; s = pred["wall_pred_std"][wall_val, i]
-        valid = ~np.isnan(t)
-        t, m, s = t[valid], m[valid], s[valid]
+        v = ~np.isnan(t)
+        t, m, s = t[v], m[v], s[v]
         if len(t):
             rmse = float(np.sqrt(((m - t) ** 2).mean()))
             mae  = float(np.abs(m - t).mean())
@@ -583,24 +585,109 @@ def main():
                                   "pred_std_median_mm": float(np.median(s))}
             print(f"  Wall {name:>6} (n={len(t)}): RMSE={rmse:.0f} mm  MAE={mae:.0f} mm  σ_med={np.median(s):.0f}")
 
-    print("\n[4/5] Saving plots")
-    plot_confusion(va_c, pred["cls_pred"], pred["cls_probs"],
-                   os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_confusion.png"))
+    out_prefix = os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_{sub_prefix}")
+    plot_confusion(va_c, pred["cls_pred"], pred["cls_probs"], f"{out_prefix}_confusion.png")
     if pole_val.any():
         plot_pole_azimuth(pole_az_deg[is_val][pole_val],
                           pred["pole_pred_az_deg"][pole_val],
                           pred["pole_pred_az_std"][pole_val],
-                          os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_pole_azimuth_scatter.png"))
+                          f"{out_prefix}_pole_azimuth_scatter.png")
     plot_wall_scatter(va_tw, pred["wall_pred_mean"], pred["wall_pred_std"],
-                      wall_val, os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_wall_scatter.png"))
+                      wall_val, f"{out_prefix}_wall_scatter.png")
     if pole_val.any():
         plot_calibration(va_tw, pred["wall_pred_mean"], pred["wall_pred_std"],
                          pole_az_deg[is_val][pole_val],
                          pred["pole_pred_az_deg"][pole_val],
                          pred["pole_pred_az_std"][pole_val],
-                         wall_val, os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_calibration.png"))
+                         wall_val, f"{out_prefix}_calibration.png")
 
-    print("\n[5/5] Saving params + results")
+    fold_result = {
+        "quadrant":   q,
+        "best_epoch": best_epoch,
+        "val_total":  best_val,
+        "class_acc":  cls_acc,
+        "per_class":  per_class,
+        "pole_az":    pole_metrics,
+        "wall_per_slice": wall_metrics,
+        "n_train":    int(len(tr_s)),
+        "n_val":      int(len(va_s)),
+        "sonar_norm": {"mean": s_mean, "std": s_std},
+        "target_norm":{"mean": t_mean, "std": t_std},
+    }
+    with open(f"{out_prefix}_results.json", "w") as f:
+        json.dump(fold_result, f, indent=2)
+    return fold_result
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    np.random.seed(SEED); torch.manual_seed(SEED)
+
+    print("[1/4] Loading data")
+    sonar, slice_t, classes, pole_az_deg, quads, sess, bin_centers = load_and_filter()
+    print(f"  {len(sonar)} pings retained, "
+          f"wall={int((classes == 0).sum())}, pole={int((classes == 1).sum())}")
+
+    pole_az_n = (pole_az_deg / CONE_HALF_DEG).astype(np.float32)
+    # NaN azimuth (wall-class samples) is fine — the masked loss ignores it.
+    # But torch.as_tensor doesn't like NaN propagation in CE so we fill with 0.
+    pole_az_n_safe = np.where(np.isnan(pole_az_n), 0.0, pole_az_n).astype(np.float32)
+    print(f"  pole az normalised by /{CONE_HALF_DEG:.0f}°")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n[2/4] {len(CV_QUADRANTS)}-fold CV on {device} "
+          f"({EPOCHS} epochs, {WARMUP_EPOCHS} warmup per fold)")
+
+    fold_results = []
+    for q in CV_QUADRANTS:
+        print(f"\n--- Fold q={q} ---")
+        fold_results.append(run_fold(
+            q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
+            quads, sess, device, sub_prefix=f"q{q}"))
+
+    print("\n[3/4] CV summary")
+
+    def _ms(vals):
+        a = np.array(vals, dtype=float)
+        return float(a.mean()), float(a.std())
+
+    per_fold_acc = [f["class_acc"] for f in fold_results]
+    acc_m, acc_s = _ms(per_fold_acc)
+    print(f"  Class accuracy: {acc_m*100:.1f}% ± {acc_s*100:.1f}%  "
+          f"(per-fold: {' / '.join(f'{a*100:.0f}' for a in per_fold_acc)})")
+
+    cv_class = {}
+    for name in CLASS_NAMES:
+        precs = [f["per_class"][name]["precision"] for f in fold_results if name in f["per_class"]]
+        recs  = [f["per_class"][name]["recall"]    for f in fold_results if name in f["per_class"]]
+        if precs:
+            pm, ps = _ms(precs); rm, rs = _ms(recs)
+            cv_class[name] = {"precision_mean": pm, "precision_std": ps,
+                              "recall_mean": rm, "recall_std": rs}
+            print(f"    {name:>5}: precision={pm*100:.1f}% ± {ps*100:.1f}%  "
+                  f"recall={rm*100:.1f}% ± {rs*100:.1f}%")
+
+    cv_pole_az = {}
+    pole_rmses = [f["pole_az"]["rmse_deg"] for f in fold_results if f["pole_az"]]
+    if pole_rmses:
+        pm, ps = _ms(pole_rmses)
+        cv_pole_az = {"rmse_deg_mean": pm, "rmse_deg_std": ps,
+                      "per_fold": pole_rmses}
+        print(f"  Pole-az RMSE: {pm:.2f}° ± {ps:.2f}°  "
+              f"(per-fold: {' / '.join(f'{r:.1f}' for r in pole_rmses)})")
+
+    cv_wall = {}
+    for name in SLICE_NAMES:
+        rmses = [f["wall_per_slice"][name]["rmse_mm"] for f in fold_results if name in f["wall_per_slice"]]
+        if rmses:
+            rm, rs = _ms(rmses)
+            cv_wall[name] = {"rmse_mm_mean": rm, "rmse_mm_std": rs, "per_fold": rmses}
+            print(f"  Wall {name:>6} RMSE: {rm:.0f} ± {rs:.0f} mm  "
+                  f"(per-fold: {' / '.join(f'{r:.0f}' for r in rmses)})")
+
+    print("\n[4/4] Saving params + CV results")
     feature_params = {
         "cone_half_deg":  CONE_HALF_DEG,
         "slice_definitions": {
@@ -608,8 +695,6 @@ def main():
             "center": [-CONE_HALF_DEG + 2*CONE_HALF_DEG/3, CONE_HALF_DEG - 2*CONE_HALF_DEG/3],
             "right":  [CONE_HALF_DEG - 2*CONE_HALF_DEG/3,  CONE_HALF_DEG],
         },
-        "sonar_norm":     {"mean": s_mean, "std": s_std},
-        "target_norm":    {"mean": t_mean, "std": t_std},
         "pole_az_norm":   {"divide_by_deg": CONE_HALF_DEG},
         "class_names":    CLASS_NAMES,
         "envelope_norm":  {"kind": "none"},
@@ -634,29 +719,31 @@ def main():
     with open(os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_feature_params.json"), "w") as f:
         json.dump(feature_params, f, indent=2)
 
-    results = {
-        "metrics": {
-            "best_epoch":   best_epoch,
-            "val_total":    best_val,
-            "class_acc":    cls_acc,
-            "per_class":    per_class,
-            "pole_az":      pole_metrics,
-            "wall_per_slice": wall_metrics,
+    cv_results = {
+        "cv_summary": {
+            "class_acc_mean":  acc_m,
+            "class_acc_std":   acc_s,
+            "per_class":       cv_class,
+            "pole_az":         cv_pole_az,
+            "wall_per_slice":  cv_wall,
         },
-        "data": {
-            "n_train": int(len(tr_s)), "n_val": int(len(va_s)),
-            "validation_quadrants": VALIDATION_QUADRANTS,
-            "sessions": ACQUISITION_SESSIONS,
+        "folds":  fold_results,
+        "config": {
+            "sessions":      ACQUISITION_SESSIONS,
+            "cv_quadrants":  CV_QUADRANTS,
+            "max_range_mm":  MAX_RANGE_MM,
+            "cone_half_deg": CONE_HALF_DEG,
         },
     }
-    with open(os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_results.json"), "w") as f:
-        json.dump(results, f, indent=2)
+    with open(os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_cv_results.json"), "w") as f:
+        json.dump(cv_results, f, indent=2)
 
-    print(f"\nDone. Artifacts in {OUTPUT_DIR}/  (prefix '{ARTIFACT_PREFIX}_'):")
-    print(f"  {ARTIFACT_PREFIX}_best_model.pth, {ARTIFACT_PREFIX}_feature_params.json,"
-          f" {ARTIFACT_PREFIX}_results.json")
-    print(f"  {ARTIFACT_PREFIX}_confusion.png, {ARTIFACT_PREFIX}_pole_azimuth_scatter.png,")
-    print(f"  {ARTIFACT_PREFIX}_wall_scatter.png, {ARTIFACT_PREFIX}_calibration.png")
+    print(f"\nDone. Artifacts in {OUTPUT_DIR}/")
+    print(f"  per-fold: {ARTIFACT_PREFIX}_q{{0..{len(CV_QUADRANTS)-1}}}_"
+          f"{{best_model.pth, results.json, confusion.png, "
+          f"pole_azimuth_scatter.png, wall_scatter.png, calibration.png}}")
+    print(f"  aggregated: {ARTIFACT_PREFIX}_feature_params.json, "
+          f"{ARTIFACT_PREFIX}_cv_results.json")
 
 
 if __name__ == "__main__":
