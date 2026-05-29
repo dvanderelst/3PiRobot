@@ -22,7 +22,7 @@ import os
 import numpy as np
 
 import SCRIPT_PoseGraphSLAM_SE2 as slam
-from Library.SlamCore import build_windows, run_pf, umeyama_align
+from SlamCore import build_windows, run_pf, umeyama_align
 
 
 # ── Grid ────────────────────────────────────────────────────────────────

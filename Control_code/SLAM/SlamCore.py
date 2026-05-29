@@ -1,5 +1,5 @@
 """
-Library/SlamCore.py
+SLAM/SlamCore.py
 
 Shared building blocks for SLAM experiments on policy-trained trajectories.
 

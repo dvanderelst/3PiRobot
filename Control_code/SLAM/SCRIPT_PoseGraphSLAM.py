@@ -35,7 +35,7 @@ import matplotlib.lines as mlines
 import scipy.sparse
 import scipy.sparse.linalg
 
-from Library.SlamCore import load_run, collect_data, build_windows, run_pf, umeyama_align
+from SlamCore import load_run, collect_data, build_windows, run_pf, umeyama_align
 
 
 # ── Data source ───────────────────────────────────────────────────────────────
