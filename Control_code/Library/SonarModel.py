@@ -3,8 +3,9 @@ Library/SonarModel.py
 
 Single source of truth for the sonar feature pipeline.
 
-Loads the trained 3-slice (mean, σ) model written by
-SCRIPT_TrainSonarModel.py and exposes two interfaces:
+Loads the trained 3-slice (mean, σ) wall-only model (`slices_*` artifacts
+from the retired SCRIPT_TrainSonarModel.py, recoverable from git history)
+and exposes two interfaces:
 
     predict_from_envelope(L, R)        # real robot — sonar -> NN
     predict_from_profile(profile, rng) # simulator — geometry + σ_sim noise
@@ -116,7 +117,8 @@ def _maybe_normalize_envelope(env, params: dict):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Model architecture (also imported by SCRIPT_TrainSonarModel.py)
+# Model architecture (wall-only; SonarSlicesUQ_TwoHeaded in this module
+# extends it for the inverse trainer in SCRIPT_TrainInverseModel.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SonarSlicesUQ(nn.Module):
@@ -340,7 +342,11 @@ class SonarModel:
         if not os.path.exists(params_path):
             raise FileNotFoundError(
                 f"feature_params not found at {params_path}. "
-                "Run SCRIPT_TrainSonarModel.py first."
+                "SonarModel.load expects wall-only `slices_*` artifacts; "
+                "the wall-only trainer SCRIPT_TrainSonarModel.py was retired "
+                "(recoverable from git). The current SCRIPT_TrainInverseModel.py "
+                "writes `inverse_*` artifacts in a different shape that this "
+                "loader does not yet consume."
             )
         with open(params_path) as f:
             params = json.load(f)

@@ -1,8 +1,8 @@
 > **Do not edit without explicit user consent.**
 
 > **Implementation:** the canonical implementation of this rationale lives in three files:
-> `SCRIPT_TrainSonarModel.py` (sonar model training), `SCRIPT_TrainPolicy.py` (policy training),
-> and `SCRIPT_RunPolicy.py` (deployment). Consistency checks should cover all three.
+> `SCRIPT_TrainInverseModel.py` (sonar model training — two-headed inverse extending the wall-only architecture described here with class + pole-azimuth heads),
+> `SCRIPT_TrainPolicy.py` (policy training), and `SCRIPT_RunPolicy.py` (deployment). Consistency checks should cover all three.
 
 # Project Overview
 
@@ -49,7 +49,7 @@ This bakes in the physical L/R symmetry of the robot. Each head is a small 2-lay
 
 Off by default in the current pipeline (`ENVELOPE_NORM_KIND = None`). The trainer's z-score normalisation (using the saved `sonar_norm` mean/std in `slices_feature_params.json`) still applies and keeps inputs at the network in roughly `[-3, 3]`, but the per-ping per-channel min-max scaling described below is no longer applied at train or deploy time.
 
-The mechanism is kept on the shelf in case amplitude variability returns. When enabled (`ENVELOPE_NORM_KIND = "per_ping_minmax"`), each ping's L and R envelopes are min-max scaled per channel to `[0, 1]` along the time axis before reaching the conv stack. Applied identically in `SCRIPT_TrainSonarModel.load_data` and inside `SonarModel.predict_from_envelope` at inference; the chosen mode is recorded in `slices_feature_params.json` under `envelope_norm` so train and deploy paths can't drift apart. Legacy feature_params files without that field default to a no-op for backward compatibility.
+The mechanism is kept on the shelf in case amplitude variability returns. When enabled (`ENVELOPE_NORM_KIND = "per_ping_minmax"`), each ping's L and R envelopes are min-max scaled per channel to `[0, 1]` along the time axis before reaching the conv stack. Was applied in the wall-only `SCRIPT_TrainSonarModel.load_data` (retired 2026-05-29, recoverable from git) and is still applied inside `SonarModel.predict_from_envelope` at inference. The chosen mode is recorded in `slices_feature_params.json` under `envelope_norm` so train and deploy paths can't drift apart; legacy feature_params files without that field default to a no-op for backward compatibility. Re-enabling for training under the current two-headed pipeline would require porting the same logic into `SCRIPT_TrainInverseModel`'s data path.
 
 The original motivation was sim-to-real robustness on the absolute amplitude of the receive envelope. The emit-pulse peak and post-pulse signal level both depended on battery state and analog-receive-path drift; we observed empirically that the same robot in the same arena could produce envelope peaks at 25 k counts on one day and 28–30 k counts on another, with no firmware or arena change. That drift has since been addressed at the hardware/firmware level, so the normalisation is no longer load-bearing. If amplitude variability ever returns (different robot, different battery chemistry, transducer wear), flip `ENVELOPE_NORM_KIND` back to `"per_ping_minmax"` and retrain.
 

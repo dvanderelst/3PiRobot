@@ -1,8 +1,8 @@
 """
 Load AcquisitionSessions/<name>/ folders into the (sonar, profiles, quads,
-sess, bin_centers) shape that SCRIPT_TrainSonarModel's load_data() returns,
-so the SonarModel training pipeline can consume the new visually-guided
-acquisition output without changes downstream of the data layer.
+sess, bin_centers) shape originally established by the retired
+SCRIPT_TrainSonarModel.load_data() and now consumed by
+SCRIPT_TrainInverseModel.py via the load_data_inverse() variant below.
 
 Differences from the legacy DataProcessor pipeline:
   - Each ping is its own .dill (DataWriter file), not a per-step
@@ -357,8 +357,8 @@ def load_data(session_names: List[str],
               drop_pose_fallback: bool = True,
               verbose: bool = True
               ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Multi-session loader matching the return shape of
-    SCRIPT_TrainSonarModel.load_data().
+    """Multi-session loader matching the return shape originally
+    established by SCRIPT_TrainSonarModel.load_data() (retired).
 
     Returns:
         sonar       (N, samples, 2)

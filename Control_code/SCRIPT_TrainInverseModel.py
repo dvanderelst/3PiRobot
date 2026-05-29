@@ -65,7 +65,7 @@ MAX_RANGE_MM   = 1000.0  # drop pings whose nearest reflector is beyond this.
 # rather than requiring four separate runs.
 CV_QUADRANTS = [0, 1, 2, 3]
 
-# Architecture (mirrors SCRIPT_TrainSonarModel.py defaults)
+# Architecture (carries forward the wall-only SonarSlicesUQ defaults)
 SONAR_CONV_CHANNELS = [8, 16]
 SONAR_CONV_KERNEL   = 7
 SONAR_POOL_OUT      = 8
