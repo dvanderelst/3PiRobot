@@ -540,3 +540,163 @@ class SonarModel:
             result["sigma_right_mm"],     result["sigma_center_mm"],
             result["sigma_left_mm"],
         ], axis=-1).astype(np.float32)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Two-headed inverse: loadable inference wrapper
+# ══════════════════════════════════════════════════════════════════════════════
+
+class InverseModel:
+    """Inference wrapper for the two-headed cross-modal inverse
+    (`SonarSlicesUQ_TwoHeaded`), trained by SCRIPT_TrainInverseModel.py.
+
+    Parallel to `SonarModel` (wall-only) but for the `inverse_*` artifacts.
+    Exposes one entry point —
+
+        predict_from_envelope(L, R)  →  unified local feature dict
+
+    returning the class label, the wall 3-slice (mean, σ), and the pole
+    azimuth (mean, σ) in one call. This is the sonar-side producer of the
+    local feature the direct-/vicarious-learning policies consume; the
+    vision-side producer is geometry (`nearest_reflector_in_cone` +
+    `compute_profile`), and both emit the same {class; wall→slices; pole→az}
+    shape by construction.
+
+    Artifact layout (SCRIPT_TrainInverseModel.py writes per-CV-fold, not a
+    single production model):
+      - inverse_feature_params.json   shared: architecture, cone, pole-az
+                                      normalisation, envelope_norm, log_var clamp
+      - inverse_<fold>_results.json   per-fold: sonar_norm + target_norm stats
+      - inverse_<fold>_best_model.pth per-fold weights
+
+    `fold` selects which CV fold's weights + normalisation to load. There is
+    no all-data production model yet (see the deploy-model TODO in handoff.md);
+    any fold generalises at ~90% class accuracy, which is adequate for the
+    direct-learning demo, but a dedicated no-holdout model is the right thing
+    to deploy long-term.
+    """
+
+    SLICE_NAMES = SLICE_NAMES
+
+    def __init__(self, model: nn.Module, params: dict, fold_stats: dict,
+                 device: torch.device, fold: str):
+        self.model  = model.to(device).eval()
+        self.params = params
+        self.device = device
+        self.fold   = fold
+
+        self.cone_half_deg   = float(params["cone_half_deg"])
+        self.pole_az_divisor = float(params["pole_az_norm"]["divide_by_deg"])
+        self.class_names     = list(params.get("class_names", ["wall", "pole"]))
+        self._lv_min, self._lv_max = params["log_var_clamp"]
+
+        # Per-fold normalisation (sonar z-score + wall-distance de-norm).
+        self._s_mean = float(fold_stats["sonar_norm"]["mean"])
+        self._s_std  = float(fold_stats["sonar_norm"]["std"])
+        self._t_mean = float(fold_stats["target_norm"]["mean"])
+        self._t_std  = float(fold_stats["target_norm"]["std"])
+
+    def __repr__(self):
+        return (f"InverseModel(fold={self.fold}, cone=±{self.cone_half_deg:.0f}°, "
+                f"classes={self.class_names}, device={self.device})")
+
+    @classmethod
+    def load(cls, model_dir: str = "SonarModel", fold: str = "q0",
+             device: Optional[str] = None) -> "InverseModel":
+        params_path  = os.path.join(model_dir, "inverse_feature_params.json")
+        fold_path    = os.path.join(model_dir, f"inverse_{fold}_results.json")
+        weights_path = os.path.join(model_dir, f"inverse_{fold}_best_model.pth")
+        for p in (params_path, fold_path, weights_path):
+            if not os.path.exists(p):
+                raise FileNotFoundError(
+                    f"InverseModel.load: missing {p}. Expected two-headed "
+                    f"`inverse_*` artifacts (fold={fold!r}) from "
+                    "SCRIPT_TrainInverseModel.py. Run that trainer first, or "
+                    "pick a fold that exists (q0..q3 by default)."
+                )
+        with open(params_path) as f:
+            params = json.load(f)
+        with open(fold_path) as f:
+            fold_stats = json.load(f)
+
+        arch = params["architecture"]
+        model = SonarSlicesUQ_TwoHeaded(
+            samples=int(arch["samples"]),
+            conv_channels=list(arch["conv_channels"]),
+            conv_kernel=int(arch["conv_kernel"]),
+            pool_out=int(arch["pool_out"]),
+            fc_hidden=int(arch["fc_hidden"]),
+            head_hidden=int(arch["head_hidden"]),
+            n_classes=int(arch.get("n_classes", 2)),
+        )
+        target_device = torch.device(
+            device if device is not None
+            else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        ckpt = torch.load(weights_path, map_location="cpu")
+        model.load_state_dict(ckpt["model_state_dict"])
+        return cls(model, params, fold_stats, target_device, fold)
+
+    def predict_from_envelope(self, left, right) -> Dict[str, Union[float, np.ndarray]]:
+        """
+        Args:
+            left, right: numpy arrays of envelope samples, shape (T,) or (N, T).
+
+        Returns dict (scalars if input was 1D, else (N,) arrays):
+            class_label                int   0=wall, 1=pole (argmax)
+            p_pole                     float P(pole)
+            distance_{right,center,left}_mm   wall slice means (always emitted;
+                                              only meaningful when class==wall)
+            sigma_{right,center,left}_mm      wall slice σ
+            pole_az_deg                signed bearing (+ccw = LEFT); only
+                                       meaningful when class==pole
+            pole_az_sigma_deg          bearing σ
+        De-normalisation mirrors SCRIPT_TrainInverseModel.predict exactly.
+        """
+        L = np.asarray(left,  dtype=np.float32)
+        R = np.asarray(right, dtype=np.float32)
+        squeeze = (L.ndim == 1)
+        if squeeze:
+            L = L[None, :]; R = R[None, :]
+
+        L = _maybe_normalize_envelope(L, self.params)
+        R = _maybe_normalize_envelope(R, self.params)
+        Ln = (L - self._s_mean) / self._s_std
+        Rn = (R - self._s_mean) / self._s_std
+        Lt = torch.as_tensor(Ln, dtype=torch.float32).to(self.device)
+        Rt = torch.as_tensor(Rn, dtype=torch.float32).to(self.device)
+
+        with torch.no_grad():
+            out = self.model(Lt, Rt)
+
+        result: Dict[str, Union[float, np.ndarray]] = {}
+
+        # Wall slices (de-normalise mean + σ to mm).
+        for name in SLICE_NAMES:
+            mean_n    = out[f"{name}_mean"].cpu().squeeze(1).numpy()
+            log_var_n = np.clip(out[f"{name}_log_var"].cpu().squeeze(1).numpy(),
+                                self._lv_min, self._lv_max)
+            mean_mm  = mean_n * self._t_std + self._t_mean
+            sigma_mm = np.exp(log_var_n / 2.0) * self._t_std
+            result[f"distance_{name}_mm"] = mean_mm
+            result[f"sigma_{name}_mm"]    = sigma_mm
+
+        # Class (softmax over logits).
+        logits = out["class_logits"].cpu().numpy()
+        probs  = np.exp(logits - logits.max(axis=1, keepdims=True))
+        probs  = probs / probs.sum(axis=1, keepdims=True)
+        result["p_pole"]      = probs[:, 1]
+        result["class_label"] = probs.argmax(axis=1).astype(np.int64)
+
+        # Pole azimuth (de-normalise by cone half-angle).
+        az_n   = out["pole_az_mean"].cpu().squeeze(1).numpy()
+        az_lvn = np.clip(out["pole_az_log_var"].cpu().squeeze(1).numpy(),
+                         self._lv_min, self._lv_max)
+        result["pole_az_deg"]       = az_n * self.pole_az_divisor
+        result["pole_az_sigma_deg"] = np.exp(az_lvn / 2.0) * self.pole_az_divisor
+
+        if squeeze:
+            for k, v in result.items():
+                arr = np.asarray(v)
+                result[k] = int(arr[0]) if k == "class_label" else float(arr[0])
+        return result
