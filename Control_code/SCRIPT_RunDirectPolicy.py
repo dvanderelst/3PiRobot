@@ -51,8 +51,10 @@ tracker is only the referee for when-the-pole-is-reached and for logging.
   └─────────────────────────────────────────────────────────────────────────┘
 """
 
+import csv
 import math
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -123,6 +125,9 @@ YAW_STABLE_TIMEOUT_S  = 8.0
 # Dry-run flags (real modes): set False for tethered debugging without motion.
 do_rotation    = True
 do_translation = True
+
+PLOT_EVERY = 1   # re-save trajectory.png every N steps during a real run so it
+                 # can be watched live (0 = only at the end). Mirrors RunPolicy.
 
 DATA_FOLDER = "PolicyRuns"
 ARENAS_ROOT = "TargetArenas"
@@ -344,6 +349,45 @@ def save_trajectory_plot(xs, ys, geom, out_path, title):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Numeric trajectory log (for later re-plotting / analysis)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fmt(v):
+    return "" if v is None or not np.isfinite(v) else f"{float(v):.1f}"
+
+
+def open_trajectory_log(out_dir):
+    """Open <out_dir>/trajectory.tsv and write the header. Returns (file, writer);
+    the caller logs one row per step and closes the file at the end."""
+    f = open(os.path.join(out_dir, "trajectory.tsv"), "w", newline="")
+    w = csv.writer(f, delimiter="\t")
+    w.writerow([
+        "step", "x_mm", "y_mm", "yaw_deg",
+        "feat_cls", "pole_az_deg",                       # steering feature
+        "d_right_mm", "d_center_mm", "d_left_mm",        # wall slices (if wall)
+        "true_cls", "pole_near_mm", "min_wall_mm",       # ground-truth referee
+        "rot_deg", "drive_mm", "tag",                    # action taken
+    ])
+    f.flush()
+    return f, w
+
+
+def log_trajectory_row(f, w, step, x, y, yaw, feat, true_cls, pole_near, min_wall,
+                       rot, drive, tag):
+    """One per-step row, recorded at the pose where the feature was evaluated."""
+    s = feat.slices_mm
+    w.writerow([
+        step, f"{x:.1f}", f"{y:.1f}", f"{yaw:.2f}",
+        feat.cls, _fmt(feat.pole_az_deg),
+        _fmt(s.get("right")), _fmt(s.get("center")), _fmt(s.get("left")),
+        "" if not np.isfinite(true_cls) else int(true_cls),
+        _fmt(pole_near), _fmt(min_wall),
+        f"{rot:.2f}", f"{drive:.1f}", tag,
+    ])
+    f.flush()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Sim rollout (no robot)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -360,6 +404,7 @@ def run_sim(geom, P, out_dir):
 
     xs, ys = [x], [y]
     outcome = "max_steps"
+    f_log, w_log = open_trajectory_log(out_dir)
     for step in range(MAX_STEPS):
         feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG)
         true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
@@ -374,6 +419,9 @@ def run_sim(geom, P, out_dir):
             drive += float(rng.normal(0.0, SIM_DRIVE_NOISE_MM))
             drive = max(0.0, drive)
         rot = float(np.clip(rot, -P.bounce_max_turn, P.bounce_max_turn))
+        # Log at the pose the decision was made from (before the kinematic update).
+        log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
+                           true_cls, pole_near, min_wall, rot, drive, tag)
         yaw = ((yaw + rot + 180.0) % 360.0) - 180.0
         rad = math.radians(yaw)
         x += drive * math.cos(rad)
@@ -383,6 +431,7 @@ def run_sim(geom, P, out_dir):
               f"drive={drive:5.1f}  pose=({x:7.0f},{y:7.0f},{yaw:+6.0f})  "
               f"pole_near={pole_near:6.0f}  min_wall={min_wall:6.0f}")
 
+    f_log.close()
     print(f"\nOutcome: {outcome} after {len(xs) - 1} steps.")
     out_path = os.path.join(out_dir, "trajectory.png")
     save_trajectory_plot(xs, ys, geom, out_path,
@@ -395,7 +444,7 @@ def run_sim(geom, P, out_dir):
 # Real-robot run (sonar | vision)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_robot(geom, P, out_dir, source):
+def run_robot(geom, P, out_dir, source, features_path=None):
     from Library import Client
     from Library import LorexTracker
     from Library.TrackerNav import wait_for_stable_pose
@@ -404,8 +453,22 @@ def run_robot(geom, P, out_dir, source):
     print("  DEPLOY GATE: did you run SCRIPT_CalibrateRobot.py this session?")
     print("  Drive constants drift; a stale model curls the trajectory.")
     print("=" * 78)
-    if input("  Calibration current? proceed? [y/N]: ").strip().lower() != "y":
+    if input("  Robot calibration current? proceed? [y/N]: ").strip().lower() != "y":
         print("Aborted before robot motion."); return None
+
+    # Snapshot env + arena geometry + code into the run folder for reproducible
+    # offline plotting, mirroring SCRIPT_RunPolicy. Non-fatal if it fails — the
+    # run itself matters more than the snapshot.
+    try:
+        from Library import CodeLogger
+        from LorexLib.Environment import capture_environment_layout
+        capture_environment_layout(save_root=out_dir)
+        if features_path is not None and os.path.exists(features_path):
+            shutil.copy(features_path, os.path.join(out_dir, "arena_features.npz"))
+        CodeLogger.log_code(out_dir, [".", "Library"], label=SESSION)
+        print(f"Snapshotted env + arena features + code into {out_dir}")
+    except Exception as e:
+        print(f"  (env/code snapshot skipped: {e})")
 
     inverse = None
     if source == "sonar":
@@ -435,6 +498,7 @@ def run_robot(geom, P, out_dir, source):
     xs, ys = [], []
     outcome = "max_steps"
     last = None
+    f_log, w_log = open_trajectory_log(out_dir)
     for step in range(MAX_STEPS):
         # Sonar must be pinged at the current orientation *before* settling read.
         sonar_pkg = None
@@ -462,6 +526,8 @@ def run_robot(geom, P, out_dir, source):
             feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG)
 
         rot, drive, tag = ctrl.decide(feat)
+        log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
+                           true_cls, pole_near, min_wall, rot, drive, tag)
         print(f"step {step:3d}  {feat.cls:>5}/{tag:<8}  rot={rot:+6.1f}  "
               f"drive={drive:5.1f}  pose=({x:7.0f},{y:7.0f},{yaw:+6.0f})  "
               f"pole_near={pole_near:6.0f}  min_wall={min_wall:6.0f}")
@@ -476,11 +542,19 @@ def run_robot(geom, P, out_dir, source):
                 outcome = "drive_blocked"; break
         last = pose
 
+        # Live trajectory plot — watch the run build, like SCRIPT_RunPolicy.
+        if PLOT_EVERY > 0 and step % PLOT_EVERY == 0:
+            save_trajectory_plot(
+                xs, ys, geom, os.path.join(out_dir, "trajectory.png"),
+                f"{SESSION} [{source}] — step {step}")
+
+    f_log.close()
     print(f"\nOutcome: {outcome} after {len(xs)} poses.")
     out_path = os.path.join(out_dir, "trajectory.png")
     save_trajectory_plot(xs, ys, geom, out_path,
                          f"{SESSION} [{source}] — {outcome} ({len(xs)} steps)")
     print(f"Trajectory plot: {out_path}")
+    print(f"Numeric trajectory: {os.path.join(out_dir, 'trajectory.tsv')}")
     return outcome
 
 
@@ -488,26 +562,29 @@ def run_robot(geom, P, out_dir, source):
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_arena_geometry(arena_root: str, arena: str) -> dict:
+def load_arena_geometry(arena_root: str, arena: str):
     """Resolve arena_features.npz for an arena dir, tolerant of the env_* layout
     SCRIPT_BuildArenaGeometry writes: the features live under a timestamped
-    env_*/ subdir, not the arena root. Newest env_* wins."""
+    env_*/ subdir, not the arena root. Newest env_* wins. Returns (geom, path)
+    so the run can copy the exact features file into its output folder."""
     base = Path(arena_root) / arena
-    if (base / "arena_features.npz").exists():
-        return _load_features_for_session(base)
+    direct = base / "arena_features.npz"
+    if direct.exists():
+        return _load_features_for_session(base), direct
     if base.exists():
         env_dirs = sorted(p for p in base.iterdir()
                           if p.is_dir() and p.name.startswith("env_"))
         for env in reversed(env_dirs):
-            if (env / "arena_features.npz").exists():
-                print(f"Using arena geometry: {env / 'arena_features.npz'}")
-                return _load_features_for_session(env)
+            wp = env / "arena_features.npz"
+            if wp.exists():
+                print(f"Using arena geometry: {wp}")
+                return _load_features_for_session(env), wp
     # Fall back to the loader's own resolution (session_meta.json), or its error.
-    return _load_features_for_session(base)
+    return _load_features_for_session(base), None
 
 
 def main():
-    geom = load_arena_geometry(ARENAS_ROOT, ARENA)
+    geom, features_path = load_arena_geometry(ARENAS_ROOT, ARENA)
     print(f"Arena '{ARENA}': {geom['walls'].shape[0]} wall pts, "
           f"{geom['poles'].shape[0]} poles (r={geom['pole_radius_mm']:.1f} mm)")
     if geom["poles"].shape[0] == 0:
@@ -520,7 +597,7 @@ def main():
     if SENSE_SOURCE == "sim":
         run_sim(geom, P, out_dir)
     elif SENSE_SOURCE in ("sonar", "vision"):
-        run_robot(geom, P, out_dir, SENSE_SOURCE)
+        run_robot(geom, P, out_dir, SENSE_SOURCE, features_path)
     else:
         raise SystemExit(f"Unknown SENSE_SOURCE={SENSE_SOURCE!r}")
 
