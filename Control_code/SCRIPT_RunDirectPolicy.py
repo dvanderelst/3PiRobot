@@ -408,7 +408,11 @@ def run_sim(geom, P, out_dir):
     for step in range(MAX_STEPS):
         feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG)
         true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
-        if true_cls == 1.0 and pole_near < ROBOT_RADIUS_MM + STOP_MARGIN_MM:
+        # Pre-emptive stop: the fixed drive step overshoots the stop window — a
+        # single step can jump from outside it to inside the pole. Declare
+        # success when the *next* approach step would carry us across the
+        # threshold, and don't drive, rather than bumping the pole.
+        if true_cls == 1.0 and pole_near - P.drive_mm < ROBOT_RADIUS_MM + STOP_MARGIN_MM:
             outcome = "reached_pole"; break
         if min_wall < COLLISION_MM:
             outcome = "collision"; break
@@ -512,7 +516,11 @@ def run_robot(geom, P, out_dir, source, features_path=None):
 
         # Referee (ground truth) — success / collision / logging.
         true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
-        if true_cls == 1.0 and pole_near < ROBOT_RADIUS_MM + STOP_MARGIN_MM:
+        # Pre-emptive stop: the fixed drive step overshoots the stop window — a
+        # single step can jump from outside it to inside the pole. Declare
+        # success when the *next* approach step would carry us across the
+        # threshold, and don't drive, rather than bumping the pole.
+        if true_cls == 1.0 and pole_near - P.drive_mm < ROBOT_RADIUS_MM + STOP_MARGIN_MM:
             outcome = "reached_pole"; print("  *** pole reached ***"); break
 
         # Feature from the chosen modality.
