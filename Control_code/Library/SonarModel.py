@@ -643,8 +643,10 @@ class InverseModel:
             left, right: numpy arrays of envelope samples, shape (T,) or (N, T).
 
         Returns dict (scalars if input was 1D, else (N,) arrays):
-            class_label                int   0=wall, 1=pole (argmax)
+            class_label                int   0=wall, 1=pole, 2=none (argmax)
             p_pole                     float P(pole)
+            p_none                     float P(none); present only for 3-class
+                                       models (nothing within trained range)
             distance_{right,center,left}_mm   wall slice means (always emitted;
                                               only meaningful when class==wall)
             sigma_{right,center,left}_mm      wall slice σ
@@ -686,6 +688,8 @@ class InverseModel:
         probs  = np.exp(logits - logits.max(axis=1, keepdims=True))
         probs  = probs / probs.sum(axis=1, keepdims=True)
         result["p_pole"]      = probs[:, 1]
+        if probs.shape[1] >= 3:
+            result["p_none"]  = probs[:, 2]
         result["class_label"] = probs.argmax(axis=1).astype(np.int64)
 
         # Pole azimuth (de-normalise by cone half-angle).
