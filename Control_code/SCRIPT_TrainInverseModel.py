@@ -47,7 +47,7 @@ from Library.SonarModel import SonarSlicesUQ_TwoHeaded, SLICE_NAMES as _LIB_SLIC
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A","Acquisition03A"]
+ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A","Acquisition03A","Acquisition04A","Acquisition05A"]
 ACQUISITIONS_ROOT    = "AcquisitionSessions"
 
 OPENING_ANGLE  = 270.0
@@ -85,7 +85,8 @@ LOG_VAR_MIN    = -6.0
 LOG_VAR_MAX    = 4.0
 SEED           = 42
 
-CLASS_NAMES = ["wall", "pole"]
+CLASS_NAMES = ["wall", "pole", "none"]
+WALL_CLASS, POLE_CLASS, NONE_CLASS = 0, 1, 2   # "none" = nothing within MAX_RANGE_MM
 
 OUTPUT_DIR      = "SonarModel"
 ARTIFACT_PREFIX = "inverse"
@@ -152,9 +153,15 @@ def masked_gnll(pred_mean, pred_log_var, target, mask,
 # ── Data ──────────────────────────────────────────────────────────────────────
 
 def load_and_filter():
-    """Returns sonar, slice_targets, classes, pole_az_deg, quads, sess, bin_centers
-    with NaN-class rows dropped (cone-empty pings) and out-of-range pings
-    dropped (nearest reflector beyond MAX_RANGE_MM)."""
+    """Returns sonar, slice_targets, classes (0=wall, 1=pole, 2=none), pole_az,
+    quads, sess, bin_centers.
+
+    Cone-empty pings and pings whose nearest in-cone reflector is beyond
+    MAX_RANGE_MM are RELABELLED to the 'none' class (nothing actionable within
+    range) rather than dropped. This gives the classifier an explicit abstain
+    option and confines the wall-slice / pole-azimuth regression to the in-range
+    regime where the narrowband sonar is reliable (wall/pole masks key off
+    classes 0/1, so 'none' samples feed only the cross-entropy)."""
     sonar, profiles, classes, pole_az, near_dist, quads, sess, bin_centers = load_data_inverse(
         ACQUISITION_SESSIONS,
         acquisitions_root=ACQUISITIONS_ROOT,
@@ -163,20 +170,21 @@ def load_and_filter():
         profile_method=PROFILE_METHOD,
         cone_half_deg=CONE_HALF_DEG,
     )
-    keep = ~np.isnan(classes)
-    n_empty = int((~keep).sum())
-    if n_empty:
-        print(f"  dropping {n_empty} pings with empty cone")
+    classes = np.asarray(classes, dtype=np.float64)
+    empty = np.isnan(classes)
     if np.isfinite(MAX_RANGE_MM):
         in_range = np.isfinite(near_dist) & (near_dist <= MAX_RANGE_MM)
-        n_too_far = int(((~in_range) & keep).sum())
-        if n_too_far:
-            print(f"  dropping {n_too_far} pings with nearest reflector beyond "
-                  f"{MAX_RANGE_MM:.0f} mm")
-        keep = keep & in_range
+    else:
+        in_range = np.isfinite(near_dist)
+    none_mask = empty | (~in_range)
+    labels = classes.copy()
+    labels[none_mask] = NONE_CLASS
+    print(f"  relabelled {int(none_mask.sum())} pings to 'none' "
+          f"(empty_cone={int(empty.sum())}, "
+          f"beyond_{MAX_RANGE_MM:.0f}mm={int((none_mask & ~empty).sum())})")
     slice_t = compute_slice_targets(profiles, bin_centers, CONE_HALF_DEG)
-    return (sonar[keep], slice_t[keep], classes[keep].astype(np.int64),
-            pole_az[keep], quads[keep], sess[keep], bin_centers)
+    return (sonar, slice_t, labels.astype(np.int64),
+            pole_az, quads, sess, bin_centers)
 
 
 def split_indices(quads, sess, val_quadrants):
@@ -276,6 +284,7 @@ def train(tr_s, tr_tw, tr_c, tr_tp_n,
         conv_channels=SONAR_CONV_CHANNELS, conv_kernel=SONAR_CONV_KERNEL,
         pool_out=SONAR_POOL_OUT, fc_hidden=SONAR_FC_HIDDEN,
         head_hidden=SONAR_HEAD_HIDDEN,
+        n_classes=len(CLASS_NAMES),
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
 
@@ -384,17 +393,18 @@ def predict(model, sonar, sonar_stats, wall_stats, device):
 def plot_confusion(true_cls, pred_cls, probs, out_path):
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
 
-    # Panel 1: confusion matrix
+    # Panel 1: confusion matrix (n×n over CLASS_NAMES)
     ax = axes[0]
-    cm = np.zeros((2, 2), dtype=int)
+    n = len(CLASS_NAMES)
+    cm = np.zeros((n, n), dtype=int)
     for t, p in zip(true_cls, pred_cls):
         cm[int(t), int(p)] += 1
     im = ax.imshow(cm, cmap="Blues")
-    ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
+    ax.set_xticks(range(n)); ax.set_yticks(range(n))
     ax.set_xticklabels(CLASS_NAMES); ax.set_yticklabels(CLASS_NAMES)
     ax.set_xlabel("predicted"); ax.set_ylabel("true")
-    for i in range(2):
-        for j in range(2):
+    for i in range(n):
+        for j in range(n):
             ax.text(j, i, f"{cm[i, j]}", ha="center", va="center",
                     color="white" if cm[i, j] > cm.max() / 2 else "black",
                     fontsize=14, weight="bold")
@@ -406,10 +416,12 @@ def plot_confusion(true_cls, pred_cls, probs, out_path):
     ax = axes[1]
     p_pole = probs[:, 1]
     bins = np.linspace(0, 1, 21)
-    ax.hist(p_pole[true_cls == 0], bins=bins, alpha=0.6, color="#377eb8",
-            label=f"true wall (n={int((true_cls == 0).sum())})")
-    ax.hist(p_pole[true_cls == 1], bins=bins, alpha=0.6, color="#e41a1c",
-            label=f"true pole (n={int((true_cls == 1).sum())})")
+    colors = {"wall": "#377eb8", "pole": "#e41a1c", "none": "#4daf4a"}
+    for ci, name in enumerate(CLASS_NAMES):
+        sel = true_cls == ci
+        if sel.any():
+            ax.hist(p_pole[sel], bins=bins, alpha=0.55, color=colors.get(name),
+                    label=f"true {name} (n={int(sel.sum())})")
     ax.axvline(0.5, color="gray", linestyle="--", linewidth=1)
     ax.set_xlabel("predicted P(pole)")
     ax.set_ylabel("count")
@@ -527,8 +539,10 @@ def run_fold(q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
     tr_tw, va_tw     = slice_t[~is_val],       slice_t[is_val]
     tr_c, va_c       = classes[~is_val],       classes[is_val]
     tr_tp_n, va_tp_n = pole_az_n_safe[~is_val], pole_az_n_safe[is_val]
-    print(f"  train: {len(tr_s)} (wall={int((tr_c==0).sum())}, pole={int((tr_c==1).sum())})")
-    print(f"  val:   {len(va_s)} (wall={int((va_c==0).sum())}, pole={int((va_c==1).sum())})")
+    print(f"  train: {len(tr_s)} (wall={int((tr_c==0).sum())}, "
+          f"pole={int((tr_c==1).sum())}, none={int((tr_c==2).sum())})")
+    print(f"  val:   {len(va_s)} (wall={int((va_c==0).sum())}, "
+          f"pole={int((va_c==1).sum())}, none={int((va_c==2).sum())})")
 
     s_mean = float(tr_s.mean()); s_std = max(float(tr_s.std()), 1e-8)
     tr_wall_only = tr_tw[tr_c == 0]
@@ -627,8 +641,8 @@ def main():
 
     print("[1/4] Loading data")
     sonar, slice_t, classes, pole_az_deg, quads, sess, bin_centers = load_and_filter()
-    print(f"  {len(sonar)} pings retained, "
-          f"wall={int((classes == 0).sum())}, pole={int((classes == 1).sum())}")
+    print(f"  {len(sonar)} pings: wall={int((classes == 0).sum())}, "
+          f"pole={int((classes == 1).sum())}, none={int((classes == 2).sum())}")
 
     pole_az_n = (pole_az_deg / CONE_HALF_DEG).astype(np.float32)
     # NaN azimuth (wall-class samples) is fine — the masked loss ignores it.
