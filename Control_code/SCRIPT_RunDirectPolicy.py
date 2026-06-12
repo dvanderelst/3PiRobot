@@ -91,6 +91,15 @@ MAX_STEPS    = 200
 # the two modalities share an aperture; settable independently for vision/sim.
 CONE_HALF_DEG = 35.0
 
+# Vision/sim range horizon (mm). The 3-class sonar inverse abstains ("none")
+# when the nearest in-cone reflector is beyond its trained MAX_RANGE. Set this to
+# that range to make the vision/sim geometry producer abstain identically — a
+# controlled teacher/student comparison, and the right setting when using sim to
+# tune gains for the sonar deployment. None = full sight (vision as the
+# unrestricted teacher). Required only for parity at *deploy*; training always
+# applies the horizon (it defines the 'none' class).
+GEOM_RANGE_HORIZON_MM = None
+
 # ── Reactive rule constants (curved-bounce wall rule) ─────────────────────────
 DRIVE_MM           = 50.0   # nominal forward step per cycle (mm)
 MAX_TURN_DEG       = 25.0   # cap on pole-steering / scan rotation per step
@@ -142,6 +151,9 @@ class LocalFeature:
     """The one feature both modalities emit; the only input to `decide`."""
     cls: str                              # "pole" | "wall" | "empty"
     pole_az_deg: float = float("nan")     # signed bearing when cls == "pole"
+    p_pole: float = float("nan")          # P(pole) from the sonar inverse (sonar only)
+    p_none: float = float("nan")          # P(none) from the 3-class inverse (sonar only)
+    pole_az_sigma_deg: float = float("nan")  # pole-bearing σ (sonar only)
     slices_mm: Dict[str, float] = field(  # right/center/left when cls == "wall"
         default_factory=lambda: {"right": float("nan"),
                                  "center": float("nan"),
@@ -246,14 +258,19 @@ class ReactiveController:
 # Feature producers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def feature_from_geometry(x, y, yaw, geom, cone_half_deg) -> LocalFeature:
+def feature_from_geometry(x, y, yaw, geom, cone_half_deg,
+                          max_range_mm=None) -> LocalFeature:
     """Vision/sim producer: local feature from pose + arena geometry. This is
-    the exact supervision signal the inverse was trained against."""
+    the exact supervision signal the inverse was trained against. When
+    `max_range_mm` is set, abstain (→ "empty") if the nearest in-cone reflector
+    is beyond it — mirroring the 3-class sonar inverse's 'none' class."""
     walls, poles = geom["walls"], geom["poles"]
-    cls, pole_az, _ = nearest_reflector_in_cone(
+    cls, pole_az, near = nearest_reflector_in_cone(
         walls, poles, geom["pole_radius_mm"], x, y, yaw, cone_half_deg)
     if not np.isfinite(cls):
         return LocalFeature(cls="empty")
+    if max_range_mm is not None and np.isfinite(near) and near > max_range_mm:
+        return LocalFeature(cls="empty")   # nothing within range → matches 'none'
     if cls == 1.0:
         return LocalFeature(cls="pole", pole_az_deg=pole_az)
     # Wall: geometric 3-slice (min distance per slice), matching the inverse's
@@ -268,10 +285,21 @@ def feature_from_geometry(x, y, yaw, geom, cone_half_deg) -> LocalFeature:
 
 def feature_from_inverse(pred: Dict) -> LocalFeature:
     """Sonar producer: map InverseModel.predict_from_envelope output to the
-    common feature."""
-    if int(pred["class_label"]) == 1:
-        return LocalFeature(cls="pole", pole_az_deg=float(pred["pole_az_deg"]))
-    return LocalFeature(cls="wall", slices_mm={
+    common feature. 3-class inverse: 0=wall, 1=pole, 2=none. The 'none' class
+    (nothing within the trained range) maps to "empty" so the controller scans
+    instead of chasing a phantom. p_pole / p_none / pole_az_sigma_deg are carried
+    through for logging; they stay NaN on the geometry path."""
+    p_pole = float(pred.get("p_pole", float("nan")))
+    p_none = float(pred.get("p_none", float("nan")))
+    cl = int(pred["class_label"])
+    if cl == 2:                       # none → abstain (scan), don't chase
+        return LocalFeature(cls="empty", p_pole=p_pole, p_none=p_none)
+    if cl == 1:
+        return LocalFeature(cls="pole", pole_az_deg=float(pred["pole_az_deg"]),
+                            p_pole=p_pole, p_none=p_none,
+                            pole_az_sigma_deg=float(
+                                pred.get("pole_az_sigma_deg", float("nan"))))
+    return LocalFeature(cls="wall", p_pole=p_pole, p_none=p_none, slices_mm={
         "right":  float(pred["distance_right_mm"]),
         "center": float(pred["distance_center_mm"]),
         "left":   float(pred["distance_left_mm"]),
@@ -325,7 +353,15 @@ def referee(x, y, yaw, geom, cone_half_deg):
 # Plotting
 # ══════════════════════════════════════════════════════════════════════════════
 
-def save_trajectory_plot(xs, ys, geom, out_path, title):
+# Per-step "what the robot sees" marker colours, keyed by the feature class the
+# active modality (sonar inverse or vision geometry) emitted that step.
+_SEES_COLORS = {"pole": "#ff7f0e", "wall": "#1f77b4", "empty": "#999999"}
+
+
+def save_trajectory_plot(xs, ys, geom, out_path, title, feats=None):
+    """Draw the path over the arena. When `feats` (a list of (x, y, cls) at the
+    pose each perception was made) is given, colour the per-step markers by what
+    the robot saw — pole / wall / empty — instead of the time gradient."""
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     fig, ax = plt.subplots(figsize=(10, 8))
     if geom["walls"].size:
@@ -339,7 +375,15 @@ def save_trajectory_plot(xs, ys, geom, out_path, title):
         ax.scatter([], [], s=40, c="#984ea3", edgecolor="black",
                    linewidth=0.6, label="pole")
     ax.plot(xs, ys, color="black", alpha=0.6, lw=1, label="trajectory")
-    ax.scatter(xs, ys, c=range(len(xs)), cmap="viridis", s=18, zorder=3)
+    if feats:
+        for cls, col in _SEES_COLORS.items():
+            pts = [(fx, fy) for fx, fy, fc in feats if fc == cls]
+            if pts:
+                fxs, fys = zip(*pts)
+                ax.scatter(fxs, fys, color=col, s=20, zorder=3,
+                           label=f"sees {cls}")
+    else:
+        ax.scatter(xs, ys, c=range(len(xs)), cmap="viridis", s=18, zorder=3)
     if xs:
         ax.scatter([xs[0]], [ys[0]], marker="o", color="red", s=60, zorder=4, label="start")
     ax.set_aspect("equal"); ax.grid(True, alpha=0.3)
@@ -356,6 +400,10 @@ def _fmt(v):
     return "" if v is None or not np.isfinite(v) else f"{float(v):.1f}"
 
 
+def _fmt_p(v):
+    return "" if v is None or not np.isfinite(v) else f"{float(v):.3f}"
+
+
 def open_trajectory_log(out_dir):
     """Open <out_dir>/trajectory.tsv and write the header. Returns (file, writer);
     the caller logs one row per step and closes the file at the end."""
@@ -363,7 +411,7 @@ def open_trajectory_log(out_dir):
     w = csv.writer(f, delimiter="\t")
     w.writerow([
         "step", "x_mm", "y_mm", "yaw_deg",
-        "feat_cls", "pole_az_deg",                       # steering feature
+        "feat_cls", "pole_az_deg", "p_pole", "p_none", "pole_az_sigma_deg",  # steering feature
         "d_right_mm", "d_center_mm", "d_left_mm",        # wall slices (if wall)
         "true_cls", "pole_near_mm", "min_wall_mm",       # ground-truth referee
         "rot_deg", "drive_mm", "tag",                    # action taken
@@ -378,7 +426,8 @@ def log_trajectory_row(f, w, step, x, y, yaw, feat, true_cls, pole_near, min_wal
     s = feat.slices_mm
     w.writerow([
         step, f"{x:.1f}", f"{y:.1f}", f"{yaw:.2f}",
-        feat.cls, _fmt(feat.pole_az_deg),
+        feat.cls, _fmt(feat.pole_az_deg), _fmt_p(feat.p_pole), _fmt_p(feat.p_none),
+        _fmt(feat.pole_az_sigma_deg),
         _fmt(s.get("right")), _fmt(s.get("center")), _fmt(s.get("left")),
         "" if not np.isfinite(true_cls) else int(true_cls),
         _fmt(pole_near), _fmt(min_wall),
@@ -403,10 +452,12 @@ def run_sim(geom, P, out_dir):
     yaw = float(SIM_START_YAW_DEG)
 
     xs, ys = [x], [y]
+    sees = []                       # (x, y, cls) per decided step, for the plot
     outcome = "max_steps"
     f_log, w_log = open_trajectory_log(out_dir)
     for step in range(MAX_STEPS):
-        feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG)
+        feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG,
+                                     max_range_mm=GEOM_RANGE_HORIZON_MM)
         true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
         # Pre-emptive stop: the fixed drive step overshoots the stop window — a
         # single step can jump from outside it to inside the pole. Declare
@@ -426,6 +477,7 @@ def run_sim(geom, P, out_dir):
         # Log at the pose the decision was made from (before the kinematic update).
         log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
                            true_cls, pole_near, min_wall, rot, drive, tag)
+        sees.append((x, y, feat.cls))
         yaw = ((yaw + rot + 180.0) % 360.0) - 180.0
         rad = math.radians(yaw)
         x += drive * math.cos(rad)
@@ -439,7 +491,8 @@ def run_sim(geom, P, out_dir):
     print(f"\nOutcome: {outcome} after {len(xs) - 1} steps.")
     out_path = os.path.join(out_dir, "trajectory.png")
     save_trajectory_plot(xs, ys, geom, out_path,
-                         f"{SESSION} [sim] — {outcome} ({len(xs)-1} steps)")
+                         f"{SESSION} [sim] — {outcome} ({len(xs)-1} steps)",
+                         feats=sees)
     print(f"Trajectory plot: {out_path}")
     return outcome
 
@@ -459,6 +512,19 @@ def run_robot(geom, P, out_dir, source, features_path=None):
     print("=" * 78)
     if input("  Robot calibration current? proceed? [y/N]: ").strip().lower() != "y":
         print("Aborted before robot motion."); return None
+
+    # Per-ping raw-data store, mirroring SCRIPT_RunPolicy: one dill per step with
+    # the sonar package, pose, inverse prediction and action — so a sonar run can
+    # be re-analysed offline. Sonar only (vision has no ping). DataWriter clears
+    # <DATA_FOLDER>/<SESSION> on open, so it is created *before* the env/code
+    # snapshot below writes into that same folder.
+    writer = None
+    if source == "sonar":
+        from Library import DataStorage
+        from Library import Settings as _settings
+        _settings.data_folder = DATA_FOLDER
+        writer = DataStorage.DataWriter(SESSION, autoclear=True, verbose=False)
+        writer.add_file("SCRIPT_RunDirectPolicy.py")
 
     # Snapshot env + arena geometry + code into the run folder for reproducible
     # offline plotting, mirroring SCRIPT_RunPolicy. Non-fatal if it fails — the
@@ -500,6 +566,7 @@ def run_robot(geom, P, out_dir, source, features_path=None):
             client.acquire("ping"); time.sleep(0.5)
 
     xs, ys = [], []
+    sees = []                       # (x, y, cls) per decided step, for the plot
     outcome = "max_steps"
     last = None
     f_log, w_log = open_trajectory_log(out_dir)
@@ -531,14 +598,37 @@ def run_robot(geom, P, out_dir, source, features_path=None):
             pred = inverse.predict_from_envelope(sd[:, 1], sd[:, 2])
             feat = feature_from_inverse(pred)
         else:  # vision
-            feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG)
+            feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG,
+                                         max_range_mm=GEOM_RANGE_HORIZON_MM)
 
         rot, drive, tag = ctrl.decide(feat)
         log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
                            true_cls, pole_near, min_wall, rot, drive, tag)
+        sees.append((x, y, feat.cls))
+        pp = ""
+        if np.isfinite(feat.p_pole):
+            pp += f"  p_pole={feat.p_pole:.2f}"
+        if np.isfinite(feat.p_none):
+            pp += f"  p_none={feat.p_none:.2f}"
         print(f"step {step:3d}  {feat.cls:>5}/{tag:<8}  rot={rot:+6.1f}  "
               f"drive={drive:5.1f}  pose=({x:7.0f},{y:7.0f},{yaw:+6.0f})  "
-              f"pole_near={pole_near:6.0f}  min_wall={min_wall:6.0f}")
+              f"pole_near={pole_near:6.0f}  min_wall={min_wall:6.0f}{pp}")
+
+        # Persist the raw ping + everything derived from it (sonar mode only).
+        if writer is not None:
+            writer.save_data(
+                sonar_package=sonar_pkg,
+                position={"x": x, "y": y, "yaw_deg": yaw},
+                motion={"net_rotation": rot, "drive_mm": drive},
+                inverse_prediction=pred,
+                feature={"cls": feat.cls, "pole_az_deg": feat.pole_az_deg,
+                         "p_pole": feat.p_pole, "p_none": feat.p_none,
+                         "slices_mm": feat.slices_mm},
+                referee={"true_cls": (int(true_cls) if np.isfinite(true_cls)
+                                      else None),
+                         "pole_near_mm": pole_near, "min_wall_mm": min_wall},
+                step=step, tag=tag,
+            )
 
         if do_rotation and abs(rot) > 1e-6:
             client.step(angle=rot); time.sleep(0.5)
@@ -554,15 +644,18 @@ def run_robot(geom, P, out_dir, source, features_path=None):
         if PLOT_EVERY > 0 and step % PLOT_EVERY == 0:
             save_trajectory_plot(
                 xs, ys, geom, os.path.join(out_dir, "trajectory.png"),
-                f"{SESSION} [{source}] — step {step}")
+                f"{SESSION} [{source}] — step {step}", feats=sees)
 
     f_log.close()
     print(f"\nOutcome: {outcome} after {len(xs)} poses.")
     out_path = os.path.join(out_dir, "trajectory.png")
     save_trajectory_plot(xs, ys, geom, out_path,
-                         f"{SESSION} [{source}] — {outcome} ({len(xs)} steps)")
+                         f"{SESSION} [{source}] — {outcome} ({len(xs)} steps)",
+                         feats=sees)
     print(f"Trajectory plot: {out_path}")
     print(f"Numeric trajectory: {os.path.join(out_dir, 'trajectory.tsv')}")
+    if writer is not None:
+        print(f"Sonar dills: {writer.get_file_count()} files in {writer.base_folder}")
     return outcome
 
 
