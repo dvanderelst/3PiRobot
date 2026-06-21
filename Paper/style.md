@@ -40,9 +40,9 @@ Active voice where natural; passive where the actor is genuinely incidental.
 
 ## Spelling
 
-UK English throughout. Common substitutions: *colour* (not color), *behaviour* / *behavioural* (not behavior / behavioral), *specialisation* (not specialization), *recognise* / *organise* / *analyse* (not -ize / -yze), *hypothesised* (not hypothesized), *parameterised* (not parameterized), *centre* (not center), *defence* (not defense).
+US English throughout (changed from UK on 2026-06-20). Common forms: *color* (not colour), *behavior* / *behavioral* (not behaviour / behavioural), *specialization* (not specialisation), *recognize* / *organize* / *analyze* (not -ise / -yse), *hypothesized* (not hypothesised), *parameterized* (not parameterised), *center* (not centre), *defense* (not defence), *modeling* / *modeled* (not modelling / modelled).
 
-Exception: the hyperref option `colorlinks=true` in the preamble is a package keyword and stays in US form.
+Note: titles in `references.bib` keep their original published spelling (often UK) and are not converted.
 
 ## Paragraph numbering
 
