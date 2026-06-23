@@ -171,6 +171,20 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-06-23 — Deployment inverse: single spatial 15% holdout (supersedes 4-fold CV for the deployed model)
+
+- Commit: `f6c969d` (`Control: add spatial-holdout deployment training for the inverse`) on `direct-learning-poletask`. `SCRIPT_TrainInverseModel.py` gains a deployment path (`main_deploy()`, now the script entry point; CV `main()`/`run_fold` untouched, EXPT still works); `AcquisitionSessionLoader.load_data_inverse` gains `return_poses`. `SCRIPT_RunDirectPolicy.py` `INVERSE_FOLD` "q0" → "deploy" (edited in the working tree, left **uncommitted** with the user's live tuning WIP).
+- **Framing change (decided 2026-06-23, see [[project_validation_purpose]]).** We make NO generalization claim for the inverse; its real test is the behavioral experiments. Held-out data is now only an overfitting guard. So the deployed model is a single train/val split, not CV: per session, hold out a contiguous spatial region (the 15% of pings nearest a seeded random anchor; **seed=0**, chosen for balanced per-session pole coverage — ≥14 poles/session — before training), train on the other 85% with early stopping on the held-out region, and report in-sample vs held-out (the small gap is the overfitting check). The 2026-06-22 4-fold CV B model is superseded for *deployment*; that entry's CV numbers are no longer what the paper reports.
+- Config: Acq01A–05A, `MAX_RANGE_MM=1000`, `CONE_HALF_DEG=35`, `SonarSlicesUQ_Wall3(symmetric=True)`, 15% spatial holdout (seed 0), 60-epoch budget, best epoch **45**. n_train 1813 / n_held-out 322 (held-out poles n=90).
+- **Class accuracy: in-sample 85.5% • held-out 83.9%** (small gap → not overfit).
+- **Wall: in-sample prec/rec 92.6/95.2 • held-out 90.6/91.8.**
+- **Pole: in-sample prec/rec 73.9/70.8 • held-out 81.6/68.9.**
+- **None: in-sample prec/rec 78.6/76.5 • held-out 75.3/85.9.**
+- **Pole-az RMSE: in-sample 10.1° (n=387) • held-out 12.1° (n=90)**; MAE 7.3°/9.2°; σ_med ≈10°.
+- **Wall RMSE L/C/R (mm): in-sample 304/311/271 • held-out 330/397/248.** Held-out center (397) rests on few held-out wall pings and is noisier than the even in-sample profile (single-split sampling, flagged in the paper).
+- **Deployment validation:** `inverse_deploy_*` loads via `InverseModel.load(fold="deploy")`; the `direct_pole_demo1` phantom-pole gate passes **10/10** (all old confident phantom poles → `none`).
+- Paper: Methods Par 22 + Results Par 23–27 + `tab:inverse-results` rewritten around this (in-sample vs held-out two columns); paper edits uncommitted (user reviewing).
+
 ### 2026-06-22 — Wall-head architecture sweep + adoption of the single symmetric head (B) as canonical inverse
 
 - Commit: `ed66804` (`Control: adopt single symmetric wall head (B) as canonical inverse`) on `direct-learning-poletask`. New `EXPT_head_variants.py`; `Library/SonarModel.py` gains `SonarSlicesUQ_Wall3` + a `model_class`-dispatching `InverseModel.load`; `SCRIPT_TrainInverseModel.py` selects architecture via `MODEL_CLASS`/`MODEL_KWARGS`/`MODEL_CLASS_NAME` (recorded in `feature_params`).
