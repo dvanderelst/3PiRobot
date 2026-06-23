@@ -21,3 +21,7 @@ Control_code/SonarSessions/
 .claude/
 
 Paper/dieters_scratch_pad.md
+
+############## Paper figure working files (commit figures + scripts only)
+Paper/images/*.drawio.bkp
+Paper/images/image_resources/echo_candidates/

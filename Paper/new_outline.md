@@ -16,6 +16,16 @@ Inverse models for sonar are probably necessarily feature based instead of gener
 
 While the combination of sonar and vision might enable learning feature-based inverse models, this has not been demonstrated. [There is work on sonar-based classification of vegetation and scenes - by Yovel, Muller and us - however, these do not show the extraction of action-relevant features. In other words, they don't show that the features can be used in control or complete tasks.]
 
+Refs to check - full texts in zotero:
+Yovel, Y., Franz, M. O., Stilz, P. & Schnitzler, H.-U. Complex echo classification by echo-locating bats: a review. J Comp Physiol A 197, 475–490 (2011).
+Eliakim, I., Cohen, Z., Kosa, G. & Yovel, Y. A fully autonomous terrestrial bat-like acoustic robot. PLOS Computational Biology 14, e1006406 (2018).
+Wang, R., Liu, Y. & Müller, R. Detection of passageways in natural foliage using biomimetic sonar. Bioinspir. Biomim. 17, 056009 (2022).
+Vanderelst, D., Steckel, J., Boen, A., Peremans, H. & Holderied, M. W. Place recognition using batlike sonar. eLife 5, e14188 (2016).
+Achutha, A. C., Peremans, H., Firzlaff, U. & Vanderelst, D. Efficient encoding of spectrotemporal information for bat echolocation. PLOS Computational Biology 17, e1009052 (2021).
+
+
+
+
 Here we demonstrate training of an inverse model for a small set of environmental features (detection and localization of pole, wall and a very coarse depth profile). The results show that the resulting inverse model is noisy and that extracting these features is not trivial. However, and going beyond existing studies, despite this, we show that the inverse model can be used to complete two tasks:
 
 1) Obstacle avoidance and target approach
