@@ -42,7 +42,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from Library.AcquisitionSessionLoader import load_data_inverse
-from Library.SonarModel import SonarSlicesUQ_TwoHeaded, SLICE_NAMES as _LIB_SLICE_NAMES
+from Library.SonarModel import (
+    SonarSlicesUQ_TwoHeaded, SonarSlicesUQ_Wall3, SLICE_NAMES as _LIB_SLICE_NAMES,
+)
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -64,6 +66,20 @@ MAX_RANGE_MM   = 1000.0  # drop pings whose nearest reflector is beyond this.
 # convention as the wall-only trainer; here the loop is wired directly in main()
 # rather than requiring four separate runs.
 CV_QUADRANTS = [0, 1, 2, 3]
+
+# Canonical inverse architecture. B = SonarSlicesUQ_Wall3(symmetric=True): one
+# 3-output wall head, applied to both ear orderings (LR/RL) with the flanking
+# bins swapped and the center averaged, so the left-right mirror symmetry of the
+# sensor is enforced uniformly across all three slices. Chosen over the base
+# side-head + z_sym-center arrangement (SonarSlicesUQ_TwoHeaded): performance is
+# within per-fold noise (see Performance notes 2026-06-22) but the single-head
+# construction is simpler to state and matches the symmetry logic already used
+# by the class and pole-azimuth heads. EXPT_head_variants.py overrides these to
+# sweep architectures. MODEL_CLASS_NAME is recorded in feature_params so
+# InverseModel.load reconstructs the right class at deploy time.
+MODEL_CLASS      = SonarSlicesUQ_Wall3
+MODEL_KWARGS     = {"symmetric": True}
+MODEL_CLASS_NAME = "SonarSlicesUQ_Wall3"
 
 # Architecture (carries forward the wall-only SonarSlicesUQ defaults)
 SONAR_CONV_CHANNELS = [8, 16]
@@ -279,12 +295,13 @@ def train(tr_s, tr_tw, tr_c, tr_tp_n,
                                va_c, va_tp_n, BATCH_SIZE, False)
 
     torch.manual_seed(SEED)
-    model = SonarSlicesUQ_TwoHeaded(
+    model = MODEL_CLASS(
         samples=tr_s.shape[1],
         conv_channels=SONAR_CONV_CHANNELS, conv_kernel=SONAR_CONV_KERNEL,
         pool_out=SONAR_POOL_OUT, fc_hidden=SONAR_FC_HIDDEN,
         head_hidden=SONAR_HEAD_HIDDEN,
         n_classes=len(CLASS_NAMES),
+        **MODEL_KWARGS,
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
 
@@ -720,7 +737,8 @@ def main():
             "pool_out":      SONAR_POOL_OUT,
             "fc_hidden":     SONAR_FC_HIDDEN,
             "head_hidden":   SONAR_HEAD_HIDDEN,
-            "model_class":   "SonarSlicesUQ_TwoHeaded",
+            "model_class":   MODEL_CLASS_NAME,
+            "wall3_symmetric": bool(MODEL_KWARGS.get("symmetric", True)),
             "n_classes":     len(CLASS_NAMES),
         },
         "profile": {

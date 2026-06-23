@@ -290,6 +290,94 @@ class SonarSlicesUQ_TwoHeaded(nn.Module):
         }
 
 
+class SonarSlicesUQ_Wall3(nn.Module):
+    """Architecture experiment: one 3-output wall head instead of the
+    side-head + center-head (+ z_sym) arrangement of SonarSlicesUQ_TwoHeaded.
+    Emits the same output dict, so it is a drop-in for the trainer.
+
+    symmetric=True  (B): the wall head is run on both ear orderings (LR, RL) and
+                         the outputs combined -- left/right swap, center averaged
+                         -- so mirror symmetry is enforced and all three
+                         distances use the full binaural signal (no z_sym).
+    symmetric=False (A): all outputs are read from LR only; no symmetry is
+                         enforced, so the model can learn left/right asymmetries.
+    """
+
+    def __init__(self, samples, conv_channels, conv_kernel, pool_out,
+                 fc_hidden, head_hidden, n_classes: int = 2, symmetric: bool = True):
+        super().__init__()
+        layers = []
+        in_ch = 1
+        for out_ch in conv_channels:
+            layers += [
+                nn.Conv1d(in_ch, out_ch, conv_kernel, padding=conv_kernel // 2),
+                nn.ReLU(),
+            ]
+            in_ch = out_ch
+        self.encoder = nn.Sequential(*layers)
+        self.pool = nn.AdaptiveAvgPool1d(pool_out)
+        feat_dim = conv_channels[-1] * pool_out
+        self.fc = nn.Sequential(nn.Linear(feat_dim, fc_hidden), nn.ReLU())
+
+        def make_head(in_dim, hidden, out_dim=1):
+            return nn.Sequential(
+                nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, out_dim)
+            )
+
+        self.wall_mean_head = make_head(2 * fc_hidden, head_hidden, out_dim=3)
+        self.wall_log_var_head = make_head(2 * fc_hidden, head_hidden, out_dim=3)
+        self.class_head = make_head(2 * fc_hidden, head_hidden, out_dim=n_classes)
+        self.pole_az_mean_head = make_head(2 * fc_hidden, head_hidden)
+        self.pole_az_log_var_head = make_head(2 * fc_hidden, head_hidden)
+        self.n_classes = n_classes
+        self.symmetric = symmetric
+
+    def _embed(self, ch):
+        z = self.encoder(ch.unsqueeze(1))
+        z = self.pool(z).flatten(1)
+        return self.fc(z)
+
+    def forward(self, left, right):
+        zL = self._embed(left)
+        zR = self._embed(right)
+        LR = torch.cat([zL, zR], dim=-1)
+        RL = torch.cat([zR, zL], dim=-1)
+
+        def col(t, i):
+            return t[:, i:i + 1]
+
+        if self.symmetric:
+            mLR, mRL = self.wall_mean_head(LR), self.wall_mean_head(RL)
+            vLR, vRL = self.wall_log_var_head(LR), self.wall_log_var_head(RL)
+            # head columns are [left, center, right]; under the LR<->RL swap the
+            # mirror's left is the true right and vice versa.
+            left_mean = 0.5 * (col(mLR, 0) + col(mRL, 2))
+            left_log_var = 0.5 * (col(vLR, 0) + col(vRL, 2))
+            center_mean = 0.5 * (col(mLR, 1) + col(mRL, 1))
+            center_log_var = 0.5 * (col(vLR, 1) + col(vRL, 1))
+            right_mean = 0.5 * (col(mLR, 2) + col(mRL, 0))
+            right_log_var = 0.5 * (col(vLR, 2) + col(vRL, 0))
+            class_logits = 0.5 * (self.class_head(LR) + self.class_head(RL))
+            pole_az_mean = 0.5 * (self.pole_az_mean_head(LR) - self.pole_az_mean_head(RL))
+            pole_az_log_var = 0.5 * (self.pole_az_log_var_head(LR) + self.pole_az_log_var_head(RL))
+        else:
+            m, v = self.wall_mean_head(LR), self.wall_log_var_head(LR)
+            left_mean, center_mean, right_mean = col(m, 0), col(m, 1), col(m, 2)
+            left_log_var, center_log_var, right_log_var = col(v, 0), col(v, 1), col(v, 2)
+            class_logits = self.class_head(LR)
+            pole_az_mean = self.pole_az_mean_head(LR)
+            pole_az_log_var = self.pole_az_log_var_head(LR)
+
+        return {
+            "right_mean": right_mean, "right_log_var": right_log_var,
+            "center_mean": center_mean, "center_log_var": center_log_var,
+            "left_mean": left_mean, "left_log_var": left_log_var,
+            "class_logits": class_logits,
+            "pole_az_mean": pole_az_mean,
+            "pole_az_log_var": pole_az_log_var,
+        }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Loadable wrapper with sim and deploy interfaces
 # ══════════════════════════════════════════════════════════════════════════════
@@ -620,7 +708,10 @@ class InverseModel:
             fold_stats = json.load(f)
 
         arch = params["architecture"]
-        model = SonarSlicesUQ_TwoHeaded(
+        # Dispatch on the recorded architecture so B-trained (Wall3) and the
+        # older base (TwoHeaded) checkpoints both load correctly. Default to
+        # TwoHeaded for feature_params written before model_class existed.
+        common = dict(
             samples=int(arch["samples"]),
             conv_channels=list(arch["conv_channels"]),
             conv_kernel=int(arch["conv_kernel"]),
@@ -629,6 +720,18 @@ class InverseModel:
             head_hidden=int(arch["head_hidden"]),
             n_classes=int(arch.get("n_classes", 2)),
         )
+        model_class = arch.get("model_class", "SonarSlicesUQ_TwoHeaded")
+        if model_class == "SonarSlicesUQ_Wall3":
+            model = SonarSlicesUQ_Wall3(
+                **common, symmetric=bool(arch.get("wall3_symmetric", True))
+            )
+        elif model_class == "SonarSlicesUQ_TwoHeaded":
+            model = SonarSlicesUQ_TwoHeaded(**common)
+        else:
+            raise ValueError(
+                f"InverseModel.load: unknown model_class {model_class!r} in "
+                f"{params_path}"
+            )
         target_device = torch.device(
             device if device is not None
             else ("cuda" if torch.cuda.is_available() else "cpu")
