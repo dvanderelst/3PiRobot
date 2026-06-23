@@ -67,6 +67,18 @@ MAX_RANGE_MM   = 1000.0  # drop pings whose nearest reflector is beyond this.
 # rather than requiring four separate runs.
 CV_QUADRANTS = [0, 1, 2, 3]
 
+# Deployment training: a SINGLE spatial holdout, not cross-validation. We make no
+# generalization claim for the inverse (its real test is the behavioral
+# experiments); this held-out region is purely an overfitting guard, and we report
+# in-sample vs held-out side by side. Per session, the HOLDOUT_FRAC of pings
+# nearest a seeded random anchor pose form a contiguous held-out patch; the model
+# trains on the rest with early stopping on the patch. The deployed inverse_ model
+# (fold name "deploy") comes from this path, not from the CV folds. main_deploy()
+# is the script entry point; main() (the CV path) is kept for diagnostics/EXPT.
+HOLDOUT_FRAC = 0.15
+HOLDOUT_SEED = 0   # chosen for balanced per-session pole coverage in the holdout
+                   # (>=14 poles/session), before training; not tuned on results.
+
 # Canonical inverse architecture. B = SonarSlicesUQ_Wall3(symmetric=True): one
 # 3-output wall head, applied to both ear orderings (LR/RL) with the flanking
 # bins swapped and the center averaged, so the left-right mirror symmetry of the
@@ -168,9 +180,9 @@ def masked_gnll(pred_mean, pred_log_var, target, mask,
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
-def load_and_filter():
+def load_and_filter(with_poses: bool = False):
     """Returns sonar, slice_targets, classes (0=wall, 1=pole, 2=none), pole_az,
-    quads, sess, bin_centers.
+    quads, sess, bin_centers (and poses (N,3) appended when with_poses=True).
 
     Cone-empty pings and pings whose nearest in-cone reflector is beyond
     MAX_RANGE_MM are RELABELLED to the 'none' class (nothing actionable within
@@ -178,14 +190,19 @@ def load_and_filter():
     option and confines the wall-slice / pole-azimuth regression to the in-range
     regime where the narrowband sonar is reliable (wall/pole masks key off
     classes 0/1, so 'none' samples feed only the cross-entropy)."""
-    sonar, profiles, classes, pole_az, near_dist, quads, sess, bin_centers = load_data_inverse(
+    loaded = load_data_inverse(
         ACQUISITION_SESSIONS,
         acquisitions_root=ACQUISITIONS_ROOT,
         opening_angle=OPENING_ANGLE,
         profile_steps=PROFILE_STEPS,
         profile_method=PROFILE_METHOD,
         cone_half_deg=CONE_HALF_DEG,
+        return_poses=with_poses,
     )
+    if with_poses:
+        sonar, profiles, classes, pole_az, near_dist, quads, sess, bin_centers, poses = loaded
+    else:
+        sonar, profiles, classes, pole_az, near_dist, quads, sess, bin_centers = loaded
     classes = np.asarray(classes, dtype=np.float64)
     empty = np.isnan(classes)
     if np.isfinite(MAX_RANGE_MM):
@@ -199,8 +216,11 @@ def load_and_filter():
           f"(empty_cone={int(empty.sum())}, "
           f"beyond_{MAX_RANGE_MM:.0f}mm={int((none_mask & ~empty).sum())})")
     slice_t = compute_slice_targets(profiles, bin_centers, CONE_HALF_DEG)
-    return (sonar, slice_t, labels.astype(np.int64),
+    base = (sonar, slice_t, labels.astype(np.int64),
             pole_az, quads, sess, bin_centers)
+    if with_poses:
+        return base + (poses,)
+    return base
 
 
 def split_indices(quads, sess, val_quadrants):
@@ -650,6 +670,170 @@ def run_fold(q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
     return fold_result
 
 
+# ── Deployment training (single spatial holdout) ──────────────────────────────
+
+def _subset_metrics(c, tw, az_deg, pred):
+    """Class / pole-az / wall-slice metrics for one subset. c, tw, az_deg are that
+    subset's labels, wall targets, and true pole azimuth (deg); pred is predict()
+    run on the same subset. Returns (class_acc, per_class, pole_az, wall_per_slice)."""
+    cls_acc = float(np.mean(pred["cls_pred"] == c))
+    per_class = {}
+    for ci, name in enumerate(CLASS_NAMES):
+        truth = (c == ci)
+        if truth.any():
+            prec = float(np.mean(c[pred["cls_pred"] == ci] == ci)) if (pred["cls_pred"] == ci).any() else 0.0
+            rec  = float(np.mean(pred["cls_pred"][truth] == ci))
+            per_class[name] = {"precision": prec, "recall": rec, "n_true": int(truth.sum())}
+    pole_metrics = {}
+    pole_m = (c == 1)
+    if pole_m.any():
+        res = pred["pole_pred_az_deg"][pole_m] - az_deg[pole_m]
+        pole_metrics = {"n": int(pole_m.sum()),
+                        "rmse_deg": float(np.sqrt((res ** 2).mean())),
+                        "mae_deg":  float(np.abs(res).mean()),
+                        "pred_std_median_deg": float(np.median(pred["pole_pred_az_std"][pole_m]))}
+    wall_metrics = {}
+    wall_m = (c == 0)
+    for i, name in enumerate(SLICE_NAMES):
+        t = tw[wall_m, i]; m = pred["wall_pred_mean"][wall_m, i]; s = pred["wall_pred_std"][wall_m, i]
+        v = ~np.isnan(t); t, m, s = t[v], m[v], s[v]
+        if len(t):
+            wall_metrics[name] = {"n": int(len(t)),
+                                  "rmse_mm": float(np.sqrt(((m - t) ** 2).mean())),
+                                  "mae_mm":  float(np.abs(m - t).mean()),
+                                  "pred_std_median_mm": float(np.median(s))}
+    return cls_acc, per_class, pole_metrics, wall_metrics
+
+
+def spatial_holdout_mask(poses, sess, frac, seed):
+    """Per session, hold out the contiguous patch of `frac` of pings nearest a
+    seeded random anchor pose. Returns a boolean is_val mask."""
+    rng = np.random.default_rng(seed)
+    xy = np.asarray(poses, dtype=float)[:, :2]
+    is_val = np.zeros(len(sess), dtype=bool)
+    for name in ACQUISITION_SESSIONS:
+        idx = np.where(sess == name)[0]
+        if len(idx) == 0:
+            continue
+        anchor = xy[idx[rng.integers(len(idx))]]
+        d = np.linalg.norm(xy[idx] - anchor, axis=1)
+        k = int(np.ceil(frac * len(idx)))
+        is_val[idx[np.argsort(d)[:k]]] = True
+    return is_val
+
+
+def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
+               poses, sess, device, sub_prefix="deploy"):
+    """Train the single deployment model on the spatial-holdout split and report
+    in-sample (train) vs held-out (val) metrics. Writes loadable
+    `{ARTIFACT_PREFIX}_deploy_*` artifacts + the shared feature_params."""
+    is_val = spatial_holdout_mask(poses, sess, HOLDOUT_FRAC, HOLDOUT_SEED)
+    print(f"  spatial holdout: {HOLDOUT_FRAC*100:.0f}% per session, seed={HOLDOUT_SEED}")
+    for name in ACQUISITION_SESSIONS:
+        vm = (sess == name) & is_val
+        print(f"    {name}: held out {int(vm.sum())}/{int((sess==name).sum())} "
+              f"(pole={int((classes[vm]==1).sum())}, wall={int((classes[vm]==0).sum())}, "
+              f"none={int((classes[vm]==2).sum())})")
+
+    tr_s, va_s       = sonar[~is_val],          sonar[is_val]
+    tr_tw, va_tw     = slice_t[~is_val],        slice_t[is_val]
+    tr_c, va_c       = classes[~is_val],        classes[is_val]
+    tr_tp_n, va_tp_n = pole_az_n_safe[~is_val], pole_az_n_safe[is_val]
+    print(f"  train: {len(tr_s)} (wall={int((tr_c==0).sum())}, pole={int((tr_c==1).sum())}, "
+          f"none={int((tr_c==2).sum())})")
+    print(f"  held-out: {len(va_s)} (wall={int((va_c==0).sum())}, pole={int((va_c==1).sum())}, "
+          f"none={int((va_c==2).sum())})")
+
+    s_mean = float(tr_s.mean()); s_std = max(float(tr_s.std()), 1e-8)
+    tr_wall_only = tr_tw[tr_c == 0]
+    valid = ~np.isnan(tr_wall_only)
+    t_mean = float(tr_wall_only[valid].mean()) if valid.any() else 0.0
+    t_std  = max(float(tr_wall_only[valid].std()), 1e-8) if valid.any() else 1.0
+
+    save_path = os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_{sub_prefix}_best_model.pth")
+    model, best_val, best_epoch = train(
+        tr_s, tr_tw, tr_c, tr_tp_n,
+        va_s, va_tw, va_c, va_tp_n,
+        (s_mean, s_std), (t_mean, t_std), device, save_path)
+
+    pred_va = predict(model, va_s, (s_mean, s_std), (t_mean, t_std), device)
+    pred_tr = predict(model, tr_s, (s_mean, s_std), (t_mean, t_std), device)
+    keys = ("class_acc", "per_class", "pole_az", "wall_per_slice")
+    held     = dict(zip(keys, _subset_metrics(va_c, va_tw, pole_az_deg[is_val],  pred_va)))
+    insample = dict(zip(keys, _subset_metrics(tr_c, tr_tw, pole_az_deg[~is_val], pred_tr)))
+
+    def _show(tag, mtr):
+        print(f"  [{tag}] class acc {mtr['class_acc']*100:.1f}%")
+        for n, m in mtr["per_class"].items():
+            print(f"      {n:>5}: prec {m['precision']*100:.1f}  rec {m['recall']*100:.1f}  n={m['n_true']}")
+        if mtr["pole_az"]:
+            print(f"      pole-az RMSE {mtr['pole_az']['rmse_deg']:.2f} deg  (n={mtr['pole_az']['n']})")
+        for n, m in mtr["wall_per_slice"].items():
+            print(f"      wall {n:>6} RMSE {m['rmse_mm']:.0f} mm  (n={m['n']})")
+    print(f"  best_epoch={best_epoch}")
+    _show("held-out", held); _show("in-sample", insample)
+
+    out_prefix = os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_{sub_prefix}")
+    plot_confusion(va_c, pred_va["cls_pred"], pred_va["cls_probs"], f"{out_prefix}_confusion.png")
+    pole_val = (va_c == 1)
+    if pole_val.any():
+        plot_pole_azimuth(pole_az_deg[is_val][pole_val], pred_va["pole_pred_az_deg"][pole_val],
+                          pred_va["pole_pred_az_std"][pole_val], f"{out_prefix}_pole_azimuth_scatter.png")
+    plot_wall_scatter(va_tw, pred_va["wall_pred_mean"], pred_va["wall_pred_std"],
+                      (va_c == 0), f"{out_prefix}_wall_scatter.png")
+
+    feature_params = {
+        "cone_half_deg":  CONE_HALF_DEG,
+        "slice_definitions": {
+            "left":   [-CONE_HALF_DEG,            -CONE_HALF_DEG + 2*CONE_HALF_DEG/3],
+            "center": [-CONE_HALF_DEG + 2*CONE_HALF_DEG/3, CONE_HALF_DEG - 2*CONE_HALF_DEG/3],
+            "right":  [CONE_HALF_DEG - 2*CONE_HALF_DEG/3,  CONE_HALF_DEG],
+        },
+        "pole_az_norm":   {"divide_by_deg": CONE_HALF_DEG},
+        "class_names":    CLASS_NAMES,
+        "envelope_norm":  {"kind": "none"},
+        "log_var_clamp":  [LOG_VAR_MIN, LOG_VAR_MAX],
+        "architecture": {
+            "samples":       int(sonar.shape[1]),
+            "conv_channels": SONAR_CONV_CHANNELS,
+            "conv_kernel":   SONAR_CONV_KERNEL,
+            "pool_out":      SONAR_POOL_OUT,
+            "fc_hidden":     SONAR_FC_HIDDEN,
+            "head_hidden":   SONAR_HEAD_HIDDEN,
+            "model_class":   MODEL_CLASS_NAME,
+            "wall3_symmetric": bool(MODEL_KWARGS.get("symmetric", True)),
+            "n_classes":     len(CLASS_NAMES),
+        },
+        "profile": {
+            "opening_angle":  OPENING_ANGLE,
+            "profile_steps":  PROFILE_STEPS,
+            "profile_method": PROFILE_METHOD,
+        },
+        "loss_weights": {"class": LOSS_W_CLASS, "wall": LOSS_W_WALL, "pole": LOSS_W_POLE},
+    }
+    with open(os.path.join(OUTPUT_DIR, f"{ARTIFACT_PREFIX}_feature_params.json"), "w") as f:
+        json.dump(feature_params, f, indent=2)
+
+    result = {
+        "mode":         "spatial_holdout_deploy",
+        "holdout_frac": HOLDOUT_FRAC,
+        "holdout_seed": HOLDOUT_SEED,
+        "best_epoch":   best_epoch,
+        "val_total":    best_val,
+        "held_out":     held,
+        "in_sample":    insample,
+        "n_train":      int(len(tr_s)),
+        "n_val":        int(len(va_s)),
+        "sonar_norm":   {"mean": s_mean, "std": s_std},
+        "target_norm":  {"mean": t_mean, "std": t_std},
+        "config": {"sessions": ACQUISITION_SESSIONS, "max_range_mm": MAX_RANGE_MM,
+                   "cone_half_deg": CONE_HALF_DEG},
+    }
+    with open(f"{out_prefix}_results.json", "w") as f:
+        json.dump(result, f, indent=2)
+    return result
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -778,5 +962,30 @@ def main():
           f"{ARTIFACT_PREFIX}_cv_results.json")
 
 
+def main_deploy():
+    """Canonical entry point: train the single deployed inverse on the spatial
+    holdout and report in-sample vs held-out. The CV path main() is kept for
+    diagnostics (and EXPT_head_variants)."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    np.random.seed(SEED); torch.manual_seed(SEED)
+
+    print("[1/3] Loading data (with poses)")
+    sonar, slice_t, classes, pole_az_deg, quads, sess, bin_centers, poses = \
+        load_and_filter(with_poses=True)
+    print(f"  {len(sonar)} pings: wall={int((classes == 0).sum())}, "
+          f"pole={int((classes == 1).sum())}, none={int((classes == 2).sum())}")
+
+    pole_az_n = (pole_az_deg / CONE_HALF_DEG).astype(np.float32)
+    pole_az_n_safe = np.where(np.isnan(pole_az_n), 0.0, pole_az_n).astype(np.float32)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n[2/3] Training deployment model on {device} "
+          f"({EPOCHS} epochs, {WARMUP_EPOCHS} warmup; {HOLDOUT_FRAC*100:.0f}% spatial holdout)")
+    run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe, poses, sess, device)
+
+    print(f"\n[3/3] Done. Deployed model: {ARTIFACT_PREFIX}_deploy_* "
+          f"+ {ARTIFACT_PREFIX}_feature_params.json (load with fold='deploy')")
+
+
 if __name__ == "__main__":
-    main()
+    main_deploy()

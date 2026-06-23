@@ -508,10 +508,9 @@ def load_data_inverse(session_names: List[str],
                       profile_method: str = "ray_center",
                       cone_half_deg: float = 35.0,
                       drop_pose_fallback: bool = True,
-                      verbose: bool = True
-                      ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
-                                 np.ndarray, np.ndarray, np.ndarray,
-                                 np.ndarray, np.ndarray]:
+                      verbose: bool = True,
+                      return_poses: bool = False
+                      ) -> Tuple:
     """Multi-session two-headed-inverse loader.
 
     Returns:
@@ -525,9 +524,9 @@ def load_data_inverse(session_names: List[str],
         sess         (N,) object array of session names
         bin_centers  (profile_steps,) azimuth bin centers (deg)
     """
-    s_l, p_l, c_l, az_l, d_l, q_l, sess_l = [], [], [], [], [], [], []
+    s_l, p_l, c_l, az_l, d_l, q_l, sess_l, pose_l = [], [], [], [], [], [], [], []
     for name in session_names:
-        sonar, profiles, classes, pole_az, near_dist, quads, _ = load_session_inverse(
+        sonar, profiles, classes, pole_az, near_dist, quads, poses = load_session_inverse(
             name, acquisitions_root,
             opening_angle, profile_steps, profile_method,
             cone_half_deg=cone_half_deg,
@@ -541,7 +540,8 @@ def load_data_inverse(session_names: List[str],
         d_l.append(near_dist)
         q_l.append(quads)
         sess_l.append(np.array([name] * len(sonar)))
-    return (np.concatenate(s_l, axis=0),
+        pose_l.append(poses)
+    base = (np.concatenate(s_l, axis=0),
             np.concatenate(p_l, axis=0),
             np.concatenate(c_l, axis=0),
             np.concatenate(az_l, axis=0),
@@ -549,3 +549,6 @@ def load_data_inverse(session_names: List[str],
             np.concatenate(q_l, axis=0),
             np.concatenate(sess_l, axis=0),
             profile_bin_centers(opening_angle, profile_steps))
+    if return_poses:
+        return base + (np.concatenate(pose_l, axis=0),)
+    return base
