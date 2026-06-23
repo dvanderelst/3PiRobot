@@ -171,6 +171,21 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-06-23 — Cross-version comparison: spatial-holdout deploy vs earlier 3-class CV models (no regression)
+
+Asked whether the deployed B spatial-holdout model (entry below) does worse than earlier inverse versions. Read from the on-disk results JSONs (`inverse_base_cv_results.json`, `inverse_cv_results.json`, `inverse_deploy_results.json`). All numbers are on unseen data — earlier rows are 4-fold quadrant CV out-of-fold (each model trained on 75%, every ping scored once out-of-fold, averaged); the deploy row is the single 15% spatial held-out set (trained on 85%), with in-sample shown for reference.
+
+| model | eval | class acc | wall rec | pole rec | pole-az RMSE | wall RMSE L/C/R (mm) |
+|---|---|---|---|---|---|---|
+| base 3-class | CV out-of-fold | 84.0% | 93.9% | 58.2% | 13.2° | 313/318/281 |
+| B 3-class | CV out-of-fold | 83.1% | 93.0% | 64.2% | 13.7° | 321/323/291 |
+| **B spatial (deployed)** | **held-out 15%** | **83.9%** | **91.8%** | **68.9%** | **12.1°** | **330/397/248** |
+| B spatial (deployed) | in-sample | 85.5% | 95.2% | 70.8% | 10.1° | 304/311/271 |
+
+- **Verdict: no regression — equivalent, slightly better on pole metrics.** Classification is flat (held-out 83.9% ≈ 84.0% / 83.1% CV). Pole-az is the best of the lot (12.1° vs 13.2° / 13.7°) and pole recall the highest (68.9% vs 58–64%) — the metrics the pole-approach task leans on. Walls comparable: held-out left/right as good or better (right 248 best), and the held-out **center 397 mm** is single-split sampling noise (in-sample center 311, in line with history), already flagged in the paper.
+- **Caveats.** The comparison mixes eval protocols (4-fold CV vs a single 15% spatial split), so the deploy held-out is noisier — hence the center wobble; in-sample/held-out bracket the CV figures. Pole recall is the high-variance metric across runs (e.g. the 2026-06-12 base entry recorded 69.7% vs the EXPT base JSON's 58.2% here), so read pole recall as a band, not a point. 2-class era (90.4%) is not comparable (2-way vs 3-way). The phantom-pole gate (10/10, entry below) independently confirms no behavioral regression.
+- References: 2026-06-23 deploy entry (below), 2026-06-22 B head-variant sweep, 2026-06-12 base 3-class.
+
 ### 2026-06-23 — Deployment inverse: single spatial 15% holdout (supersedes 4-fold CV for the deployed model)
 
 - Commit: `f6c969d` (`Control: add spatial-holdout deployment training for the inverse`) on `direct-learning-poletask`. `SCRIPT_TrainInverseModel.py` gains a deployment path (`main_deploy()`, now the script entry point; CV `main()`/`run_fold` untouched, EXPT still works); `AcquisitionSessionLoader.load_data_inverse` gains `return_poses`. `SCRIPT_RunDirectPolicy.py` `INVERSE_FOLD` "q0" → "deploy" (edited in the working tree, left **uncommitted** with the user's live tuning WIP).
