@@ -176,12 +176,12 @@ Each of the three heads is run twice, once using $z_{LR}$ as input and once usin
 % Par 21
 The model was trained by minimizing a three-part objective: a cross-entropy classification loss plus two regression losses, one for the wall depth profile and one for the pole azimuth. The classification loss used all echoes for each emission. The two regression losses, i.e., the depth profile and pole azimuth, were \emph{masked} and considered only for the relevant classes. Both regression losses were Gaussian negative log-likelihoods: each weights the prediction error by the model's predicted variance and penalizes it, so the network learns to report a calibrated per-estimate uncertainty rather than a point value alone.
 
-We optimized with Adam (learning rate $10^{-3}$, batch size 64) for 60 epochs. For the first 20 epochs, the regression means were fitted with a plain squared-error loss before the variance terms were enabled, which stabilized early training. Two quantities were rescaled for training: the input envelopes were standardized, and the pole-azimuth targets were divided by the cone half-angle so that they lay in $[-1,1]$. The model with the lowest validation loss was retained.
+We optimized with Adam (learning rate $10^{-3}$, batch size 64) for 60 epochs. For the first 20 epochs, the regression means were fitted with a plain squared-error loss before the variance terms were enabled, which stabilized early training. Two quantities were rescaled for training: the input envelopes were standardized, and the pole-azimuth targets were divided by the cone half-angle so that they lay in $[-1,1]$.
 
 % Par 22
-We assessed the model with four-fold cross-validation organized by arena region rather than at random, so that validation pings came from parts of the arena where the model had not been trained. Each session was split at its median $x$ and $y$ positions into four spatial quadrants; for each fold, one quadrant was held out from each session as the validation set, and the model was trained on the remaining quadrants. Holding out coherent regions of space tests whether the inverse generalizes across the arena rather than merely interpolating between nearby training poses. Per-fold and aggregated metrics are reported in the Results.
+We fitted the inverse model on the data from the five sessions. From each session, we held out $15\%$ of the collected data in contiguous sets, i.e., the data collected nearest to a randomly chosen location. Training used early stopping on these regions, and we report performance on both the training data and the held-out regions (Table~\ref{tab:inverse-results}). Because the held-out regions are coherent patches of the arena, this check reflects locations the model was not trained on, and a small performance gap between the two indicates that the model has not overfit. This same model, trained on the $85\%$ that remained, is the one deployed on the robot. Note that we did not collect or report on a validation sample. The aim of the model is to support the robot's behavior in the experiments reported below. Therefore, we consider successfully completing these tasks as validation of the model.
 
-\begin{table}[ht]
+\begin{table}[htb]
 \centering
 \caption{Configuration of the inverse-model data acquisition, labeling, and training.}
 \label{tab:inverse-params}
@@ -207,8 +207,8 @@ Training     & Optimizer                         & Adam \\
              & Batch size                        & 64 \\
              & Epochs (warm-up)                  & 60 (20) \\
              & Loss weights (class/wall/pole)    & $1 / 1 / 1$ \\
-             & Cross-validation                  & 4-fold (arena quadrants) \\
-             & Random seed                       & 42 \\
+             & Validation holdout                & 15\% spatial region/session \\
+             & Random seed (train / holdout)     & 42 / 0 \\
 \hline
 \end{tabular}
 \end{table}
@@ -218,39 +218,42 @@ Training     & Optimizer                         & Adam \\
 \subsection{Inverse model}
 
 % Par 23
-Each cross-validation fold reached its lowest validation loss, at , between epochs 39 and 57 of the 60-epoch budget. Training had therefore converged before the budget was exhausted, so the epoch limit did not constrain the fits.
-
-% Par 24
-We evaluated the inverse model by four-fold cross-validation across arena quadrants, so that every reported value is computed on data from regions of each arena that were not used in training. This allowed us to assess
-
- Pooled over the five sessions, the evaluation set comprised 2135 pings (53\% wall, 22\% pole, 25\% none). The model classified the nearest reflector with an accuracy of $84.4 \pm 2.2\%$ over the three classes (mean $\pm$ standard deviation across folds; Table~\ref{tab:inverse-results}). Accuracy was uneven across classes. Walls, the majority and most distinctive class, were recovered almost perfectly (precision $93.7\%$, recall $92.8\%$), whereas poles and the \emph{none} class were harder (recall $69.7\%$ and $78.8\%$). Because walls were classified cleanly, most remaining errors were confusions between poles and \emph{none}, which is expected since both correspond to the absence of a nearby wall and are separated only by a weak, often distant, pole echo.
+The model reached its lowest validation loss on the held-out region at epoch 45. The five sessions yielded 2135 labeled echoes ($53\%$ wall, $22\%$ pole, $25\%$ none), of which the spatial holdout set aside 322 ($15\%$). On the held-out region, the model achieved $83.9\%$ accuracy across the three classes, close to the $85.5\%$ on the training pings (Table~\ref{tab:inverse-results}). The small gap indicates that it did not overfit. Accuracy was uneven across classes. Walls, the majority and most distinctive class, were recovered well (held-out precision $90.6\%$, recall $91.8\%$), whereas poles and the \emph{none} class were harder (held-out recall $68.9\%$ and $85.9\%$). Because walls were classified with high accuracy, most remaining errors were confusion between poles and \emph{none}, which is expected since both correspond to the absence of a nearby wall and are separated only by a weak, often distant, pole echo.
 
 % Par 25
-When a reflector was present, the model also recovered its geometry, although coarsely. Pole azimuth was estimated with a root-mean-square error of $13.2 \pm 0.7^{\circ}$ (median absolute error $\approx 10^{\circ}$) across the $\pm 35^{\circ}$ field, enough to place a pole reliably on the correct side of the robot and to provide a usable, if rough, bearing. The wall depth profile was coarser: the left, center, and right distances were recovered with root-mean-square errors of $307$, $322$, and $278$\,mm over the $1$\,m operating range. The corresponding median absolute errors were smaller ($\approx 130$--$195$\,mm), indicating that the root-mean-square error is inflated by a minority of large mistakes rather than reflecting the typical case.
+When a reflector was present, the model also recovered its geometry, although coarsely. In the held-out regions, pole azimuth was estimated with a root-mean-square error of $12.1^{\circ}$ (median absolute error $9.2^{\circ}$, over $n=90$ held-out pole pings) across the $\pm 35^{\circ}$ field, against $10.1^{\circ}$ in-sample; this is enough to place a pole reliably on the correct side of the robot and to provide a usable, if rough, bearing. The wall depth profile was coarser: held-out left, center, and right distances were recovered with root-mean-square errors of $330$, $397$, and $248$\,mm over the $1$\,m operating range (in-sample $304$, $311$, $271$\,mm). The corresponding median absolute errors were smaller ($\approx 140$--$215$\,mm), so the root-mean-square error is inflated by a minority of large errors rather than reflecting the typical case; the held-out center value rests on relatively few wall pings and is noisier than the more even in-sample profile.
 
 % Par 26
-Because the depth and azimuth heads are heteroscedastic, every estimate is accompanied by a predicted uncertainty. These predicted uncertainties tracked the realized errors: the median predicted standard deviation was $\approx 11^{\circ}$ for pole azimuth and $\approx 100$--$190$\,mm for the wall distances, comparable to the respective absolute errors. The model therefore reports not only feature estimates but also a usable indication of how far to trust each one.
+Because the depth and azimuth heads are heteroscedastic, every estimate is accompanied by a predicted uncertainty, and these tracked the realized errors: in the held-out regions the median predicted standard deviation was $\approx 10^{\circ}$ for pole azimuth and $\approx 135$--$190$\,mm for the wall distances, comparablee to the respective absolute errors. The model therefore reports not only feature estimates but also a usable indication of how far to trust each one.
 
 % Par 27
-Taken together, these results show that the cross-modally trained inverse recovers the target features from single sonar emissions, but with substantial noise: the nearest-reflector class is correct about $85\%$ of the time, pole bearing is accurate to roughly $10$--$13^{\circ}$, and wall distances to within about $30\%$ of the operating range. Whether an inverse of this fidelity is nevertheless sufficient to support behavior is the question addressed in the following sections.
+Taken together, these results show that the cross-modally trained inverse recovers the target features from single sonar emissions, but with substantial noise (Fig.~\ref{fig:inverse-results}): on held-out locations the nearest-reflector class is correct about $84\%$ of the time, pole bearing is accurate to roughly $10$--$12^{\circ}$, and wall distances to within about a third of the operating range. The close agreement between the held-out and in-sample figures indicates that this noise reflects the difficulty of the inverse itself rather than overfitting. Whether an inverse of this fidelity is nevertheless sufficient to support behavior is the question addressed in the following sections.
 
 \begin{table}[ht]
 \centering
-\caption{Cross-validated performance of the inverse model (mean $\pm$ standard deviation over the four arena-quadrant folds). Accuracy, precision, and recall are percentages.}
+\caption{Performance of the deployed inverse model, evaluated on the training pings (in-sample) and on the spatially held-out $15\%$ (held-out). Accuracy, precision, and recall are percentages.}
 \label{tab:inverse-results}
-\begin{tabular}{ll}
+\begin{tabular}{lcc}
 \hline
-\textbf{Metric} & \textbf{Mean $\pm$ s.d.} \\
+\textbf{Metric} & \textbf{In-sample} & \textbf{Held-out} \\
+ & ($n=1813$) & ($n=322$) \\
 \hline
-Class accuracy (3-way)                       & $84.4 \pm 2.2$ \\
-\quad Wall (precision / recall)              & $93.7 \pm 1.8$ / $92.8 \pm 1.3$ \\
-\quad Pole (precision / recall)              & $72.5 \pm 6.1$ / $69.7 \pm 5.0$ \\
-\quad None (precision / recall)              & $75.8 \pm 6.2$ / $78.8 \pm 10.0$ \\
-Pole-azimuth RMSE ($^{\circ}$)               & $13.2 \pm 0.7$ \\
-Wall-depth RMSE, left / center / right (mm)  & $307 \pm 20$ / $322 \pm 48$ / $278 \pm 15$ \\
+Class accuracy (3-way)                       & $85.5$ & $83.9$ \\
+\quad Wall (precision / recall)              & $92.6$ / $95.2$ & $90.6$ / $91.8$ \\
+\quad Pole (precision / recall)              & $73.9$ / $70.8$ & $81.6$ / $68.9$ \\
+\quad None (precision / recall)              & $78.6$ / $76.5$ & $75.3$ / $85.9$ \\
+Pole-azimuth RMSE ($^{\circ}$)               & $10.1$ & $12.1$ \\
+Wall-depth RMSE, left / center / right (mm)  & $304$ / $311$ / $271$ & $330$ / $397$ / $248$ \\
 \hline
 \end{tabular}
 \end{table}
+
+\begin{figure}[htb]
+    \centering
+    \includegraphics[width=\textwidth]{fig_inverse_results}
+    \caption{Inverse-model performance on the held-out $15\%$ of pings. (A) Classification of the nearest reflector, as row-normalized recall: walls are recovered almost perfectly, while poles and \emph{none} are mostly confused with each other. (B) Predicted versus true pole azimuth, colored by the model's predicted uncertainty $\sigma$; bearings follow the diagonal but with substantial scatter. (C) Predicted versus true wall distance for the three depth directions (colors); distances are accurate at close range and degrade with range. The dashed lines mark perfect prediction. Together the panels show that the inverse recovers the target features but noisily.}
+    \label{fig:inverse-results}
+\end{figure}
 
 \section{Discussion}
 
