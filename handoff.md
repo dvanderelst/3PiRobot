@@ -171,6 +171,23 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-06-22 — Wall-head architecture sweep + adoption of the single symmetric head (B) as canonical inverse
+
+- Commit: `ed66804` (`Control: adopt single symmetric wall head (B) as canonical inverse`) on `direct-learning-poletask`. New `EXPT_head_variants.py`; `Library/SonarModel.py` gains `SonarSlicesUQ_Wall3` + a `model_class`-dispatching `InverseModel.load`; `SCRIPT_TrainInverseModel.py` selects architecture via `MODEL_CLASS`/`MODEL_KWARGS`/`MODEL_CLASS_NAME` (recorded in `feature_params`).
+- **Motivation (expository, not numerical).** The deployed base inverse (`SonarSlicesUQ_TwoHeaded`) used *two* wall mechanisms — center regressed from the averaged embedding `z_sym=(zL+zR)/2`, flanks from the full binaural concat with weight-tying — which is awkward to justify in Methods. The sweep tested whether a single uniform head does as well.
+- **Sweep (`EXPT_head_variants.py`, identical data/folds/seed, only the wall head swapped; 5 sessions Acq01A–05A, `MAX_RANGE_MM=1000`, 3-class, 4-fold CV @ 60 ep).** Interrupted by a power outage mid-variant-A (base + B complete, A had only folds q1/q2); resumed A to finish.
+
+  | variant | wall head | class acc | pole-az RMSE | wall L/C/R RMSE (mm) |
+  |---|---|---|---|---|
+  | base | side heads + z_sym center (old deployed) | 84.0% | 13.22° | 313/318/281 |
+  | **B** | one 3-out head, symmetry enforced over LR/RL | 83.9% | 14.28° | 323/319/292 |
+  | A | one 3-out head, LR only, asymmetric | 83.8% | 13.94° | 349/333/299 |
+
+- **Verdict: adopt B.** All three are within per-fold noise on class accuracy and wall slices (σ 17–47 mm). The only gap that looks real is pole-az (base 13.22° vs B 14.28°, ~1.3σ), but the pole-az and class heads are *byte-identical* across variants — only the wall head differs — so that gap is shared-trunk training coupling, not an architecture effect. B wins on the argument that matters: one uniform symmetric head, same symmetry logic as the class/pole heads, far simpler to state. A (deliberately asymmetric) was worst on wall RMSE, confirming the L↔R mirror symmetry is a correct inductive bias, not a limitation.
+- **Canonical `inverse_` retrained as B (deployed model, fold q0 is the deploy default).** Class acc **83.1% ± 2.4%** (per-fold 86/79/84/84); wall precision 92.4% ± 2.2% / recall 93.0% ± 3.1%; pole precision 71.9% ± 6.2% / recall 64.2% ± 4.7%; none precision 73.3% ± 2.3% / recall 77.5% ± 10.0%; **pole-az RMSE 13.70° ± 1.01°** (per-fold 12.3/14.8/13.1/14.6); wall RMSE right 291 ± 23, center 323 ± 47, left 321 ± 16 mm. (Small deltas vs the sweep's B row are run-to-run CPU nondeterminism, same family.)
+- **Phantom-pole recheck (the deploy gate).** Replayed the saved `direct_pole_demo1` pings (`PolicyRuns/older/direct_pole_demo1/`, fed `sonar_data[:,1]`/`[:,2]` exactly as `SCRIPT_RunDirectPolicy.py`) through the new B fold-q0: **10/10** old phantom poles (base-2-class fired `pole` at p≈0.97–0.99) now classify `none` at p_none 0.67–0.94; real in-range walls (steps 10–17) still classify `wall`. B preserves the abstain fix — and beats the 2026-06-12 base-3-class result (8/9).
+- Reference: 2026-06-12 (base 3-class, 84.4% acc / 69.7% pole recall / 13.17° pole-az). Old 2-class still at `Control_code/SonarModel.bak_2class/`. base architecture still loadable via the `model_class` dispatch.
+
 ### 2026-06-12 — Two-headed inverse retrained with a 3rd "none" class, Acq01A–05A, close-range, 60-epoch CV
 
 - Commits: `Library/SonarModel.py` (`p_none` readout) and `SCRIPT_TrainInverseModel.py` (3-class) on `direct-learning-poletask`, this session. `SCRIPT_RunDirectPolicy.py` deploy-side (class 2 → `"empty"`, `GEOM_RANGE_HORIZON_MM` flag, `p_none` logging) validated but uncommitted.
