@@ -34,11 +34,16 @@ from LorexLib import Settings as LorexSettings
 from Library import Settings
 
 
-ROBOT_NUMBER     = 1
-ARENA_NAME       = "Acquisition03"
-POLL_INTERVAL_S  = 1.0
-ROBOT_RADIUS_MM  = 48.0  # Pololu 3pi+ 2040 (~96 mm diameter)
-PLOT_PATH        = Path(__file__).resolve().parent / "TempOutput" / "probe.png"
+ROBOT_NUMBER       = 1
+# Set ARUCO_ID_OVERRIDE to an int to probe a non-robot marker
+# (e.g. a test marker placed on the floor to sanity-check the tracker
+# without involving a real robot). Leave at None to use the robot's own
+# aruco_id from Settings.
+ARUCO_ID_OVERRIDE  = None
+ARENA_NAME         = "Acquisition01"
+POLL_INTERVAL_S    = 1.0
+ROBOT_RADIUS_MM    = 48.0  # Pololu 3pi+ 2040 (~96 mm diameter)
+PLOT_PATH          = Path(__file__).resolve().parent / "TempOutput" / "probe.png"
 
 
 def _latest_arena_features(arena_name: str) -> Path:
@@ -126,8 +131,10 @@ def render(plot_path: Path, walls_x, walls_y, poles_x, poles_y, pole_radius_mm,
 
 def main():
     config = Settings.get_client_config(ROBOT_NUMBER - 1)
-    aruco_id = config.aruco_id
-    print(f"Probing tracker for {config.robot_name} (aruco_id={aruco_id}).")
+    aruco_id = ARUCO_ID_OVERRIDE if ARUCO_ID_OVERRIDE is not None else config.aruco_id
+    label = (f"aruco_id={aruco_id} (override)" if ARUCO_ID_OVERRIDE is not None
+             else f"{config.robot_name} (aruco_id={aruco_id})")
+    print(f"Probing tracker for {label}.")
     print(f"Arena: {ARENA_NAME}.")
     print(f"Polling every {POLL_INTERVAL_S:.1f} s. Ctrl-C to stop.")
 
