@@ -18,8 +18,11 @@ reactive rule runs on a local feature that can come from either modality.
                            kinematically — offline tuning of gains/thresholds
 
 Both producers emit the identical local feature by construction:
-    class ∈ {wall, pole};  if wall → (right, center, left) slice distances;
-                           if pole → signed azimuth (+ccw = LEFT).
+    class ∈ {wall, pole, empty};  wall  → (right, center, left) slice distances;
+                                  pole  → signed azimuth (+ccw = LEFT);
+                                  empty → nothing within range (the 3-class
+                                          inverse's "none"; geometry's empty or
+                                          over-horizon cone).
 Sonar gets it from the two-headed inverse's heads; vision/sim get it from
 geometry (`nearest_reflector_in_cone` + `compute_profile`), which is exactly
 the supervision target the inverse was trained against.
@@ -27,11 +30,14 @@ the supervision target the inverse was trained against.
 The reactive rule (`ReactiveController`):
   - nearest object is a POLE → steer to null its azimuth (keep it in front),
     drive a fixed step → closes in.
-  - nearest object is a WALL → fly a gentle arc (a constant baseline curl) until
-    a wall comes within range, then reflect off it (billiard rebound estimated
-    from the three slice depths). The curl sign is random until the first
-    rebound, then fixed to that rebound's direction.
-  - cone empty → rotate in place to scan.
+  - nearest object is a WALL → fly a gentle arc (a gentle curl) until a wall
+    comes within range, then reflect off it (billiard rebound estimated from the
+    three slice depths). The curl sign and magnitude are re-randomised on each
+    wall contact (bounce or escape) so open-space wandering doesn't trace a fixed
+    circle.
+  - cone empty / nothing within range ("none" from the sonar inverse) → wander
+    forward with a gentle curl, crossing open space and sweeping the cone until a
+    wall or pole enters range (or scan in place if EMPTY_WANDER is off).
 Selector is "class of nearest object" (design constraint #2): if a wall is
 nearer than the pole the robot wanders (arc + rebound) until the pole becomes
 nearest. Perception is memoryless (close to constraint #3): the only carried
@@ -77,15 +83,16 @@ from Library.AcquisitionSessionLoader import (
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
 
-SENSE_SOURCE = "sim"          # "sonar" | "vision" | "sim"
+SENSE_SOURCE = "sonar"          # "sonar" | "vision" | "sim"
+ARENA        = "DirectTarget02"     # sub-folder under TargetArenas/ (arena_features.npz)
+START = 2
+SUFFIX = ''
 
-ARENA        = "DirectTarget01"     # sub-folder under TargetArenas/ (arena_features.npz)
-INVERSE_FOLD = "q0"           # which CV fold of the inverse to deploy (sonar mode)
-SESSION      = "direct_pole_demo"
+SESSION      = f"direct_{SENSE_SOURCE}_position{START}{SUFFIX}"
 
 ROBOT_ID     = 1
 MAX_STEPS    = 200
-
+INVERSE_FOLD = "deploy"       # spatial-holdout deployment model (sonar mode)
 # ── Sensing cone ──────────────────────────────────────────────────────────────
 # Forward ±half-angle the robot "sees". Defaults to the sonar inverse's cone so
 # the two modalities share an aperture; settable independently for vision/sim.
@@ -101,15 +108,66 @@ CONE_HALF_DEG = 35.0
 GEOM_RANGE_HORIZON_MM = None
 
 # ── Reactive rule constants (curved-bounce wall rule) ─────────────────────────
-DRIVE_MM           = 50.0   # nominal forward step per cycle (mm)
+DRIVE_MM           = 150.0   # nominal forward step per cycle (mm)
 MAX_TURN_DEG       = 25.0   # cap on pole-steering / scan rotation per step
 K_POLE             = 0.6    # pole steering gain: rotate = K_POLE * pole_azimuth
 BASELINE_CURL_DEG  = 5.0    # constant arc applied while cruising past a far wall;
                             # sign random until the first rebound, then fixed to it
-BOUNCE_TRIGGER_MM  = 350.0  # wall closer than this in the cone → reflect (bounce)
+BOUNCE_TRIGGER_MM  = 750.0  # wall closer than this in the cone → reflect (bounce)
 BOUNCE_MAX_TURN    = 110.0  # cap on a rebound turn (lets a head-on wall reverse)
-WALL_JAM_MM        = 180.0  # below this, rebound with no drive (don't push into wall)
-SCAN_TURN_DEG      = 20.0   # in-place rotation when the cone is empty
+WALL_JAM_MM        = 250.0  # below this, rebound with no drive (don't push into wall)
+SCAN_TURN_DEG      = 20.0   # in-place rotation when the cone is empty (used only
+                            # when EMPTY_WANDER is False)
+
+# 'none'/empty-cone behaviour. True → wander: drive forward with a gentle curl
+# (sign follows the baseline-curl bias) so the robot crosses open stretches and
+# sweeps the cone until a wall or pole enters range. This is the right default
+# now that the 3-class sonar inverse abstains ('none') beyond ~1 m — pure
+# in-place scan would otherwise leave the robot spinning in open space. The
+# forward cone is clear for >= the horizon, so a step is safe. False → original
+# scan-in-place (rotate SCAN_TURN_DEG, no drive).
+EMPTY_WANDER     = True
+WANDER_CURL_DEG  = 5.0   # gentle forward curl (deg/step) applied while wanderingy
+
+# Corner-jam escape. Memoryless billiard reflection traps in concave corners — it
+# alternates ±BOUNCE_MAX_TURN without netting an escape and re-drives whenever
+# clearance creeps above WALL_JAM. When the nearest cone slice stays below
+# JAM_CLEAR_MM for JAM_PATIENCE consecutive steps, the controller stops reflecting
+# and reverses out decisively (ESCAPE_TURN_DEG toward the more-open side + a full
+# drive) — the way it came in is open by construction. A motor reflex on a small
+# counter, like the curl-sign bias.
+JAM_CLEAR_MM    = 500.0   # a cone slice below this counts as "near a wall"
+JAM_PATIENCE    = 4       # consecutive near-wall steps before escaping
+ESCAPE_TURN_DEG = 160.0   # escape turn magnitude (toward the more-open side)
+
+# On each wall contact (bounce or corner escape), re-roll the curl bias so the
+# robot doesn't deterministically arc the same way — re-randomise the curve/wander
+# sign and the curve magnitude for varied exploration. Without this a constant
+# curl makes open-space wandering trace a fixed circle. CURVE_CURL_{MIN,MAX}_DEG
+# bound the new magnitude (deg/step).
+RANDOMIZE_CURVE = True
+CURVE_CURL_MIN_DEG     = 2.0
+CURVE_CURL_MAX_DEG     = 12.0
+
+# Controller RNG seed for the real-robot run (initial curl sign + escape re-rolls).
+# None = fresh entropy each run (genuinely varied run-to-run); set an int to
+# reproduce a run. Sim mode uses SIM_SEED regardless.
+CONTROLLER_SEED = None
+
+# Referee-based jam abort (safety net if the escape can't free it): end the run
+# when the ground-truth nearest-wall surface clearance stays below
+# JAM_ABORT_CLEAR_MM for JAM_ABORT_STEPS consecutive steps.
+JAM_ABORT_CLEAR_MM = 50.0
+JAM_ABORT_STEPS    = 6
+
+# Rotation execution (real robot). The robot's rotation-calibration table
+# (Settings.rotation_obtained) tops out at ~±40°; Client.get_correction clamps
+# any larger target, so a single big command (a ±110° bounce or ±160° escape)
+# under-rotates to ~40°. We execute any turn beyond ROT_SUBSTEP_MAX_DEG as a
+# sequence of equal in-place sub-rotations, each inside the calibrated range, so
+# the commanded total is actually delivered. Fallback if the table is unreadable;
+# the live cap is derived from the loaded client's table at 0.9× its max.
+ROT_SUBSTEP_MAX_DEG = 35.0
 
 # ── Referee (ground-truth tracker/geometry) ───────────────────────────────────
 ROBOT_RADIUS_MM = 48.0    # 96 mm 3pi+ 2040 diameter
@@ -170,6 +228,14 @@ class ReactiveParams:
     bounce_max_turn: float = BOUNCE_MAX_TURN
     wall_jam_mm: float = WALL_JAM_MM
     scan_turn_deg: float = SCAN_TURN_DEG
+    empty_wander: bool = EMPTY_WANDER
+    wander_curl_deg: float = WANDER_CURL_DEG
+    jam_clear_mm: float = JAM_CLEAR_MM
+    jam_patience: int = JAM_PATIENCE
+    escape_turn_deg: float = ESCAPE_TURN_DEG
+    randomize_curve: bool = RANDOMIZE_CURVE
+    curve_curl_min_deg: float = CURVE_CURL_MIN_DEG
+    curve_curl_max_deg: float = CURVE_CURL_MAX_DEG
 
 
 # Bearings of the three wall slices within the ±cone (ascending azimuth):
@@ -205,26 +271,44 @@ class ReactiveController:
       wall  → fly an arc (constant `baseline_curl_deg`) until a wall comes within
               `bounce_trigger_mm`, then reflect off it (billiard rebound). Below
               `wall_jam_mm` the rebound carries no drive so it can't push into
-              the wall.
-      empty → rotate in place to scan.
+              the wall. If a slice stays below `jam_clear_mm` for `jam_patience`
+              steps (a concave-corner trap), reverse out (`escape`) toward the
+              more-open side — re-rolling the curve's sign + magnitude — instead
+              of reflecting forever.
+      empty → wander forward with a gentle curl (cross open space + sweep) until
+              a wall/pole enters range; or scan in place if EMPTY_WANDER is off.
 
-    Perception is memoryless — the only carried state is a single motor bias:
-    the baseline-curl sign, random until the first rebound and then fixed to that
-    rebound's direction. This is a motor prior, not perceptual memory; it removes
-    the unnatural dead-straight cruise of the pure rule without consulting any
-    map or past observation. `reset(seed)` re-randomises the sign for a new run.
+    Perception is memoryless — the only carried state is a small motor reflex:
+    the curl sign and magnitude (re-randomised on each wall contact — bounce or
+    escape) and a corner-jam counter that triggers the escape. These are motor
+    priors, not perceptual memory; they remove the dead-straight cruise, the
+    fixed-circle orbit, and the corner trap of the pure rule without consulting
+    any map or past observation. `reset(seed)` re-seeds the RNG and curl bias and
+    clears the jam counter.
     """
 
     def __init__(self, P: ReactiveParams, seed: int = 0):
         self.P = P
         self.reset(seed)
 
-    def reset(self, seed: int = 0):
-        self.curl_sign = 1.0 if np.random.default_rng(seed).random() < 0.5 else -1.0
+    def reset(self, seed=0):
+        self.rng = np.random.default_rng(seed)   # persistent: curl sign + wall-contact re-rolls
+        self.curl_sign = 1.0 if self.rng.random() < 0.5 else -1.0
+        self.curve_mag = self.P.baseline_curl_deg
         self.bounced = False
+        self.jam_count = 0
+
+    def _reroll_curl(self):
+        """Re-randomise the curl bias (sign + curve magnitude). Called on each
+        wall contact so exploration varies instead of tracing a fixed arc."""
+        self.curl_sign = 1.0 if self.rng.random() < 0.5 else -1.0
+        self.curve_mag = float(self.rng.uniform(self.P.curve_curl_min_deg,
+                                                self.P.curve_curl_max_deg))
 
     def decide(self, feat: LocalFeature):
         P = self.P
+        if feat.cls != "wall":
+            self.jam_count = 0          # the jam counter only accrues against walls
         if feat.cls == "pole":
             rot = float(np.clip(P.k_pole * feat.pole_az_deg,
                                 -P.max_turn_deg, P.max_turn_deg))
@@ -237,20 +321,48 @@ class ReactiveController:
             finite = [v for v in (r, c, l) if np.isfinite(v)]
             c_min = min(finite) if finite else float("inf")
 
-            # Far wall → arc forward with the baseline curl (no straights).
-            if c_min >= P.bounce_trigger_mm:
-                return self.curl_sign * P.baseline_curl_deg, P.drive_mm, "curve"
+            # Corner-jam escape: billiard reflection traps in concave corners (it
+            # alternates ±bounce_max_turn without netting an escape and re-drives
+            # whenever clearance exceeds wall_jam). When the nearest slice stays
+            # below jam_clear_mm for jam_patience steps, stop reflecting and
+            # reverse out decisively toward the more-open side — the way we came
+            # in is open by construction.
+            self.jam_count = self.jam_count + 1 if c_min < P.jam_clear_mm else 0
+            if self.jam_count >= P.jam_patience:
+                turn = P.escape_turn_deg
+                if np.isfinite(r) and np.isfinite(l) and r > l:
+                    turn = -turn          # right side more open → turn right
+                self.jam_count = 0
+                if P.randomize_curve:           # re-roll so we don't arc back in
+                    self._reroll_curl()
+                return turn, P.drive_mm, "escape"
 
-            # Near wall → reflect. The first rebound sets the curl sign.
+            # Far wall → arc forward with the current curl (no straights). The
+            # magnitude is baseline_curl_deg until a wall contact re-randomises it.
+            if c_min >= P.bounce_trigger_mm:
+                return self.curl_sign * self.curve_mag, P.drive_mm, "curve"
+
+            # Near wall → reflect. Re-roll the curl bias on each bounce so the
+            # post-bounce wander/curve varies and open-space paths don't orbit;
+            # without randomisation, the first rebound just fixes the curl sign.
             rot = float(np.clip(_reflect_rotation_deg(r, c, l),
                                 -P.bounce_max_turn, P.bounce_max_turn))
-            if not self.bounced and abs(rot) > 1e-6:
+            if P.randomize_curve:
+                self._reroll_curl()
+            elif not self.bounced and abs(rot) > 1e-6:
                 self.curl_sign = math.copysign(1.0, rot)
                 self.bounced = True
             drive = P.drive_mm if c_min > P.wall_jam_mm else 0.0
             return rot, drive, "bounce"
 
-        # Empty cone → scan in place.
+        # Empty cone / 'none' (nothing within range) → wander forward with a
+        # gentle curl so the robot crosses open stretches and sweeps the cone,
+        # rather than spinning in place (the 1 m sonar horizon makes 'none'
+        # common). The forward cone is clear for >= the horizon, so the step is
+        # safe; a wall or pole entering range immediately takes over. Sign
+        # follows the baseline-curl bias. EMPTY_WANDER=False keeps in-place scan.
+        if P.empty_wander:
+            return self.curl_sign * P.wander_curl_deg, P.drive_mm, "wander"
         return P.scan_turn_deg, 0.0, "scan"
 
 
@@ -414,15 +526,16 @@ def open_trajectory_log(out_dir):
         "feat_cls", "pole_az_deg", "p_pole", "p_none", "pole_az_sigma_deg",  # steering feature
         "d_right_mm", "d_center_mm", "d_left_mm",        # wall slices (if wall)
         "true_cls", "pole_near_mm", "min_wall_mm",       # ground-truth referee
-        "rot_deg", "drive_mm", "tag",                    # action taken
+        "rot_deg", "drive_mm", "tag", "jam",             # action taken (+ jam streak)
     ])
     f.flush()
     return f, w
 
 
 def log_trajectory_row(f, w, step, x, y, yaw, feat, true_cls, pole_near, min_wall,
-                       rot, drive, tag):
-    """One per-step row, recorded at the pose where the feature was evaluated."""
+                       rot, drive, tag, jam=0):
+    """One per-step row, recorded at the pose where the feature was evaluated.
+    `jam` is the controller's consecutive near-wall counter at decision time."""
     s = feat.slices_mm
     w.writerow([
         step, f"{x:.1f}", f"{y:.1f}", f"{yaw:.2f}",
@@ -431,7 +544,7 @@ def log_trajectory_row(f, w, step, x, y, yaw, feat, true_cls, pole_near, min_wal
         _fmt(s.get("right")), _fmt(s.get("center")), _fmt(s.get("left")),
         "" if not np.isfinite(true_cls) else int(true_cls),
         _fmt(pole_near), _fmt(min_wall),
-        f"{rot:.2f}", f"{drive:.1f}", tag,
+        f"{rot:.2f}", f"{drive:.1f}", tag, jam,
     ])
     f.flush()
 
@@ -454,11 +567,13 @@ def run_sim(geom, P, out_dir):
     xs, ys = [x], [y]
     sees = []                       # (x, y, cls) per decided step, for the plot
     outcome = "max_steps"
+    jam_steps = 0                   # consecutive referee-near-wall steps (jam abort)
     f_log, w_log = open_trajectory_log(out_dir)
     for step in range(MAX_STEPS):
         feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG,
                                      max_range_mm=GEOM_RANGE_HORIZON_MM)
         true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
+        jam_steps = jam_steps + 1 if min_wall < JAM_ABORT_CLEAR_MM else 0
         # Pre-emptive stop: the fixed drive step overshoots the stop window — a
         # single step can jump from outside it to inside the pole. Declare
         # success when the *next* approach step would carry us across the
@@ -473,11 +588,18 @@ def run_sim(geom, P, out_dir):
             rot   += float(rng.normal(0.0, SIM_ROT_NOISE_DEG))
             drive += float(rng.normal(0.0, SIM_DRIVE_NOISE_MM))
             drive = max(0.0, drive)
-        rot = float(np.clip(rot, -P.bounce_max_turn, P.bounce_max_turn))
+        turn_lim = max(P.bounce_max_turn, P.escape_turn_deg)
+        rot = float(np.clip(rot, -turn_lim, turn_lim))
         # Log at the pose the decision was made from (before the kinematic update).
         log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
-                           true_cls, pole_near, min_wall, rot, drive, tag)
+                           true_cls, pole_near, min_wall, rot, drive, tag,
+                           jam=ctrl.jam_count)
         sees.append((x, y, feat.cls))
+        if jam_steps >= JAM_ABORT_STEPS:
+            outcome = "jammed"
+            print(f"step {step:3d}: jammed (min_wall<{JAM_ABORT_CLEAR_MM:.0f}mm "
+                  f"x{JAM_ABORT_STEPS}) — aborting")
+            break
         yaw = ((yaw + rot + 180.0) % 360.0) - 180.0
         rad = math.radians(yaw)
         x += drive * math.cos(rad)
@@ -500,6 +622,46 @@ def run_sim(geom, P, out_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 # Real-robot run (sonar | vision)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def rotation_substep_cap(client, fallback=ROT_SUBSTEP_MAX_DEG):
+    """Largest faithful per-command rotation for this robot: 0.9× the max
+    |rotation_obtained| in its calibration table (Client.get_correction clamps
+    targets beyond that, so a bigger command under-rotates). Falls back if the
+    table can't be read."""
+    try:
+        obt = client.configuration.rotation_obtained
+        cap = 0.9 * max(abs(float(v)) for v in obt)
+        return cap if cap > 1.0 else fallback
+    except Exception:
+        return fallback
+
+
+def rotate_in_substeps(client, total_deg, cap_deg, settle_s=0.5):
+    """Execute `total_deg` of in-place rotation as N equal sub-rotations, each
+    within the calibrated range so it isn't clamped/under-rotated. Returns N."""
+    n = max(1, int(math.ceil(abs(total_deg) / cap_deg)))
+    per = total_deg / n
+    for _ in range(n):
+        client.step(angle=per)
+        time.sleep(settle_s)
+    return n
+
+
+def copy_arena_source(arena_root, arena, out_dir, dest_name="arena_source"):
+    """Copy the full source arena folder (<arena_root>/<arena>, including its
+    env_*/arena_features.npz, arena.png, meta.json, …) into the run folder, so
+    the results record exactly which arena geometry was used — not just the fresh
+    env snapshot taken at deploy time. Returns the destination path, or None if
+    the source folder doesn't exist."""
+    src = os.path.join(arena_root, arena)
+    if not os.path.isdir(src):
+        return None
+    dst = os.path.join(out_dir, dest_name, arena)
+    if os.path.exists(dst):
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    return dst
+
 
 def run_robot(geom, P, out_dir, source, features_path=None):
     from Library import Client
@@ -535,8 +697,11 @@ def run_robot(geom, P, out_dir, source, features_path=None):
         capture_environment_layout(save_root=out_dir)
         if features_path is not None and os.path.exists(features_path):
             shutil.copy(features_path, os.path.join(out_dir, "arena_features.npz"))
+        arena_dst = copy_arena_source(ARENAS_ROOT, ARENA, out_dir)
+        if arena_dst:
+            print(f"Copied source arena folder → {arena_dst}")
         CodeLogger.log_code(out_dir, [".", "Library"], label=SESSION)
-        print(f"Snapshotted env + arena features + code into {out_dir}")
+        print(f"Snapshotted env + arena features + source arena + code into {out_dir}")
     except Exception as e:
         print(f"  (env/code snapshot skipped: {e})")
 
@@ -549,7 +714,11 @@ def run_robot(geom, P, out_dir, source, features_path=None):
 
     client  = Client.Client(robot_number=ROBOT_ID)
     tracker = LorexTracker.LorexTracker()
-    ctrl    = ReactiveController(P)
+    ctrl    = ReactiveController(P, seed=CONTROLLER_SEED)
+
+    rot_cap = rotation_substep_cap(client)
+    print(f"Rotation sub-step cap: {rot_cap:.0f}° (turns beyond this are split so "
+          f"the calibration table doesn't clamp them)")
 
     def settled_pose(prior=None):
         prior_t = None if prior is None else (prior["x"], prior["y"], prior["yaw_deg"])
@@ -569,6 +738,7 @@ def run_robot(geom, P, out_dir, source, features_path=None):
     sees = []                       # (x, y, cls) per decided step, for the plot
     outcome = "max_steps"
     last = None
+    jam_steps = 0                   # consecutive referee-near-wall steps (jam abort)
     f_log, w_log = open_trajectory_log(out_dir)
     for step in range(MAX_STEPS):
         # Sonar must be pinged at the current orientation *before* settling read.
@@ -583,6 +753,7 @@ def run_robot(geom, P, out_dir, source, features_path=None):
 
         # Referee (ground truth) — success / collision / logging.
         true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
+        jam_steps = jam_steps + 1 if min_wall < JAM_ABORT_CLEAR_MM else 0
         # Pre-emptive stop: the fixed drive step overshoots the stop window — a
         # single step can jump from outside it to inside the pole. Declare
         # success when the *next* approach step would carry us across the
@@ -603,7 +774,8 @@ def run_robot(geom, P, out_dir, source, features_path=None):
 
         rot, drive, tag = ctrl.decide(feat)
         log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
-                           true_cls, pole_near, min_wall, rot, drive, tag)
+                           true_cls, pole_near, min_wall, rot, drive, tag,
+                           jam=ctrl.jam_count)
         sees.append((x, y, feat.cls))
         pp = ""
         if np.isfinite(feat.p_pole):
@@ -630,8 +802,17 @@ def run_robot(geom, P, out_dir, source, features_path=None):
                 step=step, tag=tag,
             )
 
+        if jam_steps >= JAM_ABORT_STEPS:
+            outcome = "jammed"
+            print(f"  *** jammed (min_wall<{JAM_ABORT_CLEAR_MM:.0f}mm "
+                  f"x{JAM_ABORT_STEPS}) — aborting ***")
+            break
+
         if do_rotation and abs(rot) > 1e-6:
-            client.step(angle=rot); time.sleep(0.5)
+            n_sub = rotate_in_substeps(client, rot, rot_cap)
+            if n_sub > 1:
+                print(f"    (turn {rot:+.0f}° split into {n_sub}×{rot/n_sub:+.0f}° "
+                      f"to stay within the ±{rot_cap:.0f}° calibrated range)")
         if do_translation and drive > 0.0:
             try:
                 client.step(distance=drive / 1000.0); time.sleep(0.15)
