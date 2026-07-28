@@ -150,7 +150,7 @@ def get_env_dir(data_reader):
     return env_dir
 
 
-def read_wall_mask(image_path, ref_rgb=(46, 194, 126), tol=35):
+def read_wall_mask(image_path, ref_rgb=(46, 194, 126), tol=60):
     img_bgr = cv2.imread(str(image_path))
     if img_bgr is None:
         raise FileNotFoundError(f"Could not read image from {image_path}")
@@ -158,10 +158,12 @@ def read_wall_mask(image_path, ref_rgb=(46, 194, 126), tol=35):
     ref = np.array(ref_rgb, dtype=np.int16)
     dist = np.linalg.norm(img_rgb - ref, axis=2)
     mask = dist <= tol
-    # optional cleanup
+    # MORPH_CLOSE bridges sub-3px gaps from anti-aliasing on thin polylines
+    # (dilation fills small holes, erosion brings the line back to ~1px).
+    # Crucially we do NOT do MORPH_OPEN here — that erodes thin lines away.
     mask_u8 = (mask.astype(np.uint8) * 255)
     kernel = np.ones((3, 3), np.uint8)
-    mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
+    mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
     return mask_u8.astype(bool)
 
 
