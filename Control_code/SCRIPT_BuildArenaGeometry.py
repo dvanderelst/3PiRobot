@@ -82,6 +82,13 @@ from Library.DataProcessor import read_wall_mask, read_pole_mask, mask2coordinat
 ROOTS: List[str] = [
     "AcquisitionArenas",   # arenas used for vision-guided sonar data collection
     "TargetArenas",        # arenas used for policy training/deployment
+    # Walls-only build for the Experiment 1 pole-position search: the snapshot
+    # is annotated with green wall polylines and no blue dabs, so the resulting
+    # arena_features.npz carries walls plus pole_radius_mm and candidate poles
+    # can be injected in simulation. Points at the arena folder deliberately —
+    # "TempOutput" would sweep up every other working arena in there and
+    # overwrite their arena_features.npz.
+    "TempOutput/StartPositionDigitization",
 ]
 
 # Wall height (mm) — used to back-project annotated wall tops to their (X, Y)
