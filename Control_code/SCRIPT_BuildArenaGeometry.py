@@ -67,6 +67,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from Library.DataProcessor import read_wall_mask, read_pole_mask, mask2coordinates
+from LorexLib import Settings as LorexSettings
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -119,13 +120,6 @@ POLE_MERGE_RADIUS_MM: float = 50.0
 # reuse the snapshotted copy, so recalibration in PyLorex doesn't retroactively
 # change a built env.
 PYLOREX_CALIBRATION_DIR: str = "../../PyLorex/PyLorex/Calibration/Results"
-
-# Manual offset applied to shark's world coordinates to align them with tiger's
-# world frame (= unified frame = arena grid). Mirrors Settings.shark2tiger_delta_{x,y}
-# in PyLorex/LorexLib/Settings.py.
-SHARK2TIGER_DELTA_X_MM: float = 0.0
-SHARK2TIGER_DELTA_Y_MM: float = -1840.0
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -338,7 +332,8 @@ def annotated_path(env_dir: Path, camera: str) -> Path:
 
 def camera_offset(camera: str) -> Optional[Tuple[float, float]]:
     if camera == "shark":
-        return (SHARK2TIGER_DELTA_X_MM, SHARK2TIGER_DELTA_Y_MM)
+        return (float(LorexSettings.shark2tiger_delta_x),
+                float(LorexSettings.shark2tiger_delta_y))
     return None
 
 
