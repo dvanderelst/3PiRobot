@@ -426,7 +426,7 @@ def draw_map(rows: List[dict], env_dir: Path, starts: List[dict],
     for i, pole in enumerate(picked, 1):
         c, rr = SD.world_to_px(pole[0], pole[1], aff)
         ax.plot(c, rr, "*", ms=28, color="#0a84ff", mec="white", mew=1.4, zorder=6)
-        ax.text(c + 18, rr + 18, f"Q{i}", color="#0a84ff", fontsize=15,
+        ax.text(c + 18, rr + 18, f"P{i}", color="#0a84ff", fontsize=15,
                 fontweight="bold", zorder=7)
     ax.set_title(f"Pole reachability — {len(rows)} candidates, "
                  f"{len(starts)} starts x {N_SEEDS} seeds, horizon {HORIZON_MM} mm",
@@ -473,7 +473,7 @@ def draw_picks(picked: List[tuple], rich: Dict[tuple, dict], env_dir: Path,
             n_trials += 1
         ax.plot(pc, pr, "o", ms=22, mfc="none", mew=3.2, color=col, zorder=6)
         ax.plot(pc, pr, "+", ms=16, mew=2.2, color=col, zorder=6)
-        ax.annotate(f"Q{i}  ({pole[0]:.0f}, {pole[1]:.0f})\n"
+        ax.annotate(f"P{i}  ({pole[0]:.0f}, {pole[1]:.0f})\n"
                     f"starts {sorted(rich[pole])}",
                     xy=(pc, pr), xytext=(pc + 34, pr - 34),
                     color=col, fontsize=12, fontweight="bold", zorder=8,
@@ -499,7 +499,7 @@ def write_picks(picked: List[tuple], rich: Dict[tuple, dict],
     trials = []
     poles = []
     for i, pole in enumerate(picked, 1):
-        label = f"Q{i}"
+        label = f"P{i}"
         poles.append({"label": label, "x_mm": pole[0], "y_mm": pole[1],
                       "starts": sorted(rich[pole])})
         for si, d in sorted(rich[pole].items()):
@@ -593,7 +593,7 @@ def main() -> None:
 
     total = 0
     for i, pole in enumerate(picked, 1):
-        print(f"  Q{i} ({pole[0]:7.0f}, {pole[1]:8.0f})  "
+        print(f"  P{i} ({pole[0]:7.0f}, {pole[1]:8.0f})  "
               f"-> place pole, snapshot, annotate, build, recalibrate")
         for si, d in sorted(rich[pole].items()):
             total += d["sim_steps"]

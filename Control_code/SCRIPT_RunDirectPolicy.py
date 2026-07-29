@@ -95,9 +95,9 @@ SENSE_SOURCE = "sonar"          # "sonar" | "vision" | "sim"
 # both are checked against it at startup, so running a combination that is not
 # part of the design, or with the arena built for a different placement, is
 # caught before the robot moves rather than discovered in the analysis.
-POLE   = "Q1"                   # placement label, must match TRIAL_LIST
+POLE   = "P1"                   # placement label, must match TRIAL_LIST
 START  = 1                      # start mark index, must match start_poses.json
-ARENA  = "DirectQ1"             # TargetArenas/<ARENA>/ BUILT FOR THIS PLACEMENT
+ARENA  = "DirectP1"             # TargetArenas/<ARENA>/ BUILT FOR THIS PLACEMENT
 SUFFIX = ''                     # optional tag for a repeat or a re-run
 
 TRIAL_LIST = "TempOutput/StartPositionDigitization/pole_positions.json"
