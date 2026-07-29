@@ -14,6 +14,8 @@ Control_code/PolicyTraining/
 Control_code/TargetArenas/
 Control_code/TempOutput/
 Control_code/SonarModel/
+# superseded inverse models, kept loadable; see its README
+Control_code/SonarModel_archive/
 Control_code/SonarSessions/
 
 *.zip
