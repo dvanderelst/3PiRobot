@@ -58,10 +58,12 @@ tracker is only the referee for when-the-pole-is-reached and for logging.
 """
 
 import csv
+import json
 import math
 import os
 import shutil
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
@@ -84,11 +86,32 @@ from Library.AcquisitionSessionLoader import (
 # ══════════════════════════════════════════════════════════════════════════════
 
 SENSE_SOURCE = "sonar"          # "sonar" | "vision" | "sim"
-ARENA        = "DirectTarget02"     # sub-folder under TargetArenas/ (arena_features.npz)
-START = 2
-SUFFIX = ''
 
-SESSION      = f"direct_{SENSE_SOURCE}_position{START}{SUFFIX}"
+# ── Which trial is this? ──────────────────────────────────────────────────────
+# Experiment 1 is a set of TRIALS, each one (pole placement x start mark), run
+# once per perceptual condition. POLE names the placement physically in the
+# arena right now; START names the tape mark the robot is standing on. The
+# agreed trial list lives in TRIAL_LIST (written by SCRIPT_SweepPolePositions);
+# both are checked against it at startup, so running a combination that is not
+# part of the design, or with the arena built for a different placement, is
+# caught before the robot moves rather than discovered in the analysis.
+POLE   = "Q1"                   # placement label, must match TRIAL_LIST
+START  = 1                      # start mark index, must match start_poses.json
+ARENA  = "DirectQ1"             # TargetArenas/<ARENA>/ BUILT FOR THIS PLACEMENT
+SUFFIX = ''                     # optional tag for a repeat or a re-run
+
+TRIAL_LIST = "TempOutput/StartPositionDigitization/pole_positions.json"
+
+# Session name carries pole, start and condition, so no two runs of the design
+# can collide. The previous scheme keyed on start alone, which meant the same
+# start against two placements wrote to one folder and the second silently
+# overwrote the first.
+SESSION = f"direct_{POLE}_S{START}_{SENSE_SOURCE}{SUFFIX}"
+
+# How far the built arena's pole may sit from the intended placement before the
+# run is refused (mm). Covers grid quantisation (positions come off a 250 mm
+# grid) plus hand-placement error, but not pointing ARENA at the wrong build.
+POLE_POSITION_TOL_MM = 400.0
 
 ROBOT_ID     = 1
 MAX_STEPS    = 200
@@ -150,9 +173,14 @@ CURVE_CURL_MIN_DEG     = 2.0
 CURVE_CURL_MAX_DEG     = 12.0
 
 # Controller RNG seed for the real-robot run (initial curl sign + escape re-rolls).
-# None = fresh entropy each run (genuinely varied run-to-run); set an int to
-# reproduce a run. Sim mode uses SIM_SEED regardless.
-CONTROLLER_SEED = None
+# Derived from (POLE, START) and deliberately NOT from SENSE_SOURCE, so the sonar
+# and vision runs of one trial draw the identical curl sign, curl magnitude and
+# escape re-rolls. That is what makes the two conditions a matched pair: any
+# difference between them is attributable to the feature source rather than to
+# the controller having wandered differently. crc32 rather than hash(), whose
+# string seed is randomised per interpreter run.
+# Set to None for fresh entropy (exploratory runs), or an int to reproduce one.
+CONTROLLER_SEED = zlib.crc32(f"{POLE}|{START}".encode()) & 0x7FFFFFFF
 
 # Referee-based jam abort (safety net if the escape can't free it): end the run
 # when the ground-truth nearest-wall surface clearance stays below
@@ -865,12 +893,75 @@ def load_arena_geometry(arena_root: str, arena: str):
     return _load_features_for_session(base), None
 
 
+def resolve_trial():
+    """Look this run's (POLE, START) up in the agreed trial list.
+
+    Returns the trial record, or None when the list is missing or the pair is
+    not in it. A missing list is not fatal -- exploratory runs are legitimate --
+    but an unrecognised pair is worth shouting about, because the usual cause is
+    a stale POLE or START left over from the previous run.
+    """
+    path = Path(TRIAL_LIST)
+    if not path.exists():
+        print(f"  (no trial list at {TRIAL_LIST} — running unchecked)")
+        return None
+    with open(path) as fh:
+        trials = json.load(fh).get("trials", [])
+    for t in trials:
+        if t.get("pole") == POLE and int(t.get("start", -1)) == START:
+            return t
+    agreed = sorted({(t["pole"], t["start"]) for t in trials})
+    print(f"\n  !! {POLE} x S{START} is NOT in the agreed trial list.")
+    print(f"     Agreed trials: {agreed}")
+    print(f"     Continuing anyway — but check POLE/START before using this run.")
+    return None
+
+
+def check_arena_matches_pole(geom, trial):
+    """Refuse to run when the built arena is not the one for this placement.
+
+    The referee scores against the pole in arena_features.npz. If ARENA still
+    points at the previous placement's build, every run scores against a pole
+    that is not physically there -- and nothing about the run looks wrong until
+    the analysis. Cheap to check, expensive to miss.
+    """
+    if trial is None:
+        return
+    want = (float(trial["pole_x_mm"]), float(trial["pole_y_mm"]))
+    poles = geom["poles"]
+    d = np.hypot(poles[:, 0] - want[0], poles[:, 1] - want[1])
+    i = int(np.argmin(d))
+    if d[i] > POLE_POSITION_TOL_MM:
+        raise SystemExit(
+            f"\nArena/pole mismatch — refusing to run.\n"
+            f"  {POLE} should be near ({want[0]:.0f}, {want[1]:.0f}).\n"
+            f"  Nearest pole in TargetArenas/{ARENA} is "
+            f"({poles[i, 0]:.0f}, {poles[i, 1]:.0f}), {d[i]:.0f} mm away "
+            f"(tolerance {POLE_POSITION_TOL_MM:.0f} mm).\n"
+            f"  Either ARENA points at the wrong build, or the pole was placed "
+            f"somewhere other than {POLE}. Re-snapshot/annotate/build, or fix "
+            f"ARENA.")
+    print(f"  arena pole ({poles[i, 0]:.0f}, {poles[i, 1]:.0f}) is {d[i]:.0f} mm "
+          f"from the intended {POLE} — OK")
+
+
 def main():
+    print(f"\nTrial: {POLE} x S{START}  [{SENSE_SOURCE}]  -> {SESSION}")
+    trial = resolve_trial()
+    if trial is not None:
+        print(f"  expected: {trial['range_mm']:.0f} mm, "
+              f"{trial['bearing_deg']:+.0f} deg off heading, "
+              f"~{trial['sim_steps']} steps ({trial['hidden_by']})")
+    if SENSE_SOURCE != "sim":
+        print(f"  controller seed {CONTROLLER_SEED} "
+              f"(same for sonar and vision — matched pair)")
+
     geom, features_path = load_arena_geometry(ARENAS_ROOT, ARENA)
     print(f"Arena '{ARENA}': {geom['walls'].shape[0]} wall pts, "
           f"{geom['poles'].shape[0]} poles (r={geom['pole_radius_mm']:.1f} mm)")
     if geom["poles"].shape[0] == 0:
         raise SystemExit("No poles in arena_features.npz — nothing to approach.")
+    check_arena_matches_pole(geom, trial)
 
     out_dir = os.path.join(DATA_FOLDER, SESSION)
     os.makedirs(out_dir, exist_ok=True)
