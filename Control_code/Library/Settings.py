@@ -1,7 +1,14 @@
 from dataclasses import dataclass, field
 calibration_folder = 'Library/RobotCalibration'
 calibration_plot_folder = 'Library/RobotCalibration/Plots'
-data_folder = 'SonarSessions'
+# Fallback root for DataStorage.DataWriter. Every script that writes session
+# data sets this explicitly before constructing a writer (AcquisitionSessions,
+# TargetArenas, PolicyRuns), so this value should never be used. It is named to
+# fail loudly rather than plausibly: a folder appearing under this name means a
+# script forgot its override. The old default was 'SonarSessions', which held
+# nothing but stray Settings.copy files long after the sonar training data moved
+# to AcquisitionSessions/.
+data_folder = 'UNSET_SessionRoot'
 
 controller_verbosity = 2  # 0=errors, 1=warnings, 2=info, 3=debug
 client_verbosity = 3  # 0=errors, 1=warnings, 2=info, 3=debug
