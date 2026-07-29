@@ -304,7 +304,8 @@ class SonarSlicesUQ_Wall3(nn.Module):
     """
 
     def __init__(self, samples, conv_channels, conv_kernel, pool_out,
-                 fc_hidden, head_hidden, n_classes: int = 2, symmetric: bool = True):
+                 fc_hidden, head_hidden, n_classes: int = 2, symmetric: bool = True,
+                 pole_dist_head: bool = False):
         super().__init__()
         layers = []
         in_ch = 1
@@ -329,6 +330,13 @@ class SonarSlicesUQ_Wall3(nn.Module):
         self.class_head = make_head(2 * fc_hidden, head_hidden, out_dim=n_classes)
         self.pole_az_mean_head = make_head(2 * fc_hidden, head_hidden)
         self.pole_az_log_var_head = make_head(2 * fc_hidden, head_hidden)
+        # Pole RANGE head. Optional so checkpoints trained before it exists still
+        # load into this class; the trainer turns it on via MODEL_KWARGS and the
+        # flag is recorded in feature_params.
+        self.pole_dist_head = pole_dist_head
+        if pole_dist_head:
+            self.pole_dist_mean_head = make_head(2 * fc_hidden, head_hidden)
+            self.pole_dist_log_var_head = make_head(2 * fc_hidden, head_hidden)
         self.n_classes = n_classes
         self.symmetric = symmetric
 
@@ -360,6 +368,15 @@ class SonarSlicesUQ_Wall3(nn.Module):
             class_logits = 0.5 * (self.class_head(LR) + self.class_head(RL))
             pole_az_mean = 0.5 * (self.pole_az_mean_head(LR) - self.pole_az_mean_head(RL))
             pole_az_log_var = 0.5 * (self.pole_az_log_var_head(LR) + self.pole_az_log_var_head(RL))
+            if self.pole_dist_head:
+                # Range is invariant under the L<->R mirror (a pole 30 deg left
+                # and its mirror 30 deg right are the same distance away), so
+                # the two orderings are AVERAGED -- '+' like the class head, not
+                # the '-' the antisymmetric azimuth head needs.
+                pole_dist_mean = 0.5 * (self.pole_dist_mean_head(LR)
+                                        + self.pole_dist_mean_head(RL))
+                pole_dist_log_var = 0.5 * (self.pole_dist_log_var_head(LR)
+                                           + self.pole_dist_log_var_head(RL))
         else:
             m, v = self.wall_mean_head(LR), self.wall_log_var_head(LR)
             left_mean, center_mean, right_mean = col(m, 0), col(m, 1), col(m, 2)
@@ -367,8 +384,11 @@ class SonarSlicesUQ_Wall3(nn.Module):
             class_logits = self.class_head(LR)
             pole_az_mean = self.pole_az_mean_head(LR)
             pole_az_log_var = self.pole_az_log_var_head(LR)
+            if self.pole_dist_head:
+                pole_dist_mean = self.pole_dist_mean_head(LR)
+                pole_dist_log_var = self.pole_dist_log_var_head(LR)
 
-        return {
+        out = {
             "right_mean": right_mean, "right_log_var": right_log_var,
             "center_mean": center_mean, "center_log_var": center_log_var,
             "left_mean": left_mean, "left_log_var": left_log_var,
@@ -376,6 +396,10 @@ class SonarSlicesUQ_Wall3(nn.Module):
             "pole_az_mean": pole_az_mean,
             "pole_az_log_var": pole_az_log_var,
         }
+        if self.pole_dist_head:
+            out["pole_dist_mean"] = pole_dist_mean
+            out["pole_dist_log_var"] = pole_dist_log_var
+        return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -675,6 +699,9 @@ class InverseModel:
 
         self.cone_half_deg   = float(params["cone_half_deg"])
         self.pole_az_divisor = float(params["pole_az_norm"]["divide_by_deg"])
+        # None for models without the pole-range head.
+        _pd = params.get("pole_dist_norm")
+        self.pole_dist_divisor = float(_pd["divide_by_mm"]) if _pd else None
         self.class_names     = list(params.get("class_names", ["wall", "pole"]))
         self._lv_min, self._lv_max = params["log_var_clamp"]
 
@@ -723,7 +750,9 @@ class InverseModel:
         model_class = arch.get("model_class", "SonarSlicesUQ_TwoHeaded")
         if model_class == "SonarSlicesUQ_Wall3":
             model = SonarSlicesUQ_Wall3(
-                **common, symmetric=bool(arch.get("wall3_symmetric", True))
+                **common,
+                symmetric=bool(arch.get("wall3_symmetric", True)),
+                pole_dist_head=bool(arch.get("wall3_pole_dist", False)),
             )
         elif model_class == "SonarSlicesUQ_TwoHeaded":
             model = SonarSlicesUQ_TwoHeaded(**common)
@@ -756,6 +785,10 @@ class InverseModel:
             pole_az_deg                signed bearing (+ccw = LEFT); only
                                        meaningful when class==pole
             pole_az_sigma_deg          bearing σ
+            pole_dist_mm               range to the pole surface; present ONLY
+                                       for models trained with the pole-range
+                                       head, so check membership before use
+            pole_dist_sigma_mm         range σ
         De-normalisation mirrors SCRIPT_TrainInverseModel.predict exactly.
         """
         L = np.asarray(left,  dtype=np.float32)
@@ -801,6 +834,16 @@ class InverseModel:
                          self._lv_min, self._lv_max)
         result["pole_az_deg"]       = az_n * self.pole_az_divisor
         result["pole_az_sigma_deg"] = np.exp(az_lvn / 2.0) * self.pole_az_divisor
+
+        # Pole range (de-normalise by the trained max range). Present only for
+        # models trained with the pole-distance head; absent for older ones, so
+        # callers must check rather than assume.
+        if "pole_dist_mean" in out and self.pole_dist_divisor is not None:
+            d_n   = out["pole_dist_mean"].cpu().squeeze(1).numpy()
+            d_lvn = np.clip(out["pole_dist_log_var"].cpu().squeeze(1).numpy(),
+                            self._lv_min, self._lv_max)
+            result["pole_dist_mm"]       = d_n * self.pole_dist_divisor
+            result["pole_dist_sigma_mm"] = np.exp(d_lvn / 2.0) * self.pole_dist_divisor
 
         if squeeze:
             for k, v in result.items():
