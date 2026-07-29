@@ -64,6 +64,7 @@ import os
 import shutil
 import time
 import zlib
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
@@ -199,8 +200,35 @@ ROT_SUBSTEP_MAX_DEG = 35.0
 
 # ── Referee (ground-truth tracker/geometry) ───────────────────────────────────
 ROBOT_RADIUS_MM = 48.0    # 96 mm 3pi+ 2040 diameter
-STOP_MARGIN_MM  = 40.0    # success when pole-surface distance < radius + margin
 COLLISION_MM    = 20.0    # min wall clearance (surface) before we call a crash
+
+# ── Terminal approach: stop distance + azimuth regulation ─────────────────────
+# Approach ends when the PERCEIVED pole range falls below APPROACH_STOP_MM, then
+# the robot regulates the perceived bearing toward zero. Both are read from the
+# controller's own LocalFeature, so sonar runs terminate on sonar and vision runs
+# on vision; the tracker only scores. Previously both stopped on tracker
+# geometry, which let a sonar run be credited with a success the inverse played
+# no part in.
+#
+# 500 mm, not the old 88 mm. 88 mm sits inside the emission/echo overlap where
+# there is no echo to measure, and the inverse has NO training data below 253 mm
+# (the acquisition planner held waypoints CLEARANCE_MM=250 off every reflector),
+# so any range estimate down there is extrapolation. 27.7% of pole pings fall
+# below 500 mm, so the range head interpolates throughout. It also matches the
+# 50 cm criterion of the earlier JEB study with these same sensors.
+APPROACH_STOP_MM = 500.0
+
+# Azimuth regulation. Reaching the vicinity only says the robot ended up near the
+# pole; nulling the bearing says it localised the pole and turned to face it, and
+# it exercises the azimuth head. Iterative with graceful give-up rather than one
+# correction: with noisy sonar bearings a single rotation would often overshoot,
+# and how many corrections a condition needs is itself a measure (vision should
+# converge in one or two).
+ALIGN_TOL_DEG   = 15.0   # |bearing| counting as aligned. Above the inverse's own
+                         # 10.1/12.1 deg azimuth RMSE, so failures are behavioural
+                         # rather than the model's noise floor.
+ALIGN_MAX_STEPS = 6      # corrections before giving up (outcome reached_unaligned)
+ALIGN_GAIN      = 0.8    # fraction of the perceived bearing turned per correction
 
 # ── Sim-mode kinematics (SENSE_SOURCE == "sim") ───────────────────────────────
 SIM_START_XY_MM   = None   # (x, y) mm; None → arena centroid
@@ -237,6 +265,9 @@ class LocalFeature:
     """The one feature both modalities emit; the only input to `decide`."""
     cls: str                              # "pole" | "wall" | "empty"
     pole_az_deg: float = float("nan")     # signed bearing when cls == "pole"
+    pole_dist_mm: float = float("nan")    # range to the pole SURFACE when
+                                          # cls == "pole". Drives the terminal
+                                          # stop, so both modalities must fill it.
     p_pole: float = float("nan")          # P(pole) from the sonar inverse (sonar only)
     p_none: float = float("nan")          # P(none) from the 3-class inverse (sonar only)
     pole_az_sigma_deg: float = float("nan")  # pole-bearing σ (sonar only)
@@ -412,7 +443,10 @@ def feature_from_geometry(x, y, yaw, geom, cone_half_deg,
     if max_range_mm is not None and np.isfinite(near) and near > max_range_mm:
         return LocalFeature(cls="empty")   # nothing within range → matches 'none'
     if cls == 1.0:
-        return LocalFeature(cls="pole", pole_az_deg=pole_az)
+        # `near` is already the range to the pole surface (centre - radius),
+        # the same quantity the sonar range head is trained on. It used to be
+        # discarded here, which is why the stop had to come from the referee.
+        return LocalFeature(cls="pole", pole_az_deg=pole_az, pole_dist_mm=near)
     # Wall: geometric 3-slice (min distance per slice), matching the inverse's
     # wall head and the trainer's compute_slice_targets.
     prof = compute_profile(walls, x, y, yaw,
@@ -421,6 +455,68 @@ def feature_from_geometry(x, y, yaw, geom, cone_half_deg,
                            profile_method="ray_center")
     slices = _slice_profile(prof, cone_half_deg)
     return LocalFeature(cls="wall", slices_mm=slices)
+
+
+def write_run_summary(out_dir, source, outcome, n_steps, n_align, feat,
+                      true_pole_mm=float("nan"), true_wall_mm=float("nan")):
+    """One machine-readable record per run.
+
+    Until now the outcome existed only in stdout and the plot title, so scoring
+    18 runs meant reading PNGs. The terminal-approach fields matter for the
+    sonar/vision comparison: how many bearing corrections a condition needed,
+    and whether it converged, is a direct read on azimuth quality.
+    """
+    summary = {
+        "session": SESSION, "pole": POLE, "start": START, "source": source,
+        "arena": ARENA, "inverse_fold": INVERSE_FOLD if source == "sonar" else None,
+        "controller_seed": CONTROLLER_SEED,
+        "outcome": outcome,
+        "aligned": outcome == "reached_aligned",
+        "reached": outcome.startswith("reached"),
+        "n_steps": int(n_steps),
+        "n_align_corrections": int(n_align),
+        "align_tol_deg": ALIGN_TOL_DEG,
+        "align_max_steps": ALIGN_MAX_STEPS,
+        "approach_stop_mm": APPROACH_STOP_MM,
+        "final_perceived_class": feat.cls,
+        "final_perceived_pole_az_deg": _json_num(feat.pole_az_deg),
+        "final_perceived_pole_dist_mm": _json_num(feat.pole_dist_mm),
+        "final_true_pole_dist_mm": _json_num(true_pole_mm),
+        "final_true_wall_clear_mm": _json_num(true_wall_mm),
+        "written": datetime.now().isoformat(timespec="seconds"),
+    }
+    path = os.path.join(out_dir, "run_summary.json")
+    with open(path, "w") as fh:
+        json.dump(summary, fh, indent=2)
+    print(f"Summary: {path}")
+    return summary
+
+
+def _json_num(v):
+    v = float(v)
+    return None if not np.isfinite(v) else round(v, 2)
+
+
+def at_stop_distance(feat: "LocalFeature") -> bool:
+    """Has the PERCEIVED pole range crossed the terminal-approach threshold?"""
+    return (feat.cls == "pole" and np.isfinite(feat.pole_dist_mm)
+            and feat.pole_dist_mm <= APPROACH_STOP_MM)
+
+
+def alignment_rotation(feat: "LocalFeature"):
+    """One step of bearing regulation: (rotation_deg, aligned, usable).
+
+    usable=False when the pole is not currently perceived — under sonar the
+    class can flip mid-alignment. That still consumes an attempt, so a model
+    that keeps losing the pole gives up rather than looping forever.
+    """
+    if feat.cls != "pole" or not np.isfinite(feat.pole_az_deg):
+        return 0.0, False, False
+    az = float(feat.pole_az_deg)
+    if abs(az) <= ALIGN_TOL_DEG:
+        return 0.0, True, True
+    rot = float(np.clip(ALIGN_GAIN * az, -MAX_TURN_DEG, MAX_TURN_DEG))
+    return rot, False, True
 
 
 def feature_from_inverse(pred: Dict) -> LocalFeature:
@@ -435,7 +531,12 @@ def feature_from_inverse(pred: Dict) -> LocalFeature:
     if cl == 2:                       # none → abstain (scan), don't chase
         return LocalFeature(cls="empty", p_pole=p_pole, p_none=p_none)
     if cl == 1:
+        # pole_dist_mm exists only for models trained with the range head. Left
+        # NaN for older ones, which makes the terminal stop unreachable — hence
+        # the explicit check in main() rather than a silent never-stopping run.
         return LocalFeature(cls="pole", pole_az_deg=float(pred["pole_az_deg"]),
+                            pole_dist_mm=float(pred.get("pole_dist_mm",
+                                                        float("nan"))),
                             p_pole=p_pole, p_none=p_none,
                             pole_az_sigma_deg=float(
                                 pred.get("pole_az_sigma_deg", float("nan"))))
@@ -596,18 +697,29 @@ def run_sim(geom, P, out_dir):
     sees = []                       # (x, y, cls) per decided step, for the plot
     outcome = "max_steps"
     jam_steps = 0                   # consecutive referee-near-wall steps (jam abort)
+    n_align = 0                     # bearing corrections used in terminal approach
     f_log, w_log = open_trajectory_log(out_dir)
     for step in range(MAX_STEPS):
         feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG,
                                      max_range_mm=GEOM_RANGE_HORIZON_MM)
         true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
         jam_steps = jam_steps + 1 if min_wall < JAM_ABORT_CLEAR_MM else 0
-        # Pre-emptive stop: the fixed drive step overshoots the stop window — a
-        # single step can jump from outside it to inside the pole. Declare
-        # success when the *next* approach step would carry us across the
-        # threshold, and don't drive, rather than bumping the pole.
-        if true_cls == 1.0 and pole_near - P.drive_mm < ROBOT_RADIUS_MM + STOP_MARGIN_MM:
-            outcome = "reached_pole"; break
+        # Terminal approach, judged on the controller's OWN perception (the
+        # referee only scores). On crossing the stop range, stop driving and
+        # regulate the perceived bearing toward zero.
+        if at_stop_distance(feat):
+            aligned = False
+            for _ in range(ALIGN_MAX_STEPS):
+                rot_a, aligned, usable = alignment_rotation(feat)
+                if aligned:
+                    break
+                if usable:
+                    yaw = ((yaw + rot_a + 180.0) % 360.0) - 180.0
+                    n_align += 1
+                feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG,
+                                             max_range_mm=GEOM_RANGE_HORIZON_MM)
+            outcome = "reached_aligned" if aligned else "reached_unaligned"
+            break
         if min_wall < COLLISION_MM:
             outcome = "collision"; break
 
@@ -638,7 +750,10 @@ def run_sim(geom, P, out_dir):
               f"pole_near={pole_near:6.0f}  min_wall={min_wall:6.0f}")
 
     f_log.close()
-    print(f"\nOutcome: {outcome} after {len(xs) - 1} steps.")
+    write_run_summary(out_dir, "sim", outcome, len(xs) - 1, n_align, feat,
+                      pole_near, min_wall)
+    print(f"\nOutcome: {outcome} after {len(xs) - 1} steps"
+          f"{f', {n_align} bearing corrections' if n_align else ''}.")
     out_path = os.path.join(out_dir, "trajectory.png")
     save_trajectory_plot(xs, ys, geom, out_path,
                          f"{SESSION} [sim] — {outcome} ({len(xs)-1} steps)",
@@ -739,6 +854,12 @@ def run_robot(geom, P, out_dir, source, features_path=None):
         inverse = InverseModel.load(model_dir="SonarModel", fold=INVERSE_FOLD,
                                     device="cpu")
         print(f"Loaded inverse: {inverse}")
+        if inverse.pole_dist_divisor is None:
+            raise SystemExit(
+                f"\nInverse fold '{INVERSE_FOLD}' has no pole-range head, so the "
+                f"terminal approach can never trigger and the run would time out "
+                f"silently.\n  Retrain with the pole-distance head "
+                f"(pole_dist_head=True) or run SENSE_SOURCE='vision'.")
 
     client  = Client.Client(robot_number=ROBOT_ID)
     tracker = LorexTracker.LorexTracker()
@@ -767,6 +888,8 @@ def run_robot(geom, P, out_dir, source, features_path=None):
     outcome = "max_steps"
     last = None
     jam_steps = 0                   # consecutive referee-near-wall steps (jam abort)
+    n_align = 0                     # bearing corrections used in terminal approach
+    feat = LocalFeature(cls="empty")  # last perceived feature, for the summary
     f_log, w_log = open_trajectory_log(out_dir)
     for step in range(MAX_STEPS):
         # Sonar must be pinged at the current orientation *before* settling read.
@@ -782,14 +905,9 @@ def run_robot(geom, P, out_dir, source, features_path=None):
         # Referee (ground truth) — success / collision / logging.
         true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
         jam_steps = jam_steps + 1 if min_wall < JAM_ABORT_CLEAR_MM else 0
-        # Pre-emptive stop: the fixed drive step overshoots the stop window — a
-        # single step can jump from outside it to inside the pole. Declare
-        # success when the *next* approach step would carry us across the
-        # threshold, and don't drive, rather than bumping the pole.
-        if true_cls == 1.0 and pole_near - P.drive_mm < ROBOT_RADIUS_MM + STOP_MARGIN_MM:
-            outcome = "reached_pole"; print("  *** pole reached ***"); break
-
-        # Feature from the chosen modality.
+        # Feature from the chosen modality. Computed BEFORE the stop test,
+        # because the terminal approach is now judged on the robot's own
+        # perception rather than on tracker geometry.
         if source == "sonar":
             if sonar_pkg is None:
                 print(f"step {step:3d}: no sonar — skipping"); continue
@@ -799,6 +917,47 @@ def run_robot(geom, P, out_dir, source, features_path=None):
         else:  # vision
             feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG,
                                          max_range_mm=GEOM_RANGE_HORIZON_MM)
+
+        # Terminal approach: stop driving and regulate the PERCEIVED bearing to
+        # zero, re-sensing after each correction. Sonar bearings are noisy, so a
+        # single rotation would often overshoot; how many corrections a run needs
+        # is itself a measure of azimuth quality. Gives up after ALIGN_MAX_STEPS.
+        if at_stop_distance(feat):
+            print(f"  *** stop range reached "
+                  f"({feat.pole_dist_mm:.0f} mm) — regulating bearing ***")
+            aligned = False
+            for att in range(ALIGN_MAX_STEPS):
+                rot_a, aligned, usable = alignment_rotation(feat)
+                if aligned:
+                    break
+                if usable:
+                    rotate_in_substeps(client, rot_a, rot_cap)
+                    n_align += 1
+                    print(f"    correction {n_align}: az={feat.pole_az_deg:+.1f}° "
+                          f"→ rotate {rot_a:+.1f}°")
+                else:
+                    print(f"    attempt {att + 1}: pole not perceived "
+                          f"({feat.cls}) — re-sensing")
+                if source == "sonar":
+                    pkg = client.read_and_process(do_ping=True, plot=False)
+                    pose_a = settled_pose(prior=last)
+                    if pose_a is not None:
+                        last = pose_a
+                    if pkg is None:
+                        feat = LocalFeature(cls="empty"); continue
+                    sda = np.asarray(pkg["sonar_data"], dtype=np.float32)
+                    feat = feature_from_inverse(
+                        inverse.predict_from_envelope(sda[:, 1], sda[:, 2]))
+                else:
+                    pose_a = settled_pose(prior=last)
+                    if pose_a is not None:
+                        last = pose_a
+                        feat = feature_from_geometry(
+                            pose_a["x"], pose_a["y"], pose_a["yaw_deg"], geom,
+                            CONE_HALF_DEG, max_range_mm=GEOM_RANGE_HORIZON_MM)
+            outcome = "reached_aligned" if aligned else "reached_unaligned"
+            print(f"  *** {outcome} after {n_align} correction(s) ***")
+            break
 
         rot, drive, tag = ctrl.decide(feat)
         log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
@@ -856,7 +1015,9 @@ def run_robot(geom, P, out_dir, source, features_path=None):
                 f"{SESSION} [{source}] — step {step}", feats=sees)
 
     f_log.close()
-    print(f"\nOutcome: {outcome} after {len(xs)} poses.")
+    write_run_summary(out_dir, source, outcome, len(xs), n_align, feat)
+    print(f"\nOutcome: {outcome} after {len(xs)} poses"
+          f"{f', {n_align} bearing correction(s)' if n_align else ''}.")
     out_path = os.path.join(out_dir, "trajectory.png")
     save_trajectory_plot(xs, ys, geom, out_path,
                          f"{SESSION} [{source}] — {outcome} ({len(xs)} steps)",
