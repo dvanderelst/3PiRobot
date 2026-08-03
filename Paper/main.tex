@@ -312,9 +312,9 @@ Wall-depth RMSE, left / center / right (mm)  & $307$ / $300$ / $273$ & $339$ / $
 \end{tabular}
 \end{table}
 
-\begin{figure}[htb]
+\begin{figure}[!htbp]
     \centering
-    \includegraphics[width=\textwidth]{fig_inverse_results}
+    \includegraphics[width=0.92\textwidth]{fig_inverse_results}
     \caption{Inverse-model performance on the held-out $15\%$ of echoes. (A) Classification of the nearest reflector, as row-normalized recall: walls are recovered well, while poles and \emph{none} are mostly confused with each other. (B) Predicted versus true pole azimuth, colored by the model's predicted uncertainty $\sigma$; bearings follow the diagonal but with substantial scatter. (C) Predicted versus true pole range, colored in the same way; range is the most accurately recovered quantity, as expected for a cue available from the time of return at a single ear. (D) Predicted versus true wall distance for the three depth directions (colors); distances are accurate at close range and degrade with range. The dashed lines mark perfect prediction. Together the panels show that the inverse recovers the target features but noisily.}
     \label{fig:inverse-results}
 \end{figure}
