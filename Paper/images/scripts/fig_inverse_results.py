@@ -1,12 +1,15 @@
 """Inverse-model results figure: what "recovers the features, but noisily" means.
 
 Recomputes the deployed model's predictions on the held-out 15% (the same set
-Table~\\ref{tab:inverse-results} reports) and shows three panels in one row:
+Table~\\ref{tab:inverse-results} reports) and shows four panels on a 2x2 grid:
   (A) classification confusion (row-normalised recall),
   (B) pole-azimuth true vs predicted, coloured by predicted sigma,
-  (C) wall-depth true vs predicted, the three slices in one panel by colour.
-The slice legend sits below the row to avoid overlapping the data. Held-out
-only, so the figure and the table describe the same data.
+  (C) pole-range true vs predicted, coloured by predicted sigma,
+  (D) wall-depth true vs predicted, the three slices in one panel by colour.
+The slice legend sits inside (D). Held-out only, so the figure and the table
+describe the same data. Panel C is drawn only when the deployed checkpoint
+carries the pole-range head (feature_params wall3_pole_dist); on an older
+checkpoint without it the panel is dropped and the other three are unchanged.
 
     Control_code/.venv/bin/python3 Paper/images/scripts/fig_inverse_results.py
 """
@@ -41,17 +44,17 @@ def main():
     import matplotlib.pyplot as plt
 
     # Held-out data + deployed-model predictions (matches run_deploy exactly).
-    sonar, slice_t, classes, pole_az_deg, quads, sess, bins, poses = \
+    sonar, slice_t, classes, pole_az_deg, pole_dist_mm, quads, sess, bins, poses = \
         T.load_and_filter(with_poses=True)
     is_val = T.spatial_holdout_mask(poses, sess, T.HOLDOUT_FRAC, T.HOLDOUT_SEED)
     inv = InverseModel.load(model_dir=str(SONAR_MODEL), fold="deploy")
     pred = T.predict(inv.model, sonar[is_val],
                      (inv._s_mean, inv._s_std), (inv._t_mean, inv._t_std), inv.device)
     c = classes[is_val]
+    has_range = pred.get("pole_pred_dist_mm") is not None
 
-    fig, (axc, axp, axw) = plt.subplots(
-        1, 3, figsize=(style.WIDTH_2COL, 2.7),
-        gridspec_kw={"width_ratios": [0.82, 1.0, 1.0]})
+    fig, ((axc, axp), (axr, axw)) = plt.subplots(
+        2, 2, figsize=(style.WIDTH_2COL, 5.4))
 
     # (A) confusion, row-normalised to recall
     names = [n.capitalize() for n in T.CLASS_NAMES]
@@ -89,7 +92,26 @@ def main():
     cb.set_label(r"Predicted $\sigma$ (deg)")
     _panel_letter(axp, "B")
 
-    # (C) wall depth true vs pred, three slices in one panel by colour
+    # (C) pole range true vs pred, same treatment as azimuth. Range is a monaural
+    # time-of-flight cue, so this is the head that should look best.
+    if has_range:
+        lim_r = T.MAX_RANGE_MM
+        ticks_r = [0, 250, 500, 750, 1000]
+        axr.plot([0, lim_r], [0, lim_r], "--", color="0.4", lw=0.8, zorder=0)
+        scr = axr.scatter(pole_dist_mm[is_val][pm], pred["pole_pred_dist_mm"][pm],
+                          c=pred["pole_pred_dist_std"][pm], cmap="viridis", s=14,
+                          alpha=ALPHA, edgecolor="none")
+        axr.set_xlim(0, lim_r); axr.set_ylim(0, lim_r); axr.set_aspect("equal")
+        axr.set_xticks(ticks_r); axr.set_yticks(ticks_r)
+        axr.set_xlabel("True range (mm)"); axr.set_ylabel("Predicted (mm)")
+        axr.set_title("Pole range")
+        cbr = fig.colorbar(scr, ax=axr, fraction=0.046, pad=0.04)
+        cbr.set_label(r"Predicted $\sigma$ (mm)")
+        _panel_letter(axr, "C")
+    else:
+        axr.set_visible(False)
+
+    # (D) wall depth true vs pred, three slices in one panel by colour
     wm = c == 0
     mx = 0.0
     handles = []
@@ -109,15 +131,16 @@ def main():
     axw.set_xticks(ticks_w); axw.set_yticks(ticks_w)
     axw.set_xlabel("True distance (mm)"); axw.set_ylabel("Predicted (mm)")
     axw.set_title("Wall depth")
-    _panel_letter(axw, "C")
+    _panel_letter(axw, "D" if has_range else "C")
 
-    # slice legend below the row (clear of the data)
-    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False,
-               title="Wall slice", bbox_to_anchor=(0.5, -0.02), columnspacing=1.5)
+    # slice legend inside the wall panel, in the empty lower-right corner
+    axw.legend(handles=handles, loc="lower right", frameon=False,
+               title="Wall slice", fontsize=7, title_fontsize=7)
 
-    fig.tight_layout(rect=(0, 0.10, 1, 1))
+    fig.tight_layout()
     style.save(fig, NAME)
-    print(f"[fig] held-out: {len(c)} pings, {int(wm.sum())} wall, {int(pm.sum())} pole")
+    print(f"[fig] held-out: {len(c)} pings, {int(wm.sum())} wall, {int(pm.sum())} pole"
+          f"{'' if has_range else '  (no range head in this checkpoint)'}")
 
 
 if __name__ == "__main__":
