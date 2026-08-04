@@ -250,6 +250,50 @@ Wall-depth RMSE, left / center / right (mm)  & $307$ / $300$ / $273$ & $339$ / $
     \label{fig:inverse-results}
 \end{figure}
 
+\subsection{Experiment 1}
+
+% Experiment 1 -- outcomes
+All $20$ runs ended with the robot arriving at the pole and facing it, both using sonar and vision. Neither modality produced a collision, a corner jam, or a timeout. The closest any run came to a wall was $212$\,mm using sonar and $216$\,mm using vision, above the $20$\,mm clearance at which we scored a collision. When the stop criterion fired, the robot was between $276$ and $372$\,mm from the pole when using sonar, and between $322$ and $390$\,mm using vision, as inferred from the overhead camera system. While approaching the pole, the robot rotated on each step to regulate the perceived azimuth to zero. As a consequence, when arriving at the pole, the perceived azimuth of the pole was already within $15^{\circ}$. Hence, no final azimuth corrections were needed. The overhead camera system confirms that the robot was in fact facing the pole, since at the final pose the pole lay a median of $5.1^{\circ}$ off the robot's heading using sonar (at most $11.2^{\circ}$) and $2.2^{\circ}$ using vision (at most $7.4^{\circ}$). These results show that the inverse model, noisy as it is, was sufficient for the robot to complete the task from every start pose and for both pole placements.
+
+% Experiment 1 -- the cost of sonar
+While both sonar and vision allowed the robot to find and approach the pole, as expected, the modalities resulted in very different approach behavior (Table~\ref{tab:direct-results} and Fig.~\ref{fig:direct-results}). Using sonar the robot took a median of $74$ steps ($12$ to $154$) and traveled $10.16$\,m ($0.84$ to $22.09$), compared to $34$ steps ($13$ to $91$) and $2.64$\,m ($0.76$ to $11.60$) using vision. This difference was mainly caused by the limited range over which sonar (and the inverse model) could detect the pole. The sonar runs spent a median of $53$ steps before detecting the pole and an additional $10$ approaching. In contrast,  the vision runs needed $4$ steps before seeing the pole and used $25$ approaching. Indeed, vision detected the poles from much farther away than sonar. The robot was a median of $798$\,mm away from the pole when sonar first perceived it, compared to $2038$\,mm using vision. Vision locates the pole from most of the arena, while using sonar, the robot must wander until the pole happens to come within $1$\,m, i.e., the distance range the inverse model was trained on. Consequently, the sonar feature was empty on $522$ of the $781$ sonar steps and reported a pole on only $97$ of them, whereas the vision feature was never empty across $410$ steps and reported a pole on $234$ (Table~\ref{tab:direct-results}).
+
+% Experiment 1 -- perception during the runs
+Sonar perception during the runs was more accurate than the held-out evaluation of the inverse model would suggest. We used the overhead system to compare the perception with the ground truth during the 20 runs in Experiment 1. At each step, we compared the class the inverse reported with the class of the nearest reflector under the tracker's geometry, applying the model's $1$\,m horizon to the ground truth so that a correct abstention counts as correct. Note that the same comparison is not meaningful for vision, which reads its feature from the geometry the tracker also uses to score the run and therefore agrees with it by construction. Over the $781$ steps of the ten sonar runs, the perceived feature category was correct for $95.0\%$ of steps. Recall was $93.1\%$ for walls, $86.4\%$ for poles, and $97.5\%$ for the abstain class, and pole precision was $97.9\%$. Only two of the $97$ steps on which the robot reported a pole were mistaken. These figures exceed what the same model achieves on the held-out echoes (Table~\ref{tab:inverse-results}), where accuracy is $80.1\%$, pole recall $63.3\%$, and pole precision $75.0\%$. The model is the same, but the arena was simpler than those used during acquisition. The arena of Experiment 1 held a single pole, whereas the arenas in which the training echoes were collected held four or five, so that in $44\%$ of the training echoes a second pole stood in the cone behind the nearest one, a situation that never arose during the runs. %\dnote[17]{Loose ends in this subsection. (1) With the last two paragraphs cut, the $1400$-rollout simulation no longer appears anywhere in the paper, so nothing states how the two pole placements were chosen; that belongs in the Methods. (2) Methods calls the $20$ robot runs \emph{trials} while this subsection calls them \emph{runs}; pick one. Separately, the sonar and vision runs of P2/S5 did not share a controller seed, unlike the other nine pairs.} %The figures obtained during the runs should therefore be read as the performance of the inverse model in this arena rather than as a revision of Table~\ref{tab:inverse-results}.
+
+% Experiment 1 -- the range asymmetry
+%The same comparison cannot be made for vision, which reads its feature from the same digitized geometry the tracker uses to score the run and therefore agrees with it by construction. What the vision runs do measure is the range asymmetry between the two modalities. The vision feature was never empty across $410$ steps, and on $263$ of those steps the nearest reflector lay beyond $1$\,m and was reported regardless. Under sonar the feature was empty on $522$ of $781$ steps, about two thirds of them. Consequently, vision serves as an upper reference, showing what the reactive rule achieves given accurate local perception and an unrestricted horizon, rather than as a control matched to sonar.
+
+% Experiment 1 -- what the outcomes rest on
+%Finally, the reactive rule alone does not account for these results. Given perfect perception, the same controller reached each of $28$ candidate pole positions from every start pose across $1400$ simulated rollouts, without a single collision or corner jam, and every failure it did produce was a timeout. It follows that a collision or a jam on the robot would have been attributable to perception or to drive error rather than to the rule, and neither occurred in either condition. Since the controller holds no memory of earlier observations and no map of the arena, nothing downstream of perception could compensate for a poor estimate. Consequently, the arrivals rest directly on the features the inverse recovered from single sonar emissions.
+
+\begin{table}[ht]
+\centering
+\caption{Experiment 1 outcomes, over the ten start and placement combinations run under each modality. All $20$ runs ended with the robot arriving at the pole and facing it, with no collisions, corner jams, timeouts, or bearing corrections in either condition, so the table reports the measures on which the two conditions differ. Distances and clearances are the overhead tracker's ground truth, not the robot's perception.}
+\label{tab:direct-results}
+\begin{tabular}{lcc}
+\hline
+\textbf{Measure} & \textbf{Sonar} ($n=10$) & \textbf{Vision} ($n=10$) \\
+\hline
+Steps, median (range)                       & $74$ ($12$--$154$) & $34$ ($13$--$91$) \\
+Path length, median (range) (m)             & $10.16$ ($0.84$--$22.09$) & $2.64$ ($0.76$--$11.60$) \\
+Steps before the pole was first perceived, median & $53$ & $4$ \\
+True pole range at first perception, median (mm)  & $798$ & $2038$ \\
+True pole distance on arrival, median (range) (mm) & $331$ ($276$--$372$) & $369$ ($322$--$390$) \\
+Smallest wall clearance over all runs (mm)  & $212$ & $216$ \\
+Steps with an empty feature                 & $522 / 781$ & $0 / 410$ \\
+Steps on which a pole was perceived         & $97 / 781$ & $234 / 410$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=\textwidth]{fig_direct_results}
+    \caption{Trajectories of the $20$ Experiment 1 runs. Columns give the modality (sonar, vision) and rows the pole placement. Each panel shows the five runs from the five start poses, one color per start and the same colors in every panel, so that a start can be followed across conditions. Triangles mark the start pose and point along the robot's initial heading, and stars mark the pose at which the run ended. Small filled dots mark every pose at which the modality reported a pole, and open circles every pose at which a pole was the nearest reflector within $1$\,m but went unreported. The pole is the red disc, and the dashed ring is the $400$\,mm perceived range at which the approach stops. Using sonar, the robot wanders until the pole enters the $1$\,m band the inverse model was trained on, so that its detections form a short tail running into the pole (A, C). Using vision, the pole is picked up within a few steps of the start and reported for most of the path (B, D). The missed poles sit at the outer edge of that band, $12$ of the $15$ lying between $800$ and $1000$\,mm from the pole; vision has none, since it reads the geometry the tracker also uses. Two isolated dots in A are the only spurious pole detections of the experiment, at $1373$ and $2233$\,mm from the pole. Note that pole 2 lies close to the arena wall, so that it falls outside the forward cone from several headings even when using vision (D).}
+    \label{fig:direct-results}
+\end{figure}
+
 \section{Discussion}
 
 % Terminology used throughout the Discussion:
