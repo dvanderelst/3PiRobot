@@ -37,3 +37,6 @@ there. Regenerate the affected figure after re-running an experiment.
 - `style.py` — shared matplotlib style + `save()` helper.
 - `make_all.py` — run every `fig_*.py`.
 - `fig_*.py` — one per figure (added as figures are written).
+- `exp1_stats.py` — Experiment 1 aggregates behind the Results prose and
+  `tab:direct-results`. Not a figure, so `make_all.py` skips it; run it
+  directly to re-verify the numbers in the text against `PolicyRuns/`.
