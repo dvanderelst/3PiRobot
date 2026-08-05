@@ -1,0 +1,32 @@
+digraph G {
+  rankdir=LR; bgcolor="white";
+  node [shape=box, style="rounded", fontsize=10, fontname="Times"];
+  edge [fontsize=8, fontname="Times"]; graph [fontname="Times"];
+
+  subgraph cluster_in { label="Input (one emission)"; style=dashed; color=gray;
+    L [label="Left ear\nenvelope (200)"]; R [label="Right ear\nenvelope (200)"]; }
+
+  trunk [label="Shared trunk\nConv1d 1 → 8 → 16 (k=7, ReLU)\nAdaptiveAvgPool → 8\nflatten → Linear 128→32 (ReLU)", style="rounded,filled", fillcolor="#e8eefc"];
+  L -> trunk; R -> trunk;
+  zL [shape=ellipse, label="z_L (32)"]; zR [shape=ellipse, label="z_R (32)"];
+  trunk -> zL; trunk -> zR;
+
+  comb [label="Combine\nz_LR=[z_L,z_R]   z_RL=[z_R,z_L]"];
+  zL -> comb; zR -> comb;
+
+  subgraph cluster_heads { label="Heads (Linear→16→ReLU→Linear)"; style=dashed; color=gray;
+    wall [label="Wall head\n(shared 3-out; in: z_LR and z_RL)\nleft/right swap, center average"];
+    cls  [label="Class head\n(in: z_LR, z_RL → average)"];
+    pole [label="Pole-az heads\nμ: ½(z_LR−z_RL)  antisym.\nlogσ²: ½(z_LR+z_RL)  sym."];
+    prng [label="Pole-range heads\nμ, logσ²: ½(z_LR+z_RL)  sym."];
+  }
+  comb -> wall; comb -> cls; comb -> pole; comb -> prng;
+
+  subgraph cluster_out { label="Outputs"; style=dashed; color=gray;
+    ocls  [label="Class logits\nwall / pole / none", style="rounded,filled", fillcolor="#e6f5e6"];
+    owall [label="Wall depth profile\nleft, center, right\n(mean + logσ² each)", style="rounded,filled", fillcolor="#e6f5e6"];
+    opole [label="Pole azimuth\n(mean + logσ²)", style="rounded,filled", fillcolor="#e6f5e6"];
+    oprng [label="Pole range\n(mean + logσ²)", style="rounded,filled", fillcolor="#e6f5e6"];
+  }
+  wall -> owall; cls -> ocls; pole -> opole; prng -> oprng;
+}
