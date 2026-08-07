@@ -75,6 +75,11 @@ if not os.environ.get("DISPLAY") and os.name != "nt":
 import matplotlib.pyplot as plt
 import numpy as np
 
+from Library.LocalFeature import (          # shared with the training simulator
+    GEOM_PROFILE_STEPS,
+    LocalFeature,
+    feature_from_geometry,
+)
 from Library.AcquisitionSessionLoader import (
     _load_features_for_session,
     compute_profile,
@@ -260,21 +265,8 @@ ARENAS_ROOT = "TargetArenas"
 # Local feature + reactive rule (modality-agnostic)
 # ══════════════════════════════════════════════════════════════════════════════
 
-@dataclass
-class LocalFeature:
-    """The one feature both modalities emit; the only input to `decide`."""
-    cls: str                              # "pole" | "wall" | "empty"
-    pole_az_deg: float = float("nan")     # signed bearing when cls == "pole"
-    pole_dist_mm: float = float("nan")    # range to the pole SURFACE when
-                                          # cls == "pole". Drives the terminal
-                                          # stop, so both modalities must fill it.
-    p_pole: float = float("nan")          # P(pole) from the sonar inverse (sonar only)
-    p_none: float = float("nan")          # P(none) from the 3-class inverse (sonar only)
-    pole_az_sigma_deg: float = float("nan")  # pole-bearing σ (sonar only)
-    slices_mm: Dict[str, float] = field(  # right/center/left when cls == "wall"
-        default_factory=lambda: {"right": float("nan"),
-                                 "center": float("nan"),
-                                 "left": float("nan")})
+# LocalFeature is defined in Library/LocalFeature.py so the simulator and the
+# vision producer cannot drift apart. Imported at the top of this file.
 
 
 @dataclass
@@ -429,32 +421,8 @@ class ReactiveController:
 # Feature producers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def feature_from_geometry(x, y, yaw, geom, cone_half_deg,
-                          max_range_mm=None) -> LocalFeature:
-    """Vision/sim producer: local feature from pose + arena geometry. This is
-    the exact supervision signal the inverse was trained against. When
-    `max_range_mm` is set, abstain (→ "empty") if the nearest in-cone reflector
-    is beyond it — mirroring the 3-class sonar inverse's 'none' class."""
-    walls, poles = geom["walls"], geom["poles"]
-    cls, pole_az, near = nearest_reflector_in_cone(
-        walls, poles, geom["pole_radius_mm"], x, y, yaw, cone_half_deg)
-    if not np.isfinite(cls):
-        return LocalFeature(cls="empty")
-    if max_range_mm is not None and np.isfinite(near) and near > max_range_mm:
-        return LocalFeature(cls="empty")   # nothing within range → matches 'none'
-    if cls == 1.0:
-        # `near` is already the range to the pole surface (centre - radius),
-        # the same quantity the sonar range head is trained on. It used to be
-        # discarded here, which is why the stop had to come from the referee.
-        return LocalFeature(cls="pole", pole_az_deg=pole_az, pole_dist_mm=near)
-    # Wall: geometric 3-slice (min distance per slice), matching the inverse's
-    # wall head and the trainer's compute_slice_targets.
-    prof = compute_profile(walls, x, y, yaw,
-                           opening_angle=2.0 * cone_half_deg,
-                           profile_steps=GEOM_PROFILE_STEPS,
-                           profile_method="ray_center")
-    slices = _slice_profile(prof, cone_half_deg)
-    return LocalFeature(cls="wall", slices_mm=slices)
+# feature_from_geometry is in Library/LocalFeature.py -- the simulator needs
+# the identical truth before corrupting it with the measured error model.
 
 
 def write_run_summary(out_dir, source, outcome, n_steps, n_align, feat,
@@ -549,28 +517,6 @@ def feature_from_inverse(pred: Dict) -> LocalFeature:
 
 # Geometric profile resolution for vision/sim wall slices. Three slices span the
 # ±cone, so the steps just need to resolve them; 30 bins over the cone is plenty.
-GEOM_PROFILE_STEPS = 30
-
-
-def _slice_profile(profile, cone_half_deg) -> Dict[str, float]:
-    """Min distance in each of the three ±cone slices (right/center/left),
-    ordered by ascending azimuth bin to match SLICE_NAMES."""
-    edges = np.linspace(-cone_half_deg, cone_half_deg, len(profile) + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    third = 2.0 * cone_half_deg / 3.0
-    masks = {
-        "right":  (centers >= -cone_half_deg)         & (centers < -cone_half_deg + third),
-        "center": (centers >= -cone_half_deg + third) & (centers < -cone_half_deg + 2 * third),
-        "left":   (centers >= -cone_half_deg + 2 * third) & (centers <= cone_half_deg),
-    }
-    out = {}
-    for name, m in masks.items():
-        sub = profile[m]
-        sub = sub[np.isfinite(sub)]
-        out[name] = float(sub.min()) if sub.size else float("nan")
-    return out
-
-
 def referee(x, y, yaw, geom, cone_half_deg):
     """Ground-truth state for success/collision/logging, independent of the
     sensing modality. Returns (true_cls, pole_near_dist_mm, min_wall_dist_mm)."""
