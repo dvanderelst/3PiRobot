@@ -53,8 +53,30 @@ def main():
     c = classes[is_val]
     has_range = pred.get("pole_pred_dist_mm") is not None
 
-    fig, ((axc, axp), (axr, axw)) = plt.subplots(
-        2, 2, figsize=(style.WIDTH_2COL, 5.4))
+    # Panel E uses ALL echoes, not the held-out 15%. Recall has to be resolved
+    # against true range, and 322 held-out pings split five ways gives bins too
+    # thin to read. Stated in the caption, since it differs from A-D.
+    pred_all = T.predict(inv.model, sonar,
+                         (inv._s_mean, inv._s_std), (inv._t_mean, inv._t_std),
+                         inv.device)
+
+    # Four equal plot columns, each with its own narrow colourbar slot. Letting
+    # fig.colorbar(ax=...) steal width from the parent axes made the four panels
+    # different sizes -- B and C have colourbars, A and D do not -- so nothing
+    # lined up either across a row or down a column. The slots for A and D stay
+    # empty, which keeps all four plot axes identical and lets E span exactly
+    # the width of the block above it.
+    fig = plt.figure(figsize=(style.WIDTH_2COL, 7.6))
+    # col 2 is a spacer: without it the left colourbar (C) sits hard against the
+    # right panel's y-axis label.
+    gs = fig.add_gridspec(3, 5, height_ratios=[1, 1, 0.95],
+                          width_ratios=[1, 0.05, 0.48, 1, 0.05],
+                          hspace=.55, wspace=.18)
+    axc = fig.add_subplot(gs[0, 0]); axp = fig.add_subplot(gs[0, 3])
+    axr = fig.add_subplot(gs[1, 0]); axw = fig.add_subplot(gs[1, 3])
+    axe = fig.add_subplot(gs[2, :])
+    cax_p = fig.add_subplot(gs[0, 4])          # pole azimuth (B)
+    cax_r = fig.add_subplot(gs[1, 1])          # pole range   (C)
 
     # (A) confusion, row-normalised to recall
     names = [n.capitalize() for n in T.CLASS_NAMES]
@@ -88,7 +110,7 @@ def main():
     axp.set_xticks(ticks_p); axp.set_yticks(ticks_p)
     axp.set_xlabel("True azimuth (deg)"); axp.set_ylabel("Predicted (deg)")
     axp.set_title("Pole azimuth")
-    cb = fig.colorbar(sc, ax=axp, fraction=0.046, pad=0.04)
+    cb = fig.colorbar(sc, cax=cax_p)
     cb.set_label(r"Predicted $\sigma$ (deg)")
     _panel_letter(axp, "B")
 
@@ -105,7 +127,9 @@ def main():
         axr.set_xticks(ticks_r); axr.set_yticks(ticks_r)
         axr.set_xlabel("True range (mm)"); axr.set_ylabel("Predicted (mm)")
         axr.set_title("Pole range")
-        cbr = fig.colorbar(scr, ax=axr, fraction=0.046, pad=0.04)
+        cbr = fig.colorbar(scr, cax=cax_r)
+        cax_r.yaxis.set_label_position("left")
+        cax_r.yaxis.set_ticks_position("left")
         cbr.set_label(r"Predicted $\sigma$ (mm)")
         _panel_letter(axr, "C")
     else:
@@ -137,7 +161,52 @@ def main():
     axw.legend(handles=handles, loc="lower right", frameon=False,
                title="Wall slice", fontsize=7, title_fontsize=7)
 
-    fig.tight_layout()
+    # (E) recall vs true range -- the structure the confusion matrix cannot show:
+    # the classes are not uniformly recoverable, and pole recall is a hump rather
+    # than a threshold, i.e. the sensor has a preferred operating range.
+    # 150 mm bins below 500 where poles are sparse (only 22 echoes under 300 mm
+    # in total), 100 mm from 500 through 1200 where the counts support it and
+    # where the interesting behaviour is. Coarser bins hid it: at 200 mm width
+    # pole recall read as a smooth decline, when in fact it holds above 66% to
+    # 900 mm and then collapses to 25% in the last 100 mm before the 1 m class
+    # boundary. Wall does the same (95% -> 73%), and `none` is worst just past
+    # the boundary and recovers with distance -- the model is least reliable
+    # exactly where the class definition flips.
+    edges = np.array([200., 350., 500., 600., 700., 800., 900., 1000.])
+    out_edges = np.array([1000., 1100., 1200., 1400., 1700., 2000.])
+    cls_all = np.asarray(pred_all["cls_pred"])
+    wall_near = np.nanmin(np.where(np.isfinite(slice_t), slice_t, np.nan), axis=1)
+    true_rng = np.where(classes == 0, wall_near, pole_dist_mm)
+    colours = {"wall": "#377eb8", "pole": "#c05cff", "none": "#7a7a7a"}
+    plotted_x = []
+    for ci, nm in enumerate(T.CLASS_NAMES):
+        e = out_edges if nm == "none" else edges
+        xs, ys = [], []
+        for lo, hi in zip(e[:-1], e[1:]):
+            m = (classes == ci) & (true_rng >= lo) & (true_rng < hi)
+            if m.sum() < 15:
+                continue
+            xs.append(float(np.mean(true_rng[m])))
+            ys.append(100.0 * (cls_all[m] == ci).mean())
+        if xs:
+            axe.plot(xs, ys, "o-", color=colours[nm], label=nm.capitalize(), ms=4)
+            plotted_x += xs
+    axe.axvline(1000, color="k", ls=":", lw=.8)
+    axe.annotate("1 m class boundary", xy=(1000, 96), xytext=(1000, 96),
+                 fontsize=6, ha="center", va="top",
+                 bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none",
+                           alpha=.85))
+    axe.set_xlabel("True range to the nearest reflector (mm)")
+    axe.set_ylabel("Correctly classified (%)")
+    axe.set_ylim(0, 100)
+    axe.set_title("Classification against range (all echoes)", pad=6)
+    # Fit the axis to the data. The last `none` bin's mean sits near 1500 mm, so
+    # extending to the nominal 2000 mm bin edge left a quarter of the panel empty.
+    lo_x, hi_x = min(plotted_x), max(plotted_x)
+    axe.set_xlim(lo_x - 80, hi_x + 80)
+    axe.legend(frameon=False, fontsize=7, ncol=3, loc="lower left")
+    _panel_letter(axe, "E" if has_range else "D")
+
     style.save(fig, NAME)
     print(f"[fig] held-out: {len(c)} pings, {int(wm.sum())} wall, {int(pm.sum())} pole"
           f"{'' if has_range else '  (no range head in this checkpoint)'}")
