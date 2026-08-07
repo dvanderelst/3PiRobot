@@ -73,7 +73,7 @@ ROBOT_ID            = 1
 # Single-phase runs leave the other phase's Settings.py fields and JSON
 # section untouched.
 RUN_PHASE_1         = False   # rotation
-RUN_PHASE_2         = True   # forward drive (curl + distance scale)
+RUN_PHASE_2         = True    # forward drive (curl + distance scale)
 
 # Phase 1 — rotation
 ANGLES              = [-40, -30, -20, -10, -5, 5, 10, 20, 30, 40]   # 0 added implicitly
@@ -83,9 +83,12 @@ ROTATION_REPEATS    = 5    # 3 was too few — a single contaminated rep can pul
                            # absorbs up to 2 contaminated reps cleanly.
 
 # Phase 2 — forward drive (single distance; two metrics extracted per rep)
-DRIVE_MM            = 200.0
-DRIVE_REPEATS       = 16   # large enough that median is well-defined and
-                           # robust against the occasional settle-artifact rep
+DRIVE_MM            = 150.0  # matches the deploy step (Config.fixed_drive_mm),
+                             # so curl is measured at the operating point
+DRIVE_REPEATS       = 10   # large enough that median is well-defined and
+                           # robust against the occasional settle-artifact rep.
+                           # 10 x 150mm needs ~1.5m of run-out; 16 x 200mm
+                           # (the previous setting) needed 3.2m.
 
 
 def _read_pose_settled(tracker, robot_id, prior_pose=None):
