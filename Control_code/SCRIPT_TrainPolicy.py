@@ -65,13 +65,21 @@ class Config:
     # Network
     hidden_size: int      = 32
     max_rotate_deg: float = 90.0
-    fixed_drive_mm: float = 125.0
+    # 150 mm matches Experiment 1's cruising step, so the argument made there
+    # for the step size covers both experiments and need not be repeated. Note
+    # Experiment 1 halves to 75 mm during the terminal approach, so the two
+    # agree while cruising rather than throughout.
+    fixed_drive_mm: float = 150.0
 
     # Input normalisation. Distances are clamped to [min_dist, max_dist] then
     # divided by max_dist; σ values are clamped to [0, max_sigma] then divided
     # by max_sigma. The clamps prevent occasional negative-from-noise values
     # or very large σs from dominating the input.
-    max_dist_mm:  float = 2000.0
+    # 1000, not 2000: the inverse abstains beyond 1 m, so a 2 m clamp let the
+    # policy train on distances the sensor cannot produce. rationale.md warns
+    # that train and deploy clamps drifting apart puts the policy out of
+    # distribution on the real robot; this is that hazard.
+    max_dist_mm:  float = 1000.0
     min_dist_mm: float = 300.0
     max_sigma_mm: float = 500.0    # σ_sim caps out around ~400-500 mm at the model's far edge
 
@@ -86,6 +94,14 @@ class Config:
     # the policy actually uses σ.
     use_sigma: bool = False
 
+    # Pole channels: the 3 class posteriors plus pole azimuth and range. On by
+    # default now that the controller receives the full Experiment 1 local
+    # feature. Kept switchable because the pole may carry little on a given
+    # path -- on the first Path01 route the sensor saw roughly one true pole
+    # per lap against five phantoms -- and the ablation is how that gets
+    # established rather than assumed.
+    use_poles: bool = True
+
     # Blind ablation: when True the policy sees ONLY prev_rot (in_dim=1) —
     # all sonar channels are stripped. Used as a control: with motor noise
     # injection a blind policy cannot use sonar feedback to compensate, so
@@ -99,7 +115,12 @@ class Config:
     blind: bool = BLIND
 
     # Teacher (pure pursuit)
-    teacher_lookahead_mm: float = 200.0
+    # Scaled with the step. Lookahead is implicitly a RATIO to the step: at
+    # 125 mm a 200 mm lookahead sat 1.6 steps ahead; at 150 mm it would sit
+    # 1.33, and pure pursuit becomes oscillatory as the lookahead approaches
+    # the step. 240 mm holds the previous 1.6 ratio, so the teacher's tuning
+    # carries over rather than needing to be refound.
+    teacher_lookahead_mm: float = 240.0
     path_resample_mm: float     = 25.0
 
     # Teacher perturbation (action noise during rollout — drives the robot off
@@ -307,7 +328,7 @@ def _obs_from_cfg(meas: Optional[Dict[str, float]], prev_rot: float, cfg: Config
         meas, prev_rot,
         min_dist_mm=cfg.min_dist_mm, max_dist_mm=cfg.max_dist_mm,
         max_sigma_mm=cfg.max_sigma_mm, max_rotate_deg=cfg.max_rotate_deg,
-        use_sigma=cfg.use_sigma, blind=cfg.blind,
+        use_sigma=cfg.use_sigma, blind=cfg.blind, use_poles=cfg.use_poles,
     )
 
 
@@ -321,6 +342,7 @@ def _policy_from_net(net: "RNNNet", cfg: Config) -> Policy:
         out_dim=int(net.OUT_DIM),
         use_sigma=cfg.use_sigma,
         blind=cfg.blind,
+        use_poles=cfg.use_poles,
         max_rotate_deg=net.max_rotate_deg,
         fixed_drive_mm=cfg.fixed_drive_mm,
         min_dist_mm=cfg.min_dist_mm,
@@ -690,6 +712,7 @@ def save_policy(net: RNNNet, cfg: Config, val_loss: float, epoch: int, path: str
         out_dim=int(net.OUT_DIM),
         use_sigma=cfg.use_sigma,
         blind=cfg.blind,
+        use_poles=cfg.use_poles,
         max_rotate_deg=net.max_rotate_deg,
         fixed_drive_mm=cfg.fixed_drive_mm,
         min_dist_mm=cfg.min_dist_mm,
