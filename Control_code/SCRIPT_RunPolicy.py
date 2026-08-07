@@ -52,7 +52,7 @@ from LorexLib.Environment import capture_environment_layout
 # ══════════════════════════════════════════════════════════════════════════════
 POLICY    = "default_Path02"                  # sub-folder under PolicyTraining/
 ARENA     = "Path02"                          # sub-folder under TargetArenas/
-REPEAT    = "07"
+REPEAT    = "01"
 
 MAX_STEPS = 500
 
@@ -597,7 +597,11 @@ def _preview_rollouts(start_pose, n=PREVIEW_N, n_steps=PREVIEW_STEPS,
         end_counts[end] = end_counts.get(end, 0) + 1
         ax.plot(xs, ys, lw=lw, alpha=alpha, color=color, label=label)
         ax.scatter([xs[0]], [ys[0]], color="red", s=18, zorder=3)
-        marker = {"ok": "s", "collision": "x", "profile_fail": "?"}.get(end, "o")
+        # "?" is not a matplotlib marker. profile_fail is rare (the robot has
+        # left the arena, so no wall ray returns a hit), so the invalid entry
+        # sat here unnoticed until one occurred and took down the whole
+        # pre-flight plot -- after all the rollouts had already been computed.
+        marker = {"ok": "s", "collision": "x", "profile_fail": "v"}.get(end, "o")
         ax.scatter([xs[-1]], [ys[-1]], marker=marker,
                    color="black" if end == "ok" else "red",
                    s=40 if end != "ok" else 22, zorder=4)
@@ -614,14 +618,22 @@ def _preview_rollouts(start_pose, n=PREVIEW_N, n_steps=PREVIEW_STEPS,
         f"end → ok:{end_counts['ok']}  collision:{end_counts['collision']}  "
         f"profile_fail:{end_counts['profile_fail']}",
     ]
-    ax.set_title("\n".join(title_lines), fontsize=10)
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
     out_path = f"{DATA_FOLDER}/{SESSION}/_preview_rollouts.png"
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
-    print(f"Pre-flight preview: {out_path}")
+    # The rollouts are the expensive part and they are already done. A drawing
+    # fault here must not abort a live session with the robot connected and
+    # the operator standing by -- report the counts and let them decide.
+    try:
+        ax.set_title("\n".join(title_lines), fontsize=10)
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=120)
+        print(f"Pre-flight preview: {out_path}")
+    except Exception as exc:
+        print(f"!! Pre-flight PLOT failed ({type(exc).__name__}: {exc})")
+        print("!! Rollouts themselves completed; judge from the counts below.")
+    finally:
+        plt.close(fig)
     print(f"  ends: {end_counts}")
     if PREVIEW_KIN_NOISE and rot_gains:
         print(f"  noisy-rollout gains: rot mean={np.mean(rot_gains):+.3f} "
