@@ -50,8 +50,20 @@ class ArenaLayout:
 
         # Preferred: arena_features.npz, which carries poles as well as walls.
         if self._load_geometry_from_npz():
-            self.arena_width = float(np.ptp(self.walls[:, 0])) if len(self.walls) else 2400.0
-            self.arena_height = float(np.ptp(self.walls[:, 1])) if len(self.walls) else 1800.0
+            # Bounds come from the wall cloud itself. The legacy path read them
+            # from session metadata; downstream code (the teacher-field plot,
+            # bounds checks) expects arena_min_x/max_x/min_y/max_y to exist
+            # either way, so set them here rather than returning early without.
+            if len(self.walls):
+                self.arena_min_x = float(self.walls[:, 0].min())
+                self.arena_max_x = float(self.walls[:, 0].max())
+                self.arena_min_y = float(self.walls[:, 1].min())
+                self.arena_max_y = float(self.walls[:, 1].max())
+            else:
+                self.arena_min_x = self.arena_min_y = 0.0
+                self.arena_max_x, self.arena_max_y = 2400.0, 1800.0
+            self.arena_width = self.arena_max_x - self.arena_min_x
+            self.arena_height = self.arena_max_y - self.arena_min_y
             self.mm_per_px = 5.0
             print(f"  Arena '{session_name}': {len(self.walls)} wall pts, "
                   f"{len(self.poles)} pole(s) from {self.geometry_source}")

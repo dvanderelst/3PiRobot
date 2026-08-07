@@ -46,14 +46,15 @@ torch.set_num_threads(1)
 
 from Library.EnvironmentSimulator import EnvironmentSimulator
 from Library import Settings as _settings
-from Library.Policy import Policy, encode_obs, make_policy_dict
+from Library.Policy import (Policy, encode_obs, make_obs_layout,
+                            make_policy_dict)
 from Library.TargetPath import TargetPath, load_target_path
 
 _settings.data_folder = "TargetArenas"
 
 
 # ── Condition ────────────────────────────────────────────────────────────────
-TARGET_ARENA = "Target02"
+TARGET_ARENA = "Path01"
 CONDITION    = "default"
 BLIND        = False        # blind ablation: drop sonar, only prev_rot fed to
                             # the policy (in_dim=1). Output folder gets a
@@ -648,8 +649,8 @@ class RNNNet(nn.Module):
     #    σ_left, σ_center, σ_right,    ← only when cfg.use_sigma
     #    prev_rot]
     # Distances normalised by max_dist_mm, σs by max_sigma_mm,
-    # prev_rot by max_rotate_deg. in_dim is 7 with σ, 4 without; in
-    # cfg.blind mode the sonar slots are stripped and in_dim is 1
+    # prev_rot by max_rotate_deg. in_dim comes from make_obs_layout: 4/7
+    # wall-only, 9/14 with the class and pole channels, 1 when blind.
     # (just prev_rot — see Library/Policy.encode_obs).
     OUT_DIM = 1
 
@@ -928,7 +929,10 @@ def plot_trajectories(
 
 def main():
     cfg = Config()
-    in_dim = 1 if cfg.blind else (7 if cfg.use_sigma else 4)
+    # Derive from the canonical layout rather than hard-coding widths. The
+    # literal 1/7/4 predated the class and pole channels and silently built a
+    # 4-input network against 9-channel observations.
+    in_dim = len(make_obs_layout(cfg.use_sigma, cfg.blind, cfg.use_poles))
     cfg.output_dir = os.path.join(
         "PolicyTraining",
         f"{CONDITION}_{cfg.target_arena}{'_blind' if cfg.blind else ''}",
