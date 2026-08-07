@@ -54,7 +54,7 @@ _settings.data_folder = "TargetArenas"
 
 
 # ── Condition ────────────────────────────────────────────────────────────────
-TARGET_ARENA = "Path01"
+TARGET_ARENA = "Path02"
 CONDITION    = "default"
 BLIND        = False        # blind ablation: drop sonar, only prev_rot fed to
                             # the policy (in_dim=1). Output folder gets a

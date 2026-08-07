@@ -15,7 +15,8 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 
 from Library.InverseErrorModel import InverseErrorModel
-from Library.LocalFeature import GEOM_PROFILE_STEPS, true_local_feature
+from Library.LocalFeature import (GEOM_PROFILE_STEPS, SLICE_NAMES,
+                                  true_local_feature)
 from Library import DataProcessor
 from Library import Settings as _settings
 
@@ -514,6 +515,36 @@ class EnvironmentSimulator:
              "pole_radius_mm": self.arena.pole_radius_mm},
             self.cone_half_deg, max_range_mm=self.max_range_mm)
         return self.error_model.observe(cls, rng_mm, az, slices, self.rng)
+
+    def get_clean_measurement(self, x, y, orientation_deg):
+        """Geometric truth in the same key set the error model emits.
+
+        A noiseless reference sensor: perfect classification, exact pole
+        bearing and range, zero sigma. Used by the deploy script's preview
+        rollouts, which want clean sensing but must still hand the policy a
+        complete observation -- building only the three wall distances would
+        leave p_wall/p_pole/p_none all defaulting to zero, which is not a
+        distribution and never occurs in training.
+        """
+        cls, rng_mm, az, slices = true_local_feature(
+            x, y, orientation_deg,
+            {"walls": self.arena.walls, "poles": self.arena.poles,
+             "pole_radius_mm": self.arena.pole_radius_mm},
+            self.cone_half_deg, max_range_mm=self.max_range_mm)
+        out = {f"distance_{n}_mm": float(slices[n]) for n in SLICE_NAMES}
+        out.update({f"sigma_{n}_mm": 0.0 for n in SLICE_NAMES})
+        out["p_wall"] = 1.0 if cls == 0 else 0.0
+        out["p_pole"] = 1.0 if cls == 1 else 0.0
+        out["p_none"] = 1.0 if cls == 2 else 0.0
+        out["class_label"] = ("wall", "pole", "none")[int(cls)]
+        # Pole geometry is only meaningful when a pole is the nearest in-cone
+        # reflector; encode_obs zeroes these channels when p_pole is 0.
+        out["pole_az_deg"]   = float(az)     if cls == 1 else float("nan")
+        out["pole_dist_mm"]  = float(rng_mm) if cls == 1 else float("nan")
+        out["pole_az_sigma_deg"]  = 0.0
+        out["pole_dist_sigma_mm"] = 0.0
+        out["phantom"] = False
+        return out
 
     def get_sonar_measurements_batch(
         self,

@@ -823,6 +823,12 @@ class InverseModel:
         logits = out["class_logits"].cpu().numpy()
         probs  = np.exp(logits - logits.max(axis=1, keepdims=True))
         probs  = probs / probs.sum(axis=1, keepdims=True)
+        # p_wall is emitted explicitly so the deployed observation carries the
+        # same keys as the simulated one. encode_obs reads it with a 0.0
+        # default, so omitting it would have fed the policy a constant zero on
+        # the robot while training saw it vary -- a train/deploy mismatch with
+        # no error to announce it.
+        result["p_wall"]      = probs[:, 0]
         result["p_pole"]      = probs[:, 1]
         if probs.shape[1] >= 3:
             result["p_none"]  = probs[:, 2]

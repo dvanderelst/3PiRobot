@@ -5,7 +5,7 @@ SCRIPT_RunPolicy.py
 Deploy a vanilla-RNN policy trained by SCRIPT_TrainPolicy.py on the real robot.
 
 Per-step sequence (matches training rollout exactly):
-  1. Sonar ping → L/R envelopes → SonarModel.predict_from_envelope
+  1. Sonar ping → L/R envelopes → InverseModel.predict_from_envelope
                    → 6-key dict (3 distances + 3 σs).
   2. policy.encode_obs(meas, prev_rot) → obs vector (clamps + scales applied).
   3. policy.step(obs, hidden) → rotate_deg, new hidden state.
@@ -41,7 +41,8 @@ from Library import PushOver
 from Library import Settings as _settings
 from Library.EnvironmentSimulator import EnvironmentSimulator
 from Library.Policy import Policy
-from Library.SonarModel import SonarModel
+from Library.SonarModel import InverseModel
+from Library.LocalFeature import slice_profile, SLICE_NAMES
 from Library.TrackerNav import wait_for_stable_pose
 from LorexLib.Environment import capture_environment_layout
 
@@ -49,8 +50,8 @@ from LorexLib.Environment import capture_environment_layout
 # ══════════════════════════════════════════════════════════════════════════════
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
-POLICY    = "default_Target02"               # sub-folder under PolicyTraining/
-ARENA     = "Target02"                       # sub-folder under TargetArenas/
+POLICY    = "default_Path02"                  # sub-folder under PolicyTraining/
+ARENA     = "Path02"                          # sub-folder under TargetArenas/
 REPEAT    = "07"
 
 MAX_STEPS = 500
@@ -63,11 +64,11 @@ SESSION     = f"{POLICY}_run{REPEAT}"
 do_rotation    = True
 do_translation = True
 
-# Source of distances/σs fed to the policy. "live" is the SonarModel's prediction
+# Source of distances/σs fed to the policy. "live" is the inverse's prediction
 # from the actual ping (the normal path). "sim" is the simulator's prediction at
 # the tracker pose with σ_sim noise (training-distribution match). "sim_clean"
 # is the noiseless geometric per-slice min from the arena map. Set to "sim" or
-# "sim_clean" to bypass the SonarModel entirely and validate the rest of the
+# "sim_clean" to bypass the inverse entirely and validate the rest of the
 # control loop (rotation / drive calibration, policy, simulator geometry) as a
 # sim-to-real sanity check.
 POLICY_INPUT_SOURCE = "live"   # "live" | "sim" | "sim_clean"
@@ -118,6 +119,9 @@ PREVIEW_DRIVE_NOISE_MM        = 5.0    # σ of per-step Gaussian on drive
 
 POLICY_DIR     = "PolicyTraining"
 SONAR_MODEL_DIR = "SonarModel"
+# Spatial-holdout model actually deployed on the robot; the CV folds are
+# diagnostics only and must never be flown.
+INVERSE_FOLD    = "deploy"
 DATA_FOLDER    = "PolicyRuns"
 
 
@@ -131,8 +135,8 @@ print(f"Loaded policy: {policy_path}")
 print(f"  {policy}")
 print(f"  obs_layout: {policy.obs_layout}")
 
-sonar_model = SonarModel.load(model_dir=SONAR_MODEL_DIR, device="cpu")
-print(f"Loaded sonar model: {sonar_model}")
+inverse = InverseModel.load(model_dir=SONAR_MODEL_DIR, fold=INVERSE_FOLD, device="cpu")
+print(f"Loaded inverse model: {inverse}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -140,7 +144,7 @@ print(f"Loaded sonar model: {sonar_model}")
 # ══════════════════════════════════════════════════════════════════════════════
 
 _settings.data_folder = "TargetArenas"
-sim = EnvironmentSimulator(ARENA, sonar_model_dir=SONAR_MODEL_DIR)
+sim = EnvironmentSimulator(ARENA)
 _settings.data_folder = DATA_FOLDER
 
 
@@ -494,8 +498,7 @@ def _simulate_rollout(x0, y0, yaw0, n_steps,
     x, y, yaw = float(x0), float(y0), float(yaw0)
     xs, ys, yaws = [x], [y], [yaw]
     end_reason = "ok"
-    slice_masks  = sim.sonar_model.slice_masks
-    slice_names  = sim.sonar_model.SLICE_NAMES
+    slice_names  = SLICE_NAMES
     drive_mm     = float(policy.fixed_drive_mm)
     max_rot_deg  = float(policy.max_rotate_deg)
     for _ in range(n_steps):
@@ -507,12 +510,10 @@ def _simulate_rollout(x0, y0, yaw0, n_steps,
         if not np.isfinite(profile).any():
             end_reason = "profile_fail"
             break
-        meas = {
-            f"distance_{name}_mm": float(profile[slice_masks[k]].min())
-            for k, name in enumerate(slice_names)
-        }
-        for name in slice_names:
-            meas[f"sigma_{name}_mm"] = 0.0
+        # Full clean observation, not just wall distances: the pole-aware
+        # policy reads class posteriors too, and a partial dict would leave
+        # them at encode_obs's 0.0 default.
+        meas = sim.get_clean_measurement(x, y, yaw)
         if min(meas[f"distance_{n}_mm"] for n in slice_names) < PREVIEW_COLLISION_MM:
             end_reason = "collision"
             break
@@ -689,7 +690,7 @@ for step in range(MAX_STEPS):
     # TEMP envelope dump — overlaid on training mean by SCRIPT_PlotEnvelopeOverlay.py
     if step == 0:
         np.savez(f"{DATA_FOLDER}/{SESSION}/_envelope_step0.npz", L=L, R=R)
-    meas_live = sonar_model.predict_from_envelope(L, R)
+    meas_live = inverse.predict_from_envelope(L, R)
 
     # ── Sim-to-real diagnostic: same prediction at the tracker's ground-truth
     #    pose, via the geometric simulator. Compare meas_live vs meas_sim
@@ -702,10 +703,9 @@ for step in range(MAX_STEPS):
     if None not in (_pos.get("x"), _pos.get("y"), _pos.get("yaw_deg")):
         meas_sim = sim.get_sonar_measurement(_pos["x"], _pos["y"], _pos["yaw_deg"])
         profile = sim.get_profile_at_position(_pos["x"], _pos["y"], _pos["yaw_deg"])
+        _sl = slice_profile(profile, sim.cone_half_deg)
         meas_sim_clean = {
-            f"distance_{name}_mm":
-                float(profile[sim.sonar_model.slice_masks[i]].min())
-            for i, name in enumerate(sim.sonar_model.SLICE_NAMES)
+            f"distance_{name}_mm": _sl[name] for name in SLICE_NAMES
         }
 
     # ── Policy step ───────────────────────────────────────────────────────────
