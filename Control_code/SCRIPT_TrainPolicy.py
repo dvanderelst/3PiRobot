@@ -144,9 +144,19 @@ class Config:
     n_train_episodes: int = 1000
     n_val_episodes:   int = 100
 
-    # Single-start pool around path[0] (matches SCRIPT_TrainPolicy_RNN.py)
-    single_start_noise_xy_mm:   float = 50.0
-    single_start_noise_yaw_deg: float = 10.0
+    # Start pool. When the path JSON carries a start_box and start_arrow (which
+    # SCRIPT_DefinePath.py writes), positions are drawn UNIFORMLY FROM THAT BOX
+    # and `single_start_noise_xy_mm` is not consulted at all -- it is only the
+    # fallback for paths defined without a box. Yaw noise applies either way, on
+    # top of the drawn arrow direction.
+    single_start_noise_xy_mm:   float = 50.0    # fallback only; see above
+    # 20 deg, not 10: the robot is placed in the release box by hand, and the
+    # box is a few hundred mm across, so its heading cannot be set to better
+    # than about this. Training on a tighter spread than deployment actually
+    # delivers would leave the policy out of distribution on the real robot at
+    # step 0 -- the same train/deploy divergence the distance clamps have to
+    # avoid.
+    single_start_noise_yaw_deg: float = 20.0
     single_start_pool_size:     int   = 200
 
     # Optimisation
