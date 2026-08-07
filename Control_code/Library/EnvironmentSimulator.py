@@ -14,8 +14,10 @@ settings automatically updates what the simulator computes.
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 
-from Library.SonarModel import SonarModel
+from Library.InverseErrorModel import InverseErrorModel
+from Library.LocalFeature import GEOM_PROFILE_STEPS, true_local_feature
 from Library import DataProcessor
+from Library import Settings as _settings
 
 
 class ArenaLayout:
@@ -37,10 +39,22 @@ class ArenaLayout:
         self.dc = None
         self.meta = {}
         self.walls = np.array([], dtype=np.float32)
+        self.poles = np.zeros((0, 2), dtype=np.float32)
+        self.pole_radius_mm = 12.5
+        self.geometry_source = None
 
         # Explicit default session
         if session_name == "_default_":
             self._use_default_arena()
+            return
+
+        # Preferred: arena_features.npz, which carries poles as well as walls.
+        if self._load_geometry_from_npz():
+            self.arena_width = float(np.ptp(self.walls[:, 0])) if len(self.walls) else 2400.0
+            self.arena_height = float(np.ptp(self.walls[:, 1])) if len(self.walls) else 1800.0
+            self.mm_per_px = 5.0
+            print(f"  Arena '{session_name}': {len(self.walls)} wall pts, "
+                  f"{len(self.poles)} pole(s) from {self.geometry_source}")
             return
 
         try:
@@ -123,8 +137,43 @@ class ArenaLayout:
         
         print(f"✅ Created default arena: {self.arena_width}mm × {self.arena_height}mm")
     
+    def _load_geometry_from_npz(self) -> bool:
+        """Load walls AND poles straight from the arena's arena_features.npz.
+
+        The legacy path below reads walls through DataProcessor and knows
+        nothing about poles, which the path-following controller now needs: the
+        decision recorded in the paper is that it receives the same local
+        feature as Experiment 1, poles included. Reading the npz also skips the
+        DataCollection machinery, which emits "Total samples: 0" noise for an
+        arena that holds geometry rather than pings.
+
+        Returns True when it found the file; the caller falls back otherwise.
+        """
+        from pathlib import Path
+        base = Path(_settings.data_folder) / self.session_name
+        src = base
+        if not (base / "arena_features.npz").exists():
+            if not base.is_dir():
+                return False
+            envs = sorted(d for d in base.iterdir()
+                          if d.is_dir() and d.name.startswith("env_")
+                          and (d / "arena_features.npz").exists())
+            if not envs:
+                return False
+            src = envs[-1]
+        d = np.load(str(src / "arena_features.npz"))
+        kind = d["kind"]
+        self.walls = np.column_stack([d["x_mm"][kind == 0],
+                                      d["y_mm"][kind == 0]]).astype(np.float32)
+        self.poles = np.column_stack([d["x_mm"][kind == 1],
+                                      d["y_mm"][kind == 1]]).astype(np.float32)
+        self.pole_radius_mm = (float(d["pole_radius_mm"])
+                               if "pole_radius_mm" in d.files else 12.5)
+        self.geometry_source = str(src)
+        return True
+
     def _load_walls(self) -> np.ndarray:
-        """Load wall coordinates from the session."""
+        """Load wall coordinates from the session (legacy DataProcessor path)."""
         if self.dc is None:
             return np.array([], dtype=np.float32)
 
@@ -256,7 +305,7 @@ class EnvironmentSimulator:
         robot_radius_mm: float = 85.0,
         boundary_margin_mm: Optional[float] = None,
         collision_step_mm: float = 20.0,
-        sonar_model_dir: str = "SonarModel",
+        error_model_path: str = "SonarModel/inverse_error_model.json",
         seed: Optional[int] = None,
     ):
         """
@@ -267,22 +316,28 @@ class EnvironmentSimulator:
             robot_radius_mm: Collision clearance radius around robot center
             boundary_margin_mm: Min distance from arena border (defaults to robot radius)
             collision_step_mm: Step size for drive-segment collision checking
-            sonar_model_dir: Directory containing the SonarModel artifacts
-                             (slices_best_model.pth + slices_feature_params.json)
+            error_model_path: Fitted inverse error model, from
+                              SCRIPT_FitInverseErrorModel.py
             seed: RNG seed for reproducible σ_sim noise. None → random.
         """
         # Load arena layout
         self.arena = ArenaLayout(session_name)
 
-        # Load sonar model — single source of truth for cone/profile/σ_sim params.
-        self.sonar_model = SonarModel.load(model_dir=sonar_model_dir, device="cpu")
-
-        # Profile parameters flow through from the trained model.
-        self.profile_params = self.sonar_model.get_profile_params()
-        self.opening_angle  = self.profile_params['opening_angle']
-        self.profile_steps  = self.profile_params['profile_steps']
-        self.profile_method = self.profile_params['profile_method']
-        self.cone_half_deg  = self.sonar_model.get_cone_half_deg()
+        # The sensor is an ERROR MODEL, not an echo simulator: geometric truth
+        # at the pose, corrupted with residuals measured from the deployed
+        # inverse over 2135 labelled echoes. This replaces the wall-only
+        # SonarModel, which was retired without an archive and could only
+        # perturb three distances -- it had no notion of a class, so a policy
+        # trained against it never met a misclassification.
+        self.error_model = InverseErrorModel.load(error_model_path)
+        self.max_range_mm  = self.error_model.max_range_mm
+        self.cone_half_deg = self.error_model.cone_half_deg
+        self.opening_angle = 2.0 * self.cone_half_deg
+        self.profile_steps = GEOM_PROFILE_STEPS
+        self.profile_method = "ray_center"
+        self.profile_params = {"opening_angle": self.opening_angle,
+                               "profile_steps": self.profile_steps,
+                               "profile_method": self.profile_method}
 
         # Reproducible noise.
         self.rng = np.random.default_rng(seed)
@@ -292,7 +347,7 @@ class EnvironmentSimulator:
         self.collision_step_mm  = max(1.0, float(collision_step_mm))
 
         print(f"Simulator initialized with {session_name}")
-        print(f"  SonarModel: {self.sonar_model}")
+        print(f"  Sensor:     {self.error_model}")
         print(f"  Profile:    {self.opening_angle}° opening, {self.profile_steps} steps,"
               f" method={self.profile_method!r}")
         print(f"  Cone:       ±{self.cone_half_deg:.0f}°  (3 slices)")
@@ -441,8 +496,12 @@ class EnvironmentSimulator:
               'distance_right_mm', 'distance_center_mm', 'distance_left_mm'
               'sigma_right_mm',    'sigma_center_mm',    'sigma_left_mm'
         """
-        profile = self.get_profile_at_position(x, y, orientation_deg)
-        return self.sonar_model.predict_from_profile(profile, rng=self.rng)
+        cls, rng_mm, az, slices = true_local_feature(
+            x, y, orientation_deg,
+            {"walls": self.arena.walls, "poles": self.arena.poles,
+             "pole_radius_mm": self.arena.pole_radius_mm},
+            self.cone_half_deg, max_range_mm=self.max_range_mm)
+        return self.error_model.observe(cls, rng_mm, az, slices, self.rng)
 
     def get_sonar_measurements_batch(
         self,
@@ -451,9 +510,10 @@ class EnvironmentSimulator:
         """
         Batch sonar measurements for N positions.
 
-        Profile geometry is computed per-position (sequential, geometry-bound),
-        and the SonarModel's predict_from_profile is called once on the batched
-        profiles to share noise sampling.
+        Looped rather than vectorised: the error model draws a CLASS per
+        position before it knows which geometry channels to corrupt, so the
+        batch cannot share one noise draw the way the wall-only model could.
+        Geometry was always the sequential part anyway.
 
         Args:
             positions: List of (x, y, orientation_deg) tuples
@@ -463,17 +523,7 @@ class EnvironmentSimulator:
         """
         if not positions:
             return []
-
-        profiles = np.array(
-            [self.get_profile_at_position(x, y, o) for x, y, o in positions],
-            dtype=np.float32,
-        )  # (N, profile_steps)
-
-        batch = self.sonar_model.predict_from_profile(profiles, rng=self.rng)
-        return [
-            {key: float(batch[key][k]) for key in batch}
-            for k in range(len(positions))
-        ]
+        return [self.get_sonar_measurement(x, y, o) for x, y, o in positions]
 
     def simulate_robot_movement(self, start_x: float, start_y: float, start_orientation: float,
                                actions: List[Dict[str, float]],
