@@ -84,8 +84,15 @@ CLASS_NAMES = ["wall", "pole", "none"]
 # Range bins for conditioning. In-range reflectors (wall, pole) live in
 # [0, MAX_RANGE]; `none` is by construction beyond it, so it gets its own edges
 # -- a reflector just past the horizon is far more confusable than a distant one.
-IN_RANGE_EDGES  = [200., 350., 500., 650., 800., 1000.]
-OUT_RANGE_EDGES = [1000., 1250., 1500., 2000., 1e9]
+# Matched to the paper figure's panel E. 150 mm below 500 where poles are
+# sparse, 100 mm from 500 through the class boundary and just beyond it, where
+# the interesting collapse happens and the counts support the resolution.
+# Coarser bins smeared it badly: at 200 mm width, pole recall in 800-1000 read
+# as 50%, when it is 66% in 800-900 and 26% in 900-1000. The simulator would
+# then have told the policy that poles stay half-detectable right up to the
+# horizon, which is where a path-following robot spends much of its time.
+IN_RANGE_EDGES  = [200., 350., 500., 600., 700., 800., 900., 1000.]
+OUT_RANGE_EDGES = [1000., 1100., 1200., 1400., 1700., 2000., 1e9]
 
 # Wall slice bins, over true slice distance.
 WALL_EDGES = [0., 250., 500., 750., 1000., 1500., 2000., 1e9]
