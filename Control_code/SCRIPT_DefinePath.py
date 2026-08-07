@@ -26,6 +26,7 @@ Outputs (TargetArenas/<arena>/):
 
 import json
 import os
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 # Force a windowed backend BEFORE pyplot is imported. The picker depends on
@@ -43,12 +44,18 @@ from scipy.spatial import cKDTree
 from Library import Settings as _settings
 _settings.data_folder = "TargetArenas"
 
-from Library.EnvironmentSimulator import EnvironmentSimulator
+from Library.AcquisitionSessionLoader import _load_features_for_session
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-ARENAS:             List[str] = ["Target01", "Target02"]
+ARENAS:             List[str] = ["Path01"]
 ARENAS_ROOT:        str       = "TargetArenas"
+
+# Radius drawn round each pole, marking where it is reliably detectable as a
+# landmark. Recall falls off sharply past this (94.7% below 400 mm, 96.4% from
+# 600-800, 25% from 800-1000), so a path meant to use a pole as a landmark
+# should stay inside the ring.
+POLE_LANDMARK_RANGE_MM: float = 800.0
 GRID_RESOLUTION_MM: float     = 10.0
 COLORMAP:           str       = "viridis"
 PADDING_MM:         float     = 100.0
@@ -71,13 +78,39 @@ def compute_distance_field(walls: np.ndarray, resolution: float, padding: float)
     return xs, ys, dists.reshape(gx.shape)
 
 
-def _render_background(ax, walls: np.ndarray, xs, ys, dist, alpha_field=0.85):
+def _draw_poles(ax, poles: np.ndarray, pole_radius_mm: float):
+    """Mark poles, with a ring at the landmark-detection range.
+
+    Poles matter twice when drawing a path: as obstacles to stay clear of, and
+    -- for the path-following experiment -- as landmarks, which only works if
+    the path passes close enough for the inverse to see them. Pole recall is
+    94.7% below 400 mm but 25% between 800 and 1000 mm, so the ring marks the
+    range within which a pole is reliably detectable.
+
+    Note the distance field behind this is WALLS ONLY, so it does not show
+    clearance to poles; the drawn footprint is the guide for that.
+    """
+    if poles is None or len(poles) == 0:
+        return
+    for px, py in poles:
+        ax.add_patch(plt.Circle((px, py), POLE_LANDMARK_RANGE_MM, fill=False,
+                                ls=(0, (4, 4)), lw=1.2, ec="#c05cff", alpha=.55,
+                                zorder=3))
+        ax.add_patch(plt.Circle((px, py), max(pole_radius_mm, 25.0), fill=True,
+                                fc="#c05cff", ec="black", lw=.8, zorder=6))
+    ax.scatter([], [], s=45, c="#c05cff", edgecolors="black", linewidths=.8,
+               label=f"pole (ring = {POLE_LANDMARK_RANGE_MM:.0f} mm landmark range)")
+
+
+def _render_background(ax, walls: np.ndarray, xs, ys, dist, alpha_field=0.85,
+                       poles: np.ndarray = None, pole_radius_mm: float = 12.5):
     im = ax.imshow(
         dist,
         extent=[xs.min(), xs.max(), ys.min(), ys.max()],
         origin="lower", cmap=COLORMAP, alpha=alpha_field, zorder=1,
     )
     ax.scatter(walls[:, 0], walls[:, 1], s=1.0, c="black", linewidths=0, zorder=2)
+    _draw_poles(ax, poles, pole_radius_mm)
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
     ax.set_aspect("equal")
@@ -100,6 +133,8 @@ def collect_path_and_starts(
     arena: str,
     walls: np.ndarray,
     existing_waypoints: Optional[List[Tuple[float, float]]] = None,
+    poles: np.ndarray = None,
+    pole_radius_mm: float = 12.5,
 ) -> Optional[dict]:
     """Interactive picker for waypoints + box + arrow.
 
@@ -112,7 +147,8 @@ def collect_path_and_starts(
     xs, ys, dist = compute_distance_field(walls, GRID_RESOLUTION_MM, PADDING_MM)
 
     fig, ax = plt.subplots(figsize=(10, 10))
-    im = _render_background(ax, walls, xs, ys, dist)
+    im = _render_background(ax, walls, xs, ys, dist,
+                            poles=poles, pole_radius_mm=pole_radius_mm)
     cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
     cbar.set_label("Distance to nearest wall (mm)")
 
@@ -302,10 +338,13 @@ def save_path_viz(
     box: dict,
     arrow: dict,
     out_path: str,
+    poles: np.ndarray = None,
+    pole_radius_mm: float = 12.5,
 ) -> None:
     xs, ys, dist = compute_distance_field(walls, GRID_RESOLUTION_MM, PADDING_MM)
     fig, ax = plt.subplots(figsize=(10, 10))
-    im = _render_background(ax, walls, xs, ys, dist, alpha_field=0.6)
+    im = _render_background(ax, walls, xs, ys, dist, alpha_field=0.6,
+                            poles=poles, pole_radius_mm=pole_radius_mm)
     fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02,
                  label="Distance to nearest wall (mm)")
 
@@ -370,12 +409,37 @@ def save_path_viz(
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _load_walls(arena: str) -> np.ndarray:
-    sim = EnvironmentSimulator(arena)
-    walls = sim.arena.walls
+def _load_walls(arena: str):
+    """Wall points for the arena, straight from its arena_features.npz.
+
+    This used to construct an EnvironmentSimulator just to reach
+    `sim.arena.walls`. That pulled in the simulator's whole dependency chain --
+    including SonarModel.load, which currently raises because only `inverse_*`
+    artifacts exist and the wall-only `slices_*` model it wants was retired
+    without an archive. Defining a path needs none of that: walls are used here
+    only for a distance field and a scatter plot. Reading the npz directly also
+    skips the legacy DataProcessor/DataCollection path, which emitted the
+    "Total samples: 0" noise on the way through.
+    """
+    base = Path(ARENAS_ROOT) / arena
+    # The npz sits inside an env_* snapshot folder, not at the arena root, so
+    # resolve the newest one -- same lookup SCRIPT_RunDirectPolicy uses.
+    src = base
+    if not (base / "arena_features.npz").exists():
+        envs = sorted(d for d in base.iterdir()
+                      if d.is_dir() and d.name.startswith("env_")
+                      and (d / "arena_features.npz").exists())
+        if not envs:
+            raise FileNotFoundError(
+                f"No arena_features.npz for '{arena}'. Annotate the snapshot and "
+                f"run SCRIPT_BuildArenaGeometry.py first.")
+        src = envs[-1]
+    geom = _load_features_for_session(src)
+    walls = np.asarray(geom["walls"], dtype=np.float32)
     if len(walls) == 0:
         raise ValueError(f"No walls found for arena '{arena}'")
-    return walls
+    poles = np.asarray(geom["poles"], dtype=np.float32).reshape(-1, 2)
+    return walls, poles, float(geom.get("pole_radius_mm", 12.5))
 
 
 def _prompt_existing(json_path: str) -> Tuple[str, Optional[List[Tuple[float, float]]]]:
@@ -412,8 +476,9 @@ def main() -> None:
             if mode == "skip":
                 continue
 
-        walls = _load_walls(arena)
-        result = collect_path_and_starts(arena, walls, existing_waypoints)
+        walls, poles, pole_r = _load_walls(arena)
+        result = collect_path_and_starts(arena, walls, existing_waypoints,
+                                         poles=poles, pole_radius_mm=pole_r)
         if result is None:
             print("  abandoned (Esc).")
             continue
@@ -446,7 +511,8 @@ def main() -> None:
             json.dump(save_data, f, indent=2)
         print(f"  Saved {json_path}  ({len(waypoints)} waypoints + box + arrow)")
 
-        save_path_viz(arena, walls, waypoints, box, arrow, png_path)
+        save_path_viz(arena, walls, waypoints, box, arrow, png_path,
+                      poles=poles, pole_radius_mm=pole_r)
         print(f"  Saved {png_path}")
 
 
