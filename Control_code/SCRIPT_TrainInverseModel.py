@@ -69,8 +69,19 @@ MAX_RANGE_MM   = 1000.0  # drop pings whose nearest reflector is beyond this.
 #   "true_class" — keep the true wall/pole label at any range, and let the
 #                  classifier become uncertain with distance instead of
 #                  abstaining at a hard cut. 'none' then covers empty cones only.
-# Set to "true_class" by EXPT_range_horizon.py; the canonical path is unchanged.
-FAR_LABEL_MODE = "none"
+# ADOPTED "true_class" 2026-08-08 (evidence: Performance notes that date).
+# "none" cost more than it guarded: it made the model abstain on 9.3% of pings
+# INSIDE 1 m -- 112 of those 150 poles, median true range 874 mm -- because a
+# hard cut in label space cannot be sharp in envelope space, so the model hedged
+# just inside its own boundary. That is the mechanism behind Exp 1's 25% pole
+# recall in the 800-1000 mm band. Far echoes are in fact classifiable and
+# honestly calibrated to ~1.7 m (76% balanced accuracy, ECE 0.044).
+# What is given up: there is no abstain guard beyond ~1.9 m, where the model
+# calls everything 'pole' at p>0.9. The guard cannot be recovered by moving the
+# cut outward -- at 1700 mm the abstain class has 11 examples and is ignored --
+# only by acquiring data in open space. Exposure is 4.4% of Path01 poses, 0% of
+# Path02. Set back to "none" to restore the old behaviour exactly.
+FAR_LABEL_MODE = "true_class"
 
 # Scale for the pole-range head's target, kept separate from MAX_RANGE_MM so the
 # labelling cut and the normalisation constant can move independently. They were
@@ -78,6 +89,19 @@ FAR_LABEL_MODE = "none"
 # "true_class" the cut disappears but the scale must stay fixed, or the range
 # head's loss silently reweights against the other heads.
 POLE_DIST_NORM_MM = 1000.0
+
+# Longest true pole range the range head is TRAINED on. The head regresses
+# toward the mean of whatever span it sees, so widening that span degrades it at
+# both ends: measured signed bias at 0-500 mm went +86 mm (span 0-1 m) to +149 mm
+# (span 0-1.9 m), which matters because the terminal approach stop fires on this
+# output and a positive bias makes the robot stop closer than the protocol says.
+# Capping the head's training span keeps it accurate where the stop lives, while
+# the CLASSIFIER still sees every range. Consequence to remember: the head then
+# saturates near this value, so it is a close-range stop signal, NOT a general
+# rangefinder -- do not read a pole range beyond it as meaningful.
+# Inert under FAR_LABEL_MODE="none" (poles beyond MAX_RANGE_MM are already
+# labelled 'none' there, so the pole mask excludes them anyway).
+POLE_DIST_TRAIN_MAX_MM = 1000.0
 
 # 4-fold cross-validation: for each q in CV_QUADRANTS, hold out that quadrant
 # from every session as the val set and train on the rest. Same per-fold
@@ -350,13 +374,17 @@ def combined_loss(out, T_wall_n, C, T_pole_n, in_warmup, T_pdist_n=None):
         T_pole_n, pole_mask, in_warmup,
     )
 
-    # Pole range GNLL — same masking as azimuth (pole-class pings only)
+    # Pole range GNLL — pole-class pings, AND only those inside the head's
+    # training span. The target is already normalised by POLE_DIST_NORM_MM, so
+    # the range test is a comparison on the target itself. Non-pole pings carry a
+    # filled 0.0 target, but pole_mask excludes them before this matters.
     loss_pole_dist = torch.tensor(0.0, device=out["class_logits"].device)
     if "pole_dist_mean" in out and T_pdist_n is not None:
+        pdist_mask = pole_mask & (T_pdist_n <= POLE_DIST_TRAIN_MAX_MM / POLE_DIST_NORM_MM)
         loss_pole_dist = masked_gnll(
             out["pole_dist_mean"].squeeze(1),
             out["pole_dist_log_var"].squeeze(1),
-            T_pdist_n, pole_mask, in_warmup,
+            T_pdist_n, pdist_mask, in_warmup,
         )
 
     total = (LOSS_W_CLASS * loss_class
@@ -916,7 +944,8 @@ def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
             "right":  [CONE_HALF_DEG - 2*CONE_HALF_DEG/3,  CONE_HALF_DEG],
         },
         "pole_az_norm":   {"divide_by_deg": CONE_HALF_DEG},
-        "pole_dist_norm": ({"divide_by_mm": POLE_DIST_NORM_MM}
+        "pole_dist_norm": ({"divide_by_mm": POLE_DIST_NORM_MM,
+                            "trained_max_mm": POLE_DIST_TRAIN_MAX_MM}
                            if MODEL_KWARGS.get("pole_dist_head") else None),
         "class_names":    CLASS_NAMES,
         "envelope_norm":  {"kind": "none"},
@@ -1054,7 +1083,8 @@ def main():
             "right":  [CONE_HALF_DEG - 2*CONE_HALF_DEG/3,  CONE_HALF_DEG],
         },
         "pole_az_norm":   {"divide_by_deg": CONE_HALF_DEG},
-        "pole_dist_norm": ({"divide_by_mm": POLE_DIST_NORM_MM}
+        "pole_dist_norm": ({"divide_by_mm": POLE_DIST_NORM_MM,
+                            "trained_max_mm": POLE_DIST_TRAIN_MAX_MM}
                            if MODEL_KWARGS.get("pole_dist_head") else None),
         "class_names":    CLASS_NAMES,
         "envelope_norm":  {"kind": "none"},

@@ -8,11 +8,15 @@ the label throws the information away.
 
 This experiment asks whether the far pings are better kept at their true class,
 letting the classifier express distance as declining confidence instead of as a
-hard cut. Two conditions, identical data, folds, architecture and seed, differing
-only in how beyond-1 m pings are labelled:
+hard cut. All conditions share data, folds, architecture and seed:
 
-    cap1m      FAR_LABEL_MODE="none"        (the current canonical behaviour)
-    fullrange  FAR_LABEL_MODE="true_class"  (the proposal)
+    cap1m                  the current canonical behaviour
+    fullrange              far pings keep their true class (the proposal)
+    cap1700                abstain class kept, cut moved out to where the data
+                           ends -- turns out to be unlearnable, 11 examples
+    fullrange_maskedrange  fullrange, plus the pole-range head trained only on
+                           poles within 1 m, since widening its span made it
+                           regress toward the mean and shifted the approach stop
 
 4-fold quadrant CV in both, so every ping is scored exactly once by a model that
 did not train on it. Aggregate accuracy is NOT the question here -- the two
@@ -50,14 +54,22 @@ import SCRIPT_TrainInverseModel as T
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-# Each condition is (tag, FAR_LABEL_MODE, MAX_RANGE_MM). The cap and the
-# labelling rule are separate knobs: cap1700 keeps the abstain class but moves
-# the cut out to where this dataset actually ends, which is the configuration
-# the first two conditions bracket without either one testing it.
+# Each condition is (tag, FAR_LABEL_MODE, MAX_RANGE_MM, POLE_DIST_TRAIN_MAX_MM).
+# Every knob the condition depends on is named here rather than inherited from
+# the module: a condition that reads a global would silently change meaning when
+# that global moves, and would then no longer match its own saved predictions.
 CONDITIONS = [
-    ("cap1m",     "none",       1000.0),
-    ("fullrange", "true_class", 1000.0),
-    ("cap1700",   "none",       1700.0),
+    ("cap1m",     "none",       1000.0, 1000.0),
+    # fullrange predates the range-head mask, so it pins the head unbounded --
+    # that is what its saved oof_fullrange.npz actually contains.
+    ("fullrange", "true_class", 1000.0, float("inf")),
+    ("cap1700",   "none",       1700.0, 1700.0),
+    # Same labelling as fullrange, but the pole-range head is masked to poles
+    # within 1 m. fullrange showed that head regressing hard toward the mean of
+    # its widened span (+149 mm bias at 0-500 mm), which moves the terminal
+    # approach stop; this is the proposed fix, and the comparison against
+    # fullrange is what says whether it worked.
+    ("fullrange_maskedrange", "true_class", 1000.0, 1000.0),
 ]
 
 # Subset on which conditions are compared head to head. Fixed at the original
@@ -144,11 +156,13 @@ def sigma_metrics(true_v, pred_v, pred_s):
 
 # ── One condition ─────────────────────────────────────────────────────────────
 
-def run_condition(tag, far_mode, max_range, device):
+def run_condition(tag, far_mode, max_range, pdist_max, device):
     print(f"\n{'=' * 78}\n  CONDITION {tag}  (FAR_LABEL_MODE={far_mode}, "
-          f"MAX_RANGE_MM={max_range:.0f})\n{'=' * 78}")
+          f"MAX_RANGE_MM={max_range:.0f}, POLE_DIST_TRAIN_MAX_MM={pdist_max})"
+          f"\n{'=' * 78}")
     T.FAR_LABEL_MODE  = far_mode
     T.MAX_RANGE_MM    = max_range
+    T.POLE_DIST_TRAIN_MAX_MM = pdist_max
     T.ARTIFACT_PREFIX = f"expt_rh_{tag}"
     np.random.seed(T.SEED)
     torch.manual_seed(T.SEED)
@@ -390,10 +404,11 @@ def main(only=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}   sessions: {T.ACQUISITION_SESSIONS}")
 
-    saved = (T.FAR_LABEL_MODE, T.MAX_RANGE_MM, T.ARTIFACT_PREFIX)
+    saved = (T.FAR_LABEL_MODE, T.MAX_RANGE_MM, T.POLE_DIST_TRAIN_MAX_MM,
+             T.ARTIFACT_PREFIX)
     reports = {}
     try:
-        for tag, far_mode, max_range in CONDITIONS:
+        for tag, far_mode, max_range, pdist_max in CONDITIONS:
             npz = os.path.join(OUT_DIR, f"oof_{tag}.npz")
             if only and tag not in only:
                 if not os.path.exists(npz):
@@ -406,12 +421,13 @@ def main(only=None):
                 print(f"  re-analysing {tag} from saved predictions")
                 out = load_oof(tag)
             else:
-                out = run_condition(tag, far_mode, max_range, device)
+                out = run_condition(tag, far_mode, max_range, pdist_max, device)
             reports[tag] = analyse(tag, *out)
     finally:
         # Never leave the imported module mutated: a later import in the same
         # process would silently inherit the experimental labelling and cap.
-        T.FAR_LABEL_MODE, T.MAX_RANGE_MM, T.ARTIFACT_PREFIX = saved
+        (T.FAR_LABEL_MODE, T.MAX_RANGE_MM, T.POLE_DIST_TRAIN_MAX_MM,
+         T.ARTIFACT_PREFIX) = saved
 
     print(f"\n\n{'=' * 78}\n  SUMMARY\n{'=' * 78}")
     for tag in [c[0] for c in CONDITIONS]:
