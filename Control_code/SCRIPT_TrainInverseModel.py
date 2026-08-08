@@ -943,9 +943,14 @@ def main():
     fold_results = []
     for q in CV_QUADRANTS:
         print(f"\n--- Fold q={q} ---")
+        # The pole-distance arguments must be passed or run_fold leaves the
+        # range head with no loss: it still emits numbers, but untrained ones,
+        # so any CV figure for that head would be meaningless. main_deploy()
+        # always passed them; this path did not.
         fold_results.append(run_fold(
             q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
-            quads, sess, device, sub_prefix=f"q{q}"))
+            quads, sess, device, sub_prefix=f"q{q}",
+            pole_dist_mm=pole_dist_mm, pole_dist_n_safe=pole_dist_n_safe))
 
     print("\n[3/4] CV summary")
 
