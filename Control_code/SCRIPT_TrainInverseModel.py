@@ -61,6 +61,24 @@ MAX_RANGE_MM   = 1000.0  # drop pings whose nearest reflector is beyond this.
                          # the narrowband sonar carries discriminative pole
                          # signal (mid-range 1-1.7 m is the empirical dead zone).
 
+# How pings whose nearest in-cone reflector lies beyond MAX_RANGE_MM are labelled.
+#   "none"       — relabel to the abstain class (the behaviour since 2026-06-12).
+#                  Note this makes 'none' a RANGE label, not a "nothing there"
+#                  label: these arenas contain zero genuinely empty cones, so
+#                  every 'none' ping is really a wall or pole further than 1 m.
+#   "true_class" — keep the true wall/pole label at any range, and let the
+#                  classifier become uncertain with distance instead of
+#                  abstaining at a hard cut. 'none' then covers empty cones only.
+# Set to "true_class" by EXPT_range_horizon.py; the canonical path is unchanged.
+FAR_LABEL_MODE = "none"
+
+# Scale for the pole-range head's target, kept separate from MAX_RANGE_MM so the
+# labelling cut and the normalisation constant can move independently. They were
+# the same value while the cut was also the horizon; under FAR_LABEL_MODE
+# "true_class" the cut disappears but the scale must stay fixed, or the range
+# head's loss silently reweights against the other heads.
+POLE_DIST_NORM_MM = 1000.0
+
 # 4-fold cross-validation: for each q in CV_QUADRANTS, hold out that quadrant
 # from every session as the val set and train on the rest. Same per-fold
 # convention as the wall-only trainer; here the loop is wired directly in main()
@@ -106,7 +124,7 @@ LOSS_W_WALL  = 1.0
 LOSS_W_POLE  = 1.0
 # Pole RANGE term. The controller's terminal approach stops on this output, so
 # it has to be trained, not inferred from the wall head (which is masked to
-# wall-class pings). Normalised by MAX_RANGE_MM, like pole azimuth is by
+# wall-class pings). Normalised by POLE_DIST_NORM_MM, like pole azimuth is by
 # CONE_HALF_DEG, so all regression targets sit on a comparable scale and one
 # weight of 1.0 does not silently dominate.
 LOSS_W_POLE_DIST = 1.0
@@ -120,7 +138,10 @@ LOG_VAR_MAX    = 4.0
 SEED           = 42
 
 CLASS_NAMES = ["wall", "pole", "none"]
-WALL_CLASS, POLE_CLASS, NONE_CLASS = 0, 1, 2   # "none" = nothing within MAX_RANGE_MM
+WALL_CLASS, POLE_CLASS, NONE_CLASS = 0, 1, 2   # what "none" means depends on
+                                               # FAR_LABEL_MODE: nothing within
+                                               # MAX_RANGE_MM ("none") or an
+                                               # empty cone ("true_class")
 
 OUTPUT_DIR      = "SonarModel"
 ARTIFACT_PREFIX = "inverse"
@@ -190,12 +211,19 @@ def load_and_filter(with_poses: bool = False):
     """Returns sonar, slice_targets, classes (0=wall, 1=pole, 2=none), pole_az,
     pole_dist_mm, quads, sess, bin_centers (poses appended when with_poses=True).
 
-    Cone-empty pings and pings whose nearest in-cone reflector is beyond
-    MAX_RANGE_MM are RELABELLED to the 'none' class (nothing actionable within
-    range) rather than dropped. This gives the classifier an explicit abstain
-    option and confines the wall-slice / pole-azimuth regression to the in-range
-    regime where the narrowband sonar is reliable (wall/pole masks key off
-    classes 0/1, so 'none' samples feed only the cross-entropy)."""
+    Cone-empty pings are always relabelled to the 'none' class. What happens to
+    pings whose nearest in-cone reflector is beyond MAX_RANGE_MM depends on
+    FAR_LABEL_MODE:
+
+      "none"       — they join 'none' too (the 2026-06-12 behaviour). This gives
+                     the classifier an explicit abstain option and confines the
+                     wall-slice / pole-azimuth regression to the in-range regime
+                     where the narrowband sonar is reliable (wall/pole masks key
+                     off classes 0/1, so 'none' feeds only the cross-entropy).
+      "true_class" — they keep their true wall/pole label, so the regression
+                     heads see the full range and the classifier is expected to
+                     express distance as declining confidence rather than as a
+                     hard cut."""
     loaded = load_data_inverse(
         ACQUISITION_SESSIONS,
         acquisitions_root=ACQUISITIONS_ROOT,
@@ -209,18 +237,33 @@ def load_and_filter(with_poses: bool = False):
         sonar, profiles, classes, pole_az, near_dist, quads, sess, bin_centers, poses = loaded
     else:
         sonar, profiles, classes, pole_az, near_dist, quads, sess, bin_centers = loaded
+    if FAR_LABEL_MODE not in ("none", "true_class"):
+        raise ValueError(f"FAR_LABEL_MODE must be 'none' or 'true_class', "
+                         f"got {FAR_LABEL_MODE!r}")
     classes = np.asarray(classes, dtype=np.float64)
     empty = np.isnan(classes)
     if np.isfinite(MAX_RANGE_MM):
         in_range = np.isfinite(near_dist) & (near_dist <= MAX_RANGE_MM)
     else:
         in_range = np.isfinite(near_dist)
-    none_mask = empty | (~in_range)
+    if FAR_LABEL_MODE == "none":
+        none_mask = empty | (~in_range)
+    else:
+        # Beyond-range pings keep their true class; only a genuinely empty cone
+        # (no reflector at any range) abstains. A far ping with a finite class is
+        # in-distribution now, so the model has to learn its own uncertainty.
+        none_mask = empty
     labels = classes.copy()
     labels[none_mask] = NONE_CLASS
-    print(f"  relabelled {int(none_mask.sum())} pings to 'none' "
-          f"(empty_cone={int(empty.sum())}, "
+    print(f"  FAR_LABEL_MODE={FAR_LABEL_MODE}: relabelled {int(none_mask.sum())} "
+          f"pings to 'none' (empty_cone={int(empty.sum())}, "
           f"beyond_{MAX_RANGE_MM:.0f}mm={int((none_mask & ~empty).sum())})")
+    if FAR_LABEL_MODE == "true_class":
+        far = np.isfinite(near_dist) & (near_dist > MAX_RANGE_MM) & ~empty
+        print(f"    kept {int(far.sum())} beyond-{MAX_RANGE_MM:.0f}mm pings at "
+              f"true class (wall={int((classes[far] == 0).sum())}, "
+              f"pole={int((classes[far] == 1).sum())}); "
+              f"max near_dist={np.nanmax(near_dist):.0f} mm")
     slice_t = compute_slice_targets(profiles, bin_centers, CONE_HALF_DEG)
     # near_dist is the range to whichever reflector won the cone; for pole-class
     # pings that is the pole SURFACE distance (centre - radius), the same
@@ -451,8 +494,8 @@ def predict(model, sonar, sonar_stats, wall_stats, device):
     if pdist_mean_n:
         pd_n  = np.concatenate(pdist_mean_n)
         pd_lv = np.clip(np.concatenate(pdist_logv), LOG_VAR_MIN, LOG_VAR_MAX)
-        pole_pred_dist_mm  = pd_n * MAX_RANGE_MM        # de-normalise
-        pole_pred_dist_std = np.exp(pd_lv / 2.0) * MAX_RANGE_MM
+        pole_pred_dist_mm  = pd_n * POLE_DIST_NORM_MM   # de-normalise
+        pole_pred_dist_std = np.exp(pd_lv / 2.0) * POLE_DIST_NORM_MM
 
     return {
         "pole_pred_dist_mm":  pole_pred_dist_mm,
@@ -607,11 +650,17 @@ def plot_calibration(true_w, pred_w, std_w, true_az, pred_az, pred_az_std,
 
 def run_fold(q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
              quads, sess, device, sub_prefix, pole_dist_mm=None,
-             pole_dist_n_safe=None):
+             pole_dist_n_safe=None, oof_sink=None):
     """Train + evaluate one CV fold (hold out quadrant `q` from every session).
 
     Saves model, plots, and per-fold JSON to OUTPUT_DIR with file prefix
     `{ARTIFACT_PREFIX}_{sub_prefix}`. Returns a metrics dict.
+
+    If `oof_sink` is a list, the fold's held-out row indices and raw prediction
+    arrays are appended to it. Across all folds that assembles a complete
+    out-of-fold prediction set (every ping scored exactly once by a model that
+    did not train on it), which is what range-stratified and calibration
+    analyses need and the aggregate JSON cannot provide.
     """
     val_quadrants = {s: [q] for s in ACQUISITION_SESSIONS}
     is_val = split_indices(quads, sess, val_quadrants)
@@ -714,6 +763,8 @@ def run_fold(q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
     }
     with open(f"{out_prefix}_results.json", "w") as f:
         json.dump(fold_result, f, indent=2)
+    if oof_sink is not None:
+        oof_sink.append({"val_idx": np.where(is_val)[0], "pred": pred})
     return fold_result
 
 
@@ -865,7 +916,7 @@ def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
             "right":  [CONE_HALF_DEG - 2*CONE_HALF_DEG/3,  CONE_HALF_DEG],
         },
         "pole_az_norm":   {"divide_by_deg": CONE_HALF_DEG},
-        "pole_dist_norm": ({"divide_by_mm": MAX_RANGE_MM}
+        "pole_dist_norm": ({"divide_by_mm": POLE_DIST_NORM_MM}
                            if MODEL_KWARGS.get("pole_dist_head") else None),
         "class_names":    CLASS_NAMES,
         "envelope_norm":  {"kind": "none"},
@@ -906,6 +957,8 @@ def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
         "sonar_norm":   {"mean": s_mean, "std": s_std},
         "target_norm":  {"mean": t_mean, "std": t_std},
         "config": {"sessions": ACQUISITION_SESSIONS, "max_range_mm": MAX_RANGE_MM,
+                   "far_label_mode": FAR_LABEL_MODE,
+                   "pole_dist_norm_mm": POLE_DIST_NORM_MM,
                    "cone_half_deg": CONE_HALF_DEG},
     }
     with open(f"{out_prefix}_results.json", "w") as f:
@@ -929,10 +982,10 @@ def main():
     # NaN azimuth (wall-class samples) is fine — the masked loss ignores it.
     # But torch.as_tensor doesn't like NaN propagation in CE so we fill with 0.
     pole_az_n_safe = np.where(np.isnan(pole_az_n), 0.0, pole_az_n).astype(np.float32)
-    # Pole range target, normalised by MAX_RANGE_MM so it sits on the same scale
-    # as the other regression heads. NaNs (non-pole pings) become 0 and are
+    # Pole range target, normalised by POLE_DIST_NORM_MM so it sits on the same
+    # scale as the other regression heads. NaNs (non-pole pings) become 0 and are
     # excluded by the pole mask in the loss, exactly as for azimuth.
-    pole_dist_n = (pole_dist_mm / MAX_RANGE_MM).astype(np.float32)
+    pole_dist_n = (pole_dist_mm / POLE_DIST_NORM_MM).astype(np.float32)
     pole_dist_n_safe = np.where(np.isnan(pole_dist_n), 0.0, pole_dist_n).astype(np.float32)
     print(f"  pole az normalised by /{CONE_HALF_DEG:.0f}°")
 
@@ -1001,7 +1054,7 @@ def main():
             "right":  [CONE_HALF_DEG - 2*CONE_HALF_DEG/3,  CONE_HALF_DEG],
         },
         "pole_az_norm":   {"divide_by_deg": CONE_HALF_DEG},
-        "pole_dist_norm": ({"divide_by_mm": MAX_RANGE_MM}
+        "pole_dist_norm": ({"divide_by_mm": POLE_DIST_NORM_MM}
                            if MODEL_KWARGS.get("pole_dist_head") else None),
         "class_names":    CLASS_NAMES,
         "envelope_norm":  {"kind": "none"},
@@ -1071,10 +1124,10 @@ def main_deploy():
 
     pole_az_n = (pole_az_deg / CONE_HALF_DEG).astype(np.float32)
     pole_az_n_safe = np.where(np.isnan(pole_az_n), 0.0, pole_az_n).astype(np.float32)
-    # Pole range target, normalised by MAX_RANGE_MM so it sits on the same scale
-    # as the other regression heads. NaNs (non-pole pings) become 0 and are
+    # Pole range target, normalised by POLE_DIST_NORM_MM so it sits on the same
+    # scale as the other regression heads. NaNs (non-pole pings) become 0 and are
     # excluded by the pole mask in the loss, exactly as for azimuth.
-    pole_dist_n = (pole_dist_mm / MAX_RANGE_MM).astype(np.float32)
+    pole_dist_n = (pole_dist_mm / POLE_DIST_NORM_MM).astype(np.float32)
     pole_dist_n_safe = np.where(np.isnan(pole_dist_n), 0.0, pole_dist_n).astype(np.float32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
