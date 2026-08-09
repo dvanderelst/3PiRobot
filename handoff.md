@@ -37,7 +37,9 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
      - Needs **no poles** — this is wall geometry — so the walls-only arena from 2026-07-28 (3471 points, closed boundary) may serve directly.
      - May need only **extra headings at existing waypoints** rather than new positions: the cone is ±35° about the heading, so it was the path's heading choices as much as the positions that kept a wall in view.
      - Arena is 3538 x 4188 mm, so a clear diagonal or long axis can supply 3+ m of open cone.
-     - **Two open questions it would settle.** Whether the model can represent a far wall at all (at 3 m the return may be near the noise floor — if it learns "weak envelope → distant wall" that is behaviourally sufficient, even with a poor range estimate); and **whether `none` should exist at all**, since this would be the first data able to populate that class honestly rather than as a range label in disguise.
+     - **Priority: "far but present" beats "genuinely empty".** The failure being fixed happens when there *is* a distant wall — 2282 mm in the demo1 case, not silence — so a model trained on silence would not help in a room that always has a wall at 3 m. Practically, the middle of a 3538 x 4188 mm arena facing a corner gives ~2.5–2.9 m, which is a far wall, not nothing; true silence would need a much bigger space or an absorbing target. **If the model learns to say "wall at 2.3 m", the phantom problem is solved without a `none` class existing at all.** Collect genuinely empty data if it is easy — it would settle whether `none` deserves to exist — but do not design the session around it.
+     - **The open question it would settle.** Whether the model can represent a far wall at all: at 3 m the return may be near the noise floor, and if it only learns "weak envelope → distant wall" that is still behaviourally sufficient, even with a poor range estimate.
+     - **Design the session with the next model in mind** — the three-way output and the class-agnostic range head in Code state 2026-08-09 both need this data, and the range head wants far returns labelled with their true distance whether or not their class is recoverable.
   2. **Then re-run Experiment 1** on the new inverse (user's call 2026-08-08: cost is low and it should improve — first perception moves out from 798 mm and the 800–1000 mm blind ring goes away, and the paper avoids describing two differently-scoped inverses). **Re-running before Acquisition06 risks the phantom mechanism**, since Exp 1 wanders in an open arena and the current model asserts `pole` beyond ~1.5 m; the old model's pole precision there was 97.9%, which is the number to beat. Note the protocol constants: the runs used `APPROACH_STOP_MM=400` / `ALIGN_MIN_DETECTIONS=3`, while HEAD carries 500 and 6.
   3. **Then redraw the path.** `default_Path02_run02` completed **2.1 laps (110 steps)** with lap 2 tracking lap 1 to 116 mm, then **crashed at steps 116/117** near (-227, -1120). The cause is geometric, not control:
 
@@ -159,8 +161,21 @@ The inverse has trained successfully under the canonical close-range setup (see 
 
 ## Code state
 
-*Last updated: 2026-08-08.*
+*Last updated: 2026-08-09.*
 *Current branch for ongoing work: `direct-learning-poletask`.*
+
+### PLANNED — the next inverse: a three-way output and a class-agnostic range head (2026-08-09)
+
+**Not implemented.** Design decided 2026-08-09, from Dieter's point that "nothing detectable" and "something there but ambiguous at range x" are different states carrying different information, and the second is still useful to a controller. Depends on Acquisition06.
+
+- **Target output structure.** Three states rather than today's forced wall/pole call:
+  1. detected and classified (wall or pole, with its geometry),
+  2. **detected, class unresolved, with a range** — a calibrated ~50/50 instead of today's confident `pole`,
+  3. nothing detectable (only if such data turns out to exist; see Acquisition06).
+- **The architectural gap: nothing currently estimates range for an unclassified object.** The pole-range head is masked to pole-class pings and the wall slices to wall-class pings, so an ambiguous return has no distance at all. **Add a class-agnostic nearest-reflector range head**, trained across the full range, and leave the pole-range head as it is — masked to 1 m, purely the terminal-stop signal. The rationale for expecting this to work is in the record: range is a monaural time-of-flight cue and was the best-performing regression head (106 ± 11 mm), while azimuth needs a binaural comparison. Range should stay recoverable well past where wall-vs-pole discrimination collapses.
+- **What it buys.** For Experiment 1, the option to approach an ambiguous distant return to resolve it — active sensing, and biologically apt. For Experiment 2, a landmark distance that means something beyond a metre, which the saturating pole-range head cannot provide (Performance notes 2026-08-09).
+- **Target model after Acquisition06, briefly.** Wall vs pole out to ~1.7 m (from ~1.4 today) with close range unchanged — this is the one real bet, since the 1400–1700 band currently rests on 42 wall pings, and beyond ~1.7 m expect little. Beyond that, state 2 above instead of a confident phantom. Wall slices unchanged close in (166 mm at 200–500) and better beyond 1.5 m once far walls are trained rather than extrapolated.
+- **Caveat on the 50/50 signal.** p(wall) ≈ p(pole) is only informative if *calibrated*, and today it is not — beyond 1.7 m the model reports 91.5% confidence while being wrong. Calibration in that regime needs examples from that regime, which is exactly what Acquisition06 supplies.
 
 ### Uncapped inverse adopted and deployed (2026-08-08)
 
@@ -259,6 +274,26 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-08-09 — Per-distance error of the deployed heads: wall slices are better close in than the aggregate suggests, and the pole-range head saturates at ~740 mm
+
+Read off the deployed uncapped model (`67c68c0`) via the out-of-fold predictions in `TempOutput/RangeHorizon/oof_fullrange_maskedrange.npz`. No retraining; reproducible from that file.
+
+- **Wall slices, by TRUE slice distance** (the deploy report's 292/392/321 mm is an aggregate over all wall pings and understates close range):
+
+  | true distance | n | bias | RMSE | predicted σ |
+  |---|---|---|---|---|
+  | 200–500 mm | 899 | +58 | **166 mm** | 124 |
+  | 500–750 | 897 | +51 | 196 | 145 |
+  | 750–1000 | 758 | +87 | 232 | 172 |
+  | 1000–1500 | 933 | +64 | 263 | 190 |
+  | 1500–2000 | 397 | −43 | 333 | 356 |
+  | 2000+ | 424 | **−524** | **778 mm** | 570 |
+
+  Two things to carry forward: there is a consistent **+50 to +87 mm over-estimate below 1.5 m**, and unlike the pole-range head the wall head's **σ is roughly honest** (tracks RMSE until 2 m, understating only in the 2000+ band where the head saturates).
+- **The pole-range head saturates at ≈740 mm.** At a true 1238 mm mean it reports 742 mm (bias −496). So an approach to a pole at 1.5 m sees the reported range *stick* near 740 mm for the first several 150 mm steps, then begin tracking properly as the true range falls inside the trained span. It lags, it does not jump.
+- **Experiment 1 is unaffected by that.** `at_stop_distance()` is a plain threshold (`pole_dist_mm <= APPROACH_STOP_MM`, 500 mm) with no range-rate or consistency check, so a frozen reading simply means "keep approaching", which is correct. And the **asymptote (~740 mm) sits comfortably above the 500 mm stop, so a genuinely distant pole can never trigger a premature stop** — the failure worth worrying about does not arise.
+- **Experiment 2 IS affected, and this is the real cost.** The policy's pole-distance observation channel cannot separate a pole at 1.1 m from one at 1.8 m — both read ≈740 mm. The landmark channel therefore carries bearing but essentially **no distance information beyond a metre**, which is precisely the signal the path-integration-plus-landmark story would lean on. Training stays self-consistent (the simulator's error model is fitted from this same model, so it reproduces the saturation and the policy learns the compressed mapping), but the information is genuinely absent. **This is the strongest argument for the planned class-agnostic range head** — see Code state 2026-08-09.
 
 ### 2026-08-08 (evening) — The clearance/perception trade-off is much weaker than believed; the gaze proposal is measured and parked
 
