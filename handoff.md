@@ -33,14 +33,13 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
   **Next, in order — REVISED 2026-08-08.** The horizon result (Performance notes 2026-08-08) changes the order below: the inverse now comes *before* the path redraw, because how far the robot can see determines how much clearance a usable path can afford. Do not redraw against a 1 m horizon.
 
   0. **DONE 2026-08-08.** Extended-horizon inverse landed: range head masked, verified, deployed (`67c68c0`), error model refitted. `SonarModel/inverse_deploy_*` is now the uncapped model; the 1 m predecessor is at `SonarModel_archive/2026-08-08_deploy1m/`.
-  1. **Acquisition06: arena built and plan chosen 2026-08-12 — RUN IT. It gates the Exp-1 re-run.** Decided 2026-08-08 after the phantom-gate replay. **What is missing is not "empty space" but poses whose ±35° cone looks into clear distance, roughly 1.5–3.5 m**, with the nearest in-cone reflector far away. The training set has none: max in-cone range is 1911 mm, because acquisition waypoints sat in cluttered interiors where a wall was always close ahead. That gap is what makes the model assert `pole` at its 642 mm prior when it faces open floor, which is the *real* phantom mechanism (not the rear-pole story in the 2026-06-12 entry).
-     - **Ready to go:** arena `AcquisitionArenas/Acquisition06/env_0001_2026-08-12T12-44-36` (bare boundary + 4 peripheral poles, no interior blocks) and plan `plans/plan_2026-08-12T13-28-12.json` (far-biased yaws, 128 positions × 5 = 640 pings, 34.1 m tour). **Set `PLAN_PATH` explicitly in `SCRIPT_VisualDataAcquisition.py`** — it defaults to `None` = newest plan, and there are three in that folder. Full survey and plan scoring in Performance notes 2026-08-12.
-     - **Recalibrate the robot first** (`SCRIPT_CalibrateRobot.py`) — standing gate before any session.
-     - **Two corrections to what this entry used to say.** (a) The 2026-07-28 walls-only arena was proposed as a drop-in and **poles were said to be unnecessary**; the session was instead built with 4 poles standing 477–607 mm clear of walls, because the three-way output's "class unresolved at range" state cannot be calibrated without far pings of *both* classes, and a compact far box/pole is the ambiguity that state exists to represent. (b) **"May need only extra headings at existing waypoints" is false** — Acq01–05 top out at 1904–2086 mm in-cone from *any* legal pose at *any* heading, so no amount of re-heading in those rooms reaches the missing band. It needed a cleared room, which is what was built.
-     - **Priority: "far but present" beats "genuinely empty".** The failure being fixed happens when there *is* a distant wall — 2282 mm in the demo1 case, not silence — so a model trained on silence would not help in a room that always has a wall at 3 m. **If the model learns to say "wall at 2.3 m", the phantom problem is solved without a `none` class existing at all.** The built arena tops out at ~3.2 m in-cone, so it supplies far-but-present and no true silence; `none` remains unsettled.
-     - **The open question it would settle.** Whether the model can represent a far wall at all: at 3 m the return may be near the noise floor, and if it only learns "weak envelope → distant wall" that is still behaviourally sufficient, even with a poor range estimate.
-     - **Design the session with the next model in mind** — the three-way output and the class-agnostic range head in Code state 2026-08-09 both need this data, and the range head wants far returns labelled with their true distance whether or not their class is recoverable.
-     - **After the session, before retraining:** `SCRIPT_CheckPoleSignal.py` will understate the far band on this data — it reduces each ping by *global argmax*, which on a pole-with-wall-behind ping locks onto the wall. Restrict it to near range or window the features around the labelled range; do not read a weak result as "no far-pole signal".
+  1. **DONE 2026-08-12. Acquisition06A collected — 640/640 pings, zero tracker misses.** The far-range hole is filled: beyond 1700 mm went from 11 pings to 272, and the training set now runs to 3196 mm instead of 1911. Full numbers in Performance notes 2026-08-12 (evening); arena and plan reasoning in the entry below it. **The `none`/true-silence question remains unsettled** — the arena tops out at ~3.2 m in-cone, so it supplies far-but-present and no silence.
+  1b. **Retrain the inverse on Acq01A–06A — the next thing to do.**
+     - **Archive `SonarModel/inverse_deploy_*` first**, including `inverse_feature_params.json` (`SonarModel/` is gitignored; only Dropbox preserves it, and training rewrites the shared params file — a `.pth` alone will not roll back). See the Model archive convention.
+     - **Change one thing at a time: add `Acquisition06A` to `ACQUISITION_SESSIONS` and touch nothing else.** Keep `FAR_LABEL_MODE="true_class"` and `POLE_DIST_TRAIN_MAX_MM=1000` as they are, so the retrain is attributable to the data. The class-agnostic range head (Code state 2026-08-09) is a *separate* step after this one, and it is now unblocked because the far bands finally have balanced examples.
+     - **Then refit `SonarModel/inverse_error_model.json`** — mandatory after any inverse retrain, since the simulator draws its perception from it.
+     - **Judge it on far-range calibration, not accuracy.** The top band is pole-heavy (2500+ is 25 wall / 41 pole), so the prior will lean pole, which is the same direction as the phantom failure. `EXPT_range_horizon.py` re-scores from saved `oof_*.npz` without retraining and reports ECE and the overconfidence gap per band.
+     - **`SCRIPT_CheckPoleSignal.py` will understate the far band on this data** — it reduces each ping by *global argmax*, which on a pole-with-wall-behind ping locks onto the wall. Restrict it to near range or window the features around the labelled range; do not read a weak result as "no far-pole signal".
   2. **Then re-run Experiment 1** on the new inverse (user's call 2026-08-08: cost is low and it should improve — first perception moves out from 798 mm and the 800–1000 mm blind ring goes away, and the paper avoids describing two differently-scoped inverses). **Re-running before Acquisition06 risks the phantom mechanism**, since Exp 1 wanders in an open arena and the current model asserts `pole` beyond ~1.5 m; the old model's pole precision there was 97.9%, which is the number to beat. Note the protocol constants: the runs used `APPROACH_STOP_MM=400` / `ALIGN_MIN_DETECTIONS=3`, while HEAD carries 500 and 6.
   3. **Then redraw the path.** `default_Path02_run02` completed **2.1 laps (110 steps)** with lap 2 tracking lap 1 to 116 mm, then **crashed at steps 116/117** near (-227, -1120). The cause is geometric, not control:
 
@@ -285,6 +284,30 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-08-12 (evening) — Acquisition06A collected: the far-range hole in the training set is filled
+
+Session `AcquisitionSessions/Acquisition06A`, arena `Acquisition06/env_0001_2026-08-12T12-44-36`, plan `plan_2026-08-12T13-28-12.json` (far-biased, 128 × 5). Commit at measurement `cfb4dc2`.
+
+- **Ran clean: 640 of 640 pings kept, zero tracker misses**, so no pings were lost to `drop_pose_fallback`. Executed poses sat a median **18 mm** from their planned waypoints (p90 31, max 148) — the recalibration plus closed-loop nav held.
+- **The plan predicted the yield almost exactly**: 314 far (1.5–3.5 m) pings achieved against 313 planned, 201 beyond 1911 mm against 197, identical p50 of 1441 mm, max 3196 vs 3175 mm. So the offline `cone_ranges` scoring is trustworthy for sizing future sessions — plan first, measure second.
+- Session class balance: wall 329 / pole 311 (48.6% pole), no empty cones.
+- **Pooled training set, before → after** (nearest-in-cone, ±35°):
+
+  | band | Acq01A–05A | Acq01A–06A | wall | pole |
+  |---|---|---|---|---|
+  | 0–500 | 584 | 682 | 517 | 165 |
+  | 500–1000 | 1028 | 1163 | 747 | 416 |
+  | 1000–1400 | 430 | 509 | 283 | 226 |
+  | 1400–1700 | 82 | **149** | **79** (was 42) | 70 |
+  | 1700–2000 | 11 | **96** | 57 (was 6) | 39 |
+  | 2000–2500 | **0** | **110** | 57 | 53 |
+  | 2500+ | **0** | **66** | 25 | 41 |
+  | total | 2135 | **2775** | 1765 | 1010 |
+
+  **Beyond 1700 mm: 11 pings → 272.** The band the 2026-08-09 design note called "the one real bet" (1400–1700, resting on 42 wall pings) now carries 79, and every new band is roughly class-balanced rather than one-sided.
+- **Consequences for the numbers quoted in earlier entries.** The 2026-08-08 statement that "cap1700 is fullrange, not fullrange with a guard" rested on the abstain class having 11 members beyond 1700; that is now 272, so every candidate-cut count in that entry is stale. Data now tops out at **3196 mm**, not 1911, so "uncapped means out to ~1.7 m on this dataset" no longer holds either.
+- **Watch item for the retrain:** the top band is pole-heavy (2500+ is 25 wall / 41 pole), so the far-range prior will lean pole — the same direction as the phantom failure. The honest check is far-range **calibration** (is p(pole) right when it says 0.6?), not accuracy alone.
 
 ### 2026-08-12 — Robot recalibration before Acquisition06: small-angle over-rotation gone, large-angle under-rotation new, drive constants moved a lot
 
