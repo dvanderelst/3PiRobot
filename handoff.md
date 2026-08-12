@@ -33,13 +33,14 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
   **Next, in order — REVISED 2026-08-08.** The horizon result (Performance notes 2026-08-08) changes the order below: the inverse now comes *before* the path redraw, because how far the robot can see determines how much clearance a usable path can afford. Do not redraw against a 1 m horizon.
 
   0. **DONE 2026-08-08.** Extended-horizon inverse landed: range head masked, verified, deployed (`67c68c0`), error model refitted. `SonarModel/inverse_deploy_*` is now the uncapped model; the 1 m predecessor is at `SonarModel_archive/2026-08-08_deploy1m/`.
-  1. **Acquisition06: a session in a fairly open arena — the next thing to do, and it gates the Exp-1 re-run.** Decided 2026-08-08 after the phantom-gate replay. **What is missing is not "empty space" but poses whose ±35° cone looks into clear distance, roughly 1.5–3.5 m**, with the nearest in-cone reflector far away. The training set has none: max in-cone range is 1911 mm, because acquisition waypoints sat in cluttered interiors where a wall was always close ahead. That gap is what makes the model assert `pole` at its 642 mm prior when it faces open floor, which is the *real* phantom mechanism (not the rear-pole story in the 2026-06-12 entry).
-     - Needs **no poles** — this is wall geometry — so the walls-only arena from 2026-07-28 (3471 points, closed boundary) may serve directly.
-     - May need only **extra headings at existing waypoints** rather than new positions: the cone is ±35° about the heading, so it was the path's heading choices as much as the positions that kept a wall in view.
-     - Arena is 3538 x 4188 mm, so a clear diagonal or long axis can supply 3+ m of open cone.
-     - **Priority: "far but present" beats "genuinely empty".** The failure being fixed happens when there *is* a distant wall — 2282 mm in the demo1 case, not silence — so a model trained on silence would not help in a room that always has a wall at 3 m. Practically, the middle of a 3538 x 4188 mm arena facing a corner gives ~2.5–2.9 m, which is a far wall, not nothing; true silence would need a much bigger space or an absorbing target. **If the model learns to say "wall at 2.3 m", the phantom problem is solved without a `none` class existing at all.** Collect genuinely empty data if it is easy — it would settle whether `none` deserves to exist — but do not design the session around it.
+  1. **Acquisition06: arena built and plan chosen 2026-08-12 — RUN IT. It gates the Exp-1 re-run.** Decided 2026-08-08 after the phantom-gate replay. **What is missing is not "empty space" but poses whose ±35° cone looks into clear distance, roughly 1.5–3.5 m**, with the nearest in-cone reflector far away. The training set has none: max in-cone range is 1911 mm, because acquisition waypoints sat in cluttered interiors where a wall was always close ahead. That gap is what makes the model assert `pole` at its 642 mm prior when it faces open floor, which is the *real* phantom mechanism (not the rear-pole story in the 2026-06-12 entry).
+     - **Ready to go:** arena `AcquisitionArenas/Acquisition06/env_0001_2026-08-12T12-44-36` (bare boundary + 4 peripheral poles, no interior blocks) and plan `plans/plan_2026-08-12T13-28-12.json` (far-biased yaws, 128 positions × 5 = 640 pings, 34.1 m tour). **Set `PLAN_PATH` explicitly in `SCRIPT_VisualDataAcquisition.py`** — it defaults to `None` = newest plan, and there are three in that folder. Full survey and plan scoring in Performance notes 2026-08-12.
+     - **Recalibrate the robot first** (`SCRIPT_CalibrateRobot.py`) — standing gate before any session.
+     - **Two corrections to what this entry used to say.** (a) The 2026-07-28 walls-only arena was proposed as a drop-in and **poles were said to be unnecessary**; the session was instead built with 4 poles standing 477–607 mm clear of walls, because the three-way output's "class unresolved at range" state cannot be calibrated without far pings of *both* classes, and a compact far box/pole is the ambiguity that state exists to represent. (b) **"May need only extra headings at existing waypoints" is false** — Acq01–05 top out at 1904–2086 mm in-cone from *any* legal pose at *any* heading, so no amount of re-heading in those rooms reaches the missing band. It needed a cleared room, which is what was built.
+     - **Priority: "far but present" beats "genuinely empty".** The failure being fixed happens when there *is* a distant wall — 2282 mm in the demo1 case, not silence — so a model trained on silence would not help in a room that always has a wall at 3 m. **If the model learns to say "wall at 2.3 m", the phantom problem is solved without a `none` class existing at all.** The built arena tops out at ~3.2 m in-cone, so it supplies far-but-present and no true silence; `none` remains unsettled.
      - **The open question it would settle.** Whether the model can represent a far wall at all: at 3 m the return may be near the noise floor, and if it only learns "weak envelope → distant wall" that is still behaviourally sufficient, even with a poor range estimate.
      - **Design the session with the next model in mind** — the three-way output and the class-agnostic range head in Code state 2026-08-09 both need this data, and the range head wants far returns labelled with their true distance whether or not their class is recoverable.
+     - **After the session, before retraining:** `SCRIPT_CheckPoleSignal.py` will understate the far band on this data — it reduces each ping by *global argmax*, which on a pole-with-wall-behind ping locks onto the wall. Restrict it to near range or window the features around the labelled range; do not read a weak result as "no far-pole signal".
   2. **Then re-run Experiment 1** on the new inverse (user's call 2026-08-08: cost is low and it should improve — first perception moves out from 798 mm and the 800–1000 mm blind ring goes away, and the paper avoids describing two differently-scoped inverses). **Re-running before Acquisition06 risks the phantom mechanism**, since Exp 1 wanders in an open arena and the current model asserts `pole` beyond ~1.5 m; the old model's pole precision there was 97.9%, which is the number to beat. Note the protocol constants: the runs used `APPROACH_STOP_MM=400` / `ALIGN_MIN_DETECTIONS=3`, while HEAD carries 500 and 6.
   3. **Then redraw the path.** `default_Path02_run02` completed **2.1 laps (110 steps)** with lap 2 tracking lap 1 to 116 mm, then **crashed at steps 116/117** near (-227, -1120). The cause is geometric, not control:
 
@@ -161,8 +162,18 @@ The inverse has trained successfully under the canonical close-range setup (see 
 
 ## Code state
 
-*Last updated: 2026-08-09.*
+*Last updated: 2026-08-12.*
 *Current branch for ongoing work: `direct-learning-poletask`.*
+
+### Geometry-aware yaw selection in the acquisition planner (2026-08-12)
+
+Commit `28b7692`. Motivated by Acquisition06: uniform yaws are geometry-blind, so a session collects whatever range distribution the arena happens to offer, which in an open room meant ~44% of pings under 1 m — a regime the existing 2135 pings already cover densely.
+
+- **`build_plan` gains `yaw_mode`** (`"uniform"`, the unchanged default, or `"far_biased"`), plus `n_far_yaws` / `cone_half_deg` / `yaw_min_sep_deg`. `far_biased` picks the `n_far` headings with the greatest nearest-in-cone range and fills the rest from the *shortest* looks, both greedy under a minimum angular separation, and consumes no RNG — it is a deterministic function of position and arena.
+- **`cone_ranges()` deliberately mirrors `AcquisitionSessionLoader.nearest_reflector_in_cone`** — same pole-surface convention, same centre-angle cone test. The planner's job is to predict the label the loader will later attach, so the two must be changed together; there is a comment saying so in both senses.
+- **Positions and yaws now draw from separate RNG streams.** They shared one, so any change to yaw selection shifted the position stream and silently produced a different tour, making the two modes incomparable. Verified: at a fixed seed the two modes give byte-identical positions, route and rejection counts. **Cost: plans built before this commit no longer reproduce from their recorded seed.** The saved plan JSONs are the record, so that is a fair trade — but note `AcquisitionArenas/` is gitignored, so those JSONs live only in Dropbox.
+- **`AcquisitionPlan` gained `yaw_mode` and `n_far_yaws`, both defaulted**, so `load_plan` still reads pre-existing plans (all six verified loadable) and `reorder_tour` carries them through. The diagnostics panel-1 docstring now records that its "modal heading = bug" reading inverts under `far_biased`.
+- **`reorder_tour` truncation is the hazard to watch, not the sampler.** It refuses wall-crossing legs and truncates when the nearest-neighbour tour gets stuck. On the first far-biased build it dropped 15 of 131 waypoints, all from one contiguous region, costing two of the four poles a third of their close-range coverage. `MAX_ATTEMPTS_PER_STEP` 200 → 1000 fixed it (drop of 3). It prints `reorder: truncated at N/M` — read that line.
 
 ### PLANNED — the next inverse: a three-way output and a class-agnostic range head (2026-08-09)
 
@@ -274,6 +285,46 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-08-12 — Acquisition06 arena and plan: the far-range gap is closed by geometry, and a 25 mm dowel does echo at 2.85 m
+
+Offline geometry plus one bench measurement; no session run yet. Commit at measurement `28b7692`. **`AcquisitionArenas/` is gitignored, so the arena and plan artifacts these numbers describe exist only in Dropbox** — hence the detail here.
+
+- **Arena** `AcquisitionArenas/Acquisition06/env_0001_2026-08-12T12-44-36`: bare boundary 3543 × 4166 mm, one closed structure, **no interior blocks**, 3325 wall points (median spacing 4.5 mm, max gap 18.6 mm, no pose blind at every heading). Four poles at (−792, −1880), (1082, −2349), (1071, 529), (−1218, −376), standoffs **477–607 mm** from the nearest wall, separations 1563–3045 mm.
+- **The old arenas were geometrically incapable of the missing data.** Uniform survey — 150 mm position grid at ≥250 mm clearance, 10° headings, nearest-in-cone at ±35°:
+
+  | arena | far band 1.5–3.5 m | p90 in-cone | max in-cone |
+  |---|---|---|---|
+  | Acquisition01 | 2.0% | 1179 mm | 1904 mm |
+  | Acquisition02 | 1.4% | 1195 | 1815 |
+  | Acquisition03 | 3.3% | 1286 | 2086 |
+  | Acquisition04 | 2.2% | 1184 | 2008 |
+  | Acquisition05 | 3.5% | 1298 | 1994 |
+  | **Acquisition06** | **29.8%** | **2145** | **3160** |
+
+  Nothing in Acq01–05 is beyond ~2.1 m in-cone from any legal pose at any heading — **the 1911 mm ceiling in the training set is the rooms, not the waypoint choices.** With the 4 poles removed Acq06 would reach 36.1% / 3277 mm, so the poles cost 6.3 points of far coverage.
+- **Interior boxes were considered and rejected.** Simulating Path02's five 230–315 mm blocks into this arena collapses the far band **34.4% → 1.9%** and caps sight lines at 2.5 m — the same signature as Acq01–05, i.e. interior clutter is exactly what capped them. Three peripheral blocks would cost 34.4% → 20.0%. Poles are far cheaper per unit of far-range ambiguity, and a 25 mm dowel plus a 3.5 m boundary wall *bracket* a 250 mm block, so far competence on deployment-arena blocks becomes interpolation rather than extrapolation.
+- **A 25 mm dowel returns a usable echo at 2.85 m.** Measured on the robot facing a pole with a wall >2.5 m behind: ~3600 a.u. above a ~6900 baseline, roughly **12 dB below** the wall echo at 3.45 m and ~9× the local ripple (eyeballed off the plot). This is what makes Acq06's far-pole labels sound rather than phantom, and it was the main risk against the design.
+  - **The echo detector misses it and that does not matter.** `locate_echo` thresholds L/R only, flat ~11300 beyond 0.75 m; the pole peak at 10500 falls just under, so `selection_mode='max'` takes the wall and reports 3.34 m. **The inverse trains on raw `sonar_data` envelopes** (`AcquisitionSessionLoader.py:324`, `:458`) and never touches `locate_echo` or `corrected_distance`, so the training path is unaffected. Consequence: the acquisition-time `corrected_distance`/`corrected_iid` sanity display will disagree with the geometric label on far-pole pings — a false alarm, not a labelling error.
+  - **`SCRIPT_CheckPoleSignal.py` WILL mislead on this session.** It reads raw envelopes but reduces each ping by *global argmax*, which on a pole-with-wall-behind ping is the wall — so all six hand features describe the wrong echo. Both it and the detector assume one echo per ping, which held only while poles were met close up with nothing behind them. The CNN is the only consumer that sees both echoes and their spacing.
+  - Envelope input is the full 200 samples (~3.7 m), no truncation, and `sonar_norm` is a single global scalar (`SCRIPT_TrainInverseModel.py:707`) with no per-index or range-dependent gain — so the far echo enters at roughly 1σ. Learnable, but far-range sensitivity is to be *verified* in the trained model, not assumed.
+- **Plan chosen: `plans/plan_2026-08-12T13-28-12.json`** — far-biased, `n_far=3`, seed 1786555688, `MAX_ATTEMPTS_PER_STEP=1000`. Scored against the uniform plan built the same day:
+
+  | | uniform 13-03-09 | far-biased 13-20-40 | **far-biased 13-28-12 (chosen)** |
+  |---|---|---|---|
+  | positions / pings | 132 / 660 | 116 / 580 | **128 / 640** |
+  | far 1.5–3.5 m | 203 (30.8%) | 281 (48.4%) | **313 (48.9%)** |
+  | beyond 1911 mm | 116 | 182 | **197** |
+  | 2500 mm+ | 22 | 69 | **74** |
+  | under 1000 mm | 296 | 212 | 236 |
+  | p50 in-cone | 1101 mm | 1454 | 1441 |
+  | tour | 45.4 m | 34.6 m | **34.1 m** |
+  | interior within 400 mm of a waypoint | 90% | 82% | 88% |
+  | waypoints ≤1 m of each pole | 25/24/20/27 | 17/27/20/16 | **24/24/23/21** |
+
+  The chosen plan beats the uniform one on every axis that matters while running **20 fewer pings and 11 m less driving**. Far-band class splits 153 wall / 160 pole — marginally pole-heavy and truthful, so the new data will *not* teach "far and open ⇒ wall" as a prior; remember that when reading the retrained model's far-range behaviour. Still, 153 far-wall pings is more than triple the 42 the 1400–1700 band currently rests on.
+- **Yaw-mode effect isolated** at a matched seed (identical 123 positions, identical 41.9 m route, identical rejection counts): far band **30.4% → 47.2%**, beyond 1911 mm **115 → 199**. So the mode does the work; position count only scales the totals.
+- **`reorder_tour` truncation cost real coverage on the first far-biased build** (13-20-40): 131 built → 116 kept, the 15 dropped all in x [−1366, −37], y [−1826, 81], which is where pole 4 sits. Poles 1 and 4 lost about a third of their close-range waypoints. Raising `MAX_ATTEMPTS_PER_STEP` 200 → 1000 reduced the drop to 3 and restored balance. At 4000 the drop is 1–2 with ~167 positions, but the session grows to ~835 pings / 47 m for diminishing returns.
 
 ### 2026-08-09 — Per-distance error of the deployed heads: wall slices are better close in than the aggregate suggests, and the pole-range head saturates at ~740 mm
 
