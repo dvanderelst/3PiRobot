@@ -34,12 +34,13 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
 
   0. **DONE 2026-08-08.** Extended-horizon inverse landed: range head masked, verified, deployed (`67c68c0`), error model refitted. `SonarModel/inverse_deploy_*` is now the uncapped model; the 1 m predecessor is at `SonarModel_archive/2026-08-08_deploy1m/`.
   1. **DONE 2026-08-12. Acquisition06A collected — 640/640 pings, zero tracker misses.** The far-range hole is filled: beyond 1700 mm went from 11 pings to 272, and the training set now runs to 3196 mm instead of 1911. Full numbers in Performance notes 2026-08-12 (evening); arena and plan reasoning in the entry below it. **The `none`/true-silence question remains unsettled** — the arena tops out at ~3.2 m in-cone, so it supplies far-but-present and no silence.
-  1b. **Retrain the inverse on Acq01A–06A — the next thing to do.**
-     - **Archive `SonarModel/inverse_deploy_*` first**, including `inverse_feature_params.json` (`SonarModel/` is gitignored; only Dropbox preserves it, and training rewrites the shared params file — a `.pth` alone will not roll back). See the Model archive convention.
-     - **Change one thing at a time: add `Acquisition06A` to `ACQUISITION_SESSIONS` and touch nothing else.** Keep `FAR_LABEL_MODE="true_class"` and `POLE_DIST_TRAIN_MAX_MM=1000` as they are, so the retrain is attributable to the data. The class-agnostic range head (Code state 2026-08-09) is a *separate* step after this one, and it is now unblocked because the far bands finally have balanced examples.
-     - **Then refit `SonarModel/inverse_error_model.json`** — mandatory after any inverse retrain, since the simulator draws its perception from it.
-     - **Judge it on far-range calibration, not accuracy.** The top band is pole-heavy (2500+ is 25 wall / 41 pole), so the prior will lean pole, which is the same direction as the phantom failure. `EXPT_range_horizon.py` re-scores from saved `oof_*.npz` without retraining and reports ECE and the overconfidence gap per band.
-     - **`SCRIPT_CheckPoleSignal.py` will understate the far band on this data** — it reduces each ping by *global argmax*, which on a pole-with-wall-behind ping locks onto the wall. Restrict it to near range or window the features around the labelled range; do not read a weak result as "no far-pole signal".
+  1b. **DONE 2026-08-12. Inverse retrained on Acq01A–06A** (deploy + 4-fold CV), predecessor archived at `SonarModel_archive/2026-08-12_deploy_preacq06/`. Phantom largely fixed, far range better but not solved, 1400–1700 mm now the worst band anywhere. Numbers in Performance notes 2026-08-12 (late).
+     - ⚠️ **`SonarModel/inverse_error_model.json` is still the pre-Acq06 fit.** `SonarModel/` is internally inconsistent — **do not train any policy against the simulator until it is refitted** (`SCRIPT_FitInverseErrorModel.py`).
+     - **`SCRIPT_CheckPoleSignal.py` has not been run and would understate this data** — it reduces each ping by *global argmax*, which on a pole-with-wall-behind ping locks onto the wall. Restrict it to near range or window the features around the labelled range; do not read a weak result as "no far-pole signal".
+  1c. **Decide the next move on the inverse — three options, not yet chosen.**
+     - **(a) Refit the error model and deploy as-is.** It beats the archived model on the fair test and at close range, and behaves far better beyond 1700 mm. Sufficient for the Exp-1 re-run, whose pole approaches all happen well inside 1400 mm.
+     - **(b) Build the class-agnostic range head + three-way output first.** This is the design the 2026-08-09 note committed to, and the retrain has now *measured* the boundary it was guessing at: balanced accuracy 69.5% at 1000–1400, at chance from 1400 up, confidence still high. Emitting "detected, class unresolved, range x" above ~1400 mm is exactly the fix for the remaining failure.
+     - **(c) Investigate 1400–1700 first.** Below chance *with* high confidence is odd enough to be a fixable defect rather than a data limit. Leading hypothesis in the Performance-notes entry: it is the band where cluttered-arena and open-arena pings mix ~50/50, and off-cone clutter makes the same nominal range two different acoustic problems. Testable by fitting with Acq06A alone versus pooled.
   2. **Then re-run Experiment 1** on the new inverse (user's call 2026-08-08: cost is low and it should improve — first perception moves out from 798 mm and the 800–1000 mm blind ring goes away, and the paper avoids describing two differently-scoped inverses). **Re-running before Acquisition06 risks the phantom mechanism**, since Exp 1 wanders in an open arena and the current model asserts `pole` beyond ~1.5 m; the old model's pole precision there was 97.9%, which is the number to beat. Note the protocol constants: the runs used `APPROACH_STOP_MM=400` / `ALIGN_MIN_DETECTIONS=3`, while HEAD carries 500 and 6.
   3. **Then redraw the path.** `default_Path02_run02` completed **2.1 laps (110 steps)** with lap 2 tracking lap 1 to 116 mm, then **crashed at steps 116/117** near (-227, -1120). The cause is geometric, not control:
 
@@ -284,6 +285,34 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-08-12 (late) — Inverse retrained on Acq01A–06A: the phantom is largely fixed, far range is better but not solved, and 1400–1700 mm is now the worst band anywhere
+
+Commit at measurement `cb0545c`. `main_deploy()` then `main()` (4-fold quadrant CV), **config otherwise untouched** — only `Acquisition06A` was added to `ACQUISITION_SESSIONS`, so everything here is attributable to the data. 2775 pings, 930 beyond 1 m kept at true class, max 3196 mm. Predecessor archived at `SonarModel_archive/2026-08-12_deploy_preacq06/` (verified loadable, includes its error model as the "before" reference).
+
+- **Deploy model:** held-out class acc **79.2%** (n=418), in-sample 84.7%, pole-az RMSE 13.81°, wall RMSE R/C/L 257/372/314 mm, best epoch 59. **Do not compare 79.2% against the predecessor's 86.6%** — the held-out set now runs to 3.2 m where discrimination is genuinely harder, so the aggregate had to fall. Same trap as the 2026-08-08 entry's warning about 86.6 vs 83.9.
+- **CV:** class acc **81.6% ± 2.7%** (per-fold 84/79/85/79), wall prec/rec 87.4/83.0, pole prec/rec 72.8/79.0, pole-az 15.56° ± 0.75°, wall RMSE 293/312/325 mm.
+- **The controlled comparison is out-of-fold on Acq06A only** — new = CV OOF, old = fully unseen (it never saw any Acq06 data). The old model is in-sample on Acq01A–05A, so any table including those pings flatters it.
+
+  | band | n (wall/pole) | new acc / bal | old acc / bal | new wall rec | old wall rec |
+  |---|---|---|---|---|---|
+  | 0–500 | 65/33 | **85.7 / 78.8** | 81.6 / 72.7 | 100% | 100% |
+  | 500–1000 | 64/71 | **78.5 / 79.6** | 65.2 / 66.8 | 100% | 98.4% |
+  | 1000–1400 | 30/49 | 64.6 / **69.5** | 67.1 / 67.0 | **90.0%** | 66.7% |
+  | 1400–1700 | 37/30 | 38.8 / **37.7** | 49.3 / 54.1 | 48.6% | 8.1% |
+  | 1700–2000 | 51/34 | **58.8 / 60.8** | 40.0 / 50.0 | **51.0%** | **0.0%** |
+  | 2000–2500 | 57/53 | **56.4 / 57.6** | 48.2 / 50.0 | **22.8%** | **0.0%** |
+  | 2500+ | 25/41 | 48.5 / 39.0 | 62.1 / 50.0 | **0.0%** | **0.0%** |
+  | overall | 640 | **64.2 / 64.2** | 59.7 / 60.1 | | |
+
+- **The phantom is largely fixed.** The old model's wall recall is **exactly 0.0% in every band beyond 1700 mm** — it never says wall out there, and its 50.0% balanced accuracy in those bands is the arithmetic signature of always guessing one class. Its apparently respectable raw accuracy at range is entirely the class composition of the pings it was scored on. The new model recovers 51.0% / 22.8% wall recall at 1700–2500 and wins the fair test overall.
+- **Two bands went backwards, and the pattern is not monotonic in range.**
+  - **1400–1700 is the worst band anywhere: balanced accuracy 37.7%, below chance, with confidence 23 points ahead of accuracy.** Worse than the harder bands on either side. This is precisely the band where the two datasets mix ~50/50 (82 old-arena pings, 67 Acq06 ones); pooled, the model gets 55.0% there on old-session pings against 38.8% on Acq06 ones. Hypothesis worth testing: the same nominal range in a cluttered room and in an open one are different acoustic problems, and off-cone clutter is the confound.
+  - **2500+ has collapsed back to always-pole** (wall recall 0.0%), on 25 wall examples in the whole dataset at that range. Not enough data, not a model defect.
+- **Calibration improved where accuracy did** (500–1000 gap −4.4, 1700–2000 +0.9) and stayed bad where it did not (1400–1700 **+23.4**, 2500+ +11.7).
+- **A methodological correction worth remembering.** The first pass compared the two models on the deploy run's single 96-ping spatial holdout and concluded the new model was much *worse* at range (15/51 on far pings). That was 51 pings in one contiguous patch, and the CV reversed the sign. **One spatial holdout patch is not an estimate of far-range behaviour** — use the 4-fold OOF for any range-stratified claim.
+- **This locates the boundary the three-way output was designed around.** The 2026-08-09 note assumed a "detected, class unresolved, with a range" state was needed beyond *some* range. The data now measures it: balanced accuracy is 69.5% at 1000–1400 and at chance from 1400 up, while confidence stays high. Forcing a wall/pole call above ~1400 mm is what manufactures a confident wrong answer; that is where state 2 belongs.
+- **`SonarModel/inverse_error_model.json` is STILL THE PRE-ACQ06 FIT.** The deploy model was replaced but the error model was not refitted, so `SonarModel/` is internally inconsistent — **nothing may be trained against the simulator until it is refit.**
 
 ### 2026-08-12 (evening) — Acquisition06A collected: the far-range hole in the training set is filled
 
