@@ -82,6 +82,23 @@ def _pick_probs(rows, value):
                key=lambda r: min(abs(value - r["lo"]), abs(value - r["hi"])))["p_pred"]
 
 
+def _pick_samples(rows, value):
+    """The stored per-ping posteriors for the bin containing `value`.
+
+    Same nearest-bin fallback as `_pick_probs`, but the bins now span the full
+    data range, so the fallback is a genuine edge case rather than the routine
+    path it used to be for anything beyond 1 m.
+    """
+    usable = [r for r in rows if r.get("samples")]
+    if not usable:
+        return None
+    for r in usable:
+        if r["lo"] <= value < r["hi"]:
+            return r["samples"]
+    return min(usable,
+               key=lambda r: min(abs(value - r["lo"]), abs(value - r["hi"])))["samples"]
+
+
 class InverseErrorModel:
     """Turn the true local feature at a pose into what the inverse would report."""
 
@@ -126,20 +143,48 @@ class InverseErrorModel:
         if true_cls is None or not np.isfinite(true_range_mm):
             true_cls, true_range_mm = 2, self.max_range_mm * 1.5
 
-        # --- class, from the range-conditioned confusion -------------------
-        rows = self.t["class_confusion"][CLASS_NAMES[int(true_cls)]]
-        probs = _pick_probs(rows, float(true_range_mm))
-        if probs is None:
-            obs_cls = int(true_cls)
-            probs = [0.0, 0.0, 0.0]; probs[obs_cls] = 1.0
+        # --- class, from the range-conditioned posteriors -------------------
+        # Draw one of the model's ACTUAL per-ping posteriors for this (true
+        # class, range), then take its argmax as the reported label. Emitting
+        # the bin's mean confusion row instead -- what this did until
+        # 2026-08-12 -- gave the policy a constant that was a deterministic
+        # function of the true class, i.e. an oracle with no per-ping
+        # information. See POSTERIOR SAMPLING in SCRIPT_FitInverseErrorModel.
+        name = CLASS_NAMES[int(true_cls)]
+        samples = (_pick_samples(self.t["class_posterior"][name],
+                                 float(true_range_mm))
+                   if "class_posterior" in self.t else None)
+        if samples:
+            probs = list(samples[int(rng.integers(len(samples)))])
+            obs_cls = int(np.argmax(probs))
         else:
-            obs_cls = int(rng.choice(3, p=np.asarray(probs) / np.sum(probs)))
+            # Legacy table (no posterior samples): fall back to the old
+            # behaviour so an old error-model JSON still runs.
+            rows = self.t["class_confusion"][name]
+            probs = _pick_probs(rows, float(true_range_mm))
+            if probs is None:
+                obs_cls = int(true_cls)
+                probs = [0.0, 0.0, 0.0]; probs[obs_cls] = 1.0
+            else:
+                obs_cls = int(rng.choice(3, p=np.asarray(probs) / np.sum(probs)))
 
         out: Dict = {
             "class_label": obs_cls,
             "p_wall": float(probs[0]), "p_pole": float(probs[1]),
             "p_none": float(probs[2]),
         }
+
+        # --- class-agnostic nearest range, always emitted ------------------
+        # The deployed inverse emits agn_dist_mm on every ping regardless of
+        # class, so the simulator must too, or the observation encoder sees a
+        # key on the robot that it never saw in training.
+        agn_rows = self.t.get("agn_range")
+        if agn_rows:
+            b = _pick_bin(agn_rows, float(true_range_mm))
+            if b is not None and b.get("bias") is not None and b.get("sigma") is not None:
+                out["agn_dist_mm"] = float(max(
+                    true_range_mm + b["bias"] + rng.normal(0.0, b["sigma"]), 0.0))
+                out["agn_dist_sigma_mm"] = float(b.get("pred_sigma") or b["sigma"])
 
         # --- wall slices, always emitted (the real head does too) ----------
         for nm in SLICE_NAMES:

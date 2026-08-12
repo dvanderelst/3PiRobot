@@ -91,8 +91,23 @@ CLASS_NAMES = ["wall", "pole", "none"]
 # as 50%, when it is 66% in 800-900 and 26% in 900-1000. The simulator would
 # then have told the policy that poles stay half-detectable right up to the
 # horizon, which is where a path-following robot spends much of its time.
-IN_RANGE_EDGES  = [200., 350., 500., 600., 700., 800., 900., 1000.]
+# 2026-08-12: extended past 1000 mm. The edges used to stop at MAX_RANGE_MM,
+# which was harmless while FAR_LABEL_MODE="none" put everything beyond it in the
+# `none` class. Under "true_class" real walls and poles reach 3196 mm, and
+# `_pick_bin`/`_pick_probs` fall back to the NEAREST bin rather than failing --
+# so the simulator was classifying a wall at 2.5 m at the 900-1000 mm rate, i.e.
+# 89% correct at any range, against a measured 49-59%. It told the policy the
+# sonar sees clearly to the far wall. Fine resolution below 1000 is kept for the
+# reason in the note above; the new edges above it are as coarse as the counts
+# allow.
+IN_RANGE_EDGES  = [200., 350., 500., 600., 700., 800., 900., 1000.,
+                   1200., 1400., 1700., 2000., 2500., 1e9]
 OUT_RANGE_EDGES = [1000., 1100., 1200., 1400., 1700., 2000., 1e9]
+
+# How many per-ping posteriors to keep per (true class, range bin). The
+# simulator draws from these instead of from the bin's mean confusion row --
+# see POSTERIOR SAMPLING below.
+POSTERIOR_SAMPLE_MAX = 400
 
 # Wall slice bins, over true slice distance.
 WALL_EDGES = [0., 250., 500., 750., 1000., 1500., 2000., 1e9]
@@ -116,7 +131,10 @@ def _binned_residual(true_vals, resid, edges, min_n=MIN_BIN_N) -> List[dict]:
                       else float((lo + hi) / 2.0),
             "bias": float(resid[m].mean()) if n else None,
             "sigma": float(resid[m].std()) if n > 1 else None,
-            "thin": n < min_n,
+            # n == 1 gives a bias with no sigma, which neither the printers nor
+            # `observe()` can use. Mark it thin so it is visibly unusable rather
+            # than a None that surfaces as a TypeError later.
+            "thin": n < min_n or n < 2,
         })
     return out
 
@@ -134,6 +152,46 @@ def _confusion(true_cls, pred_cls, true_rng, cls_idx, edges) -> List[dict]:
     return out
 
 
+def _posterior_samples(true_cls, probs, true_rng, cls_idx, edges,
+                       rng, max_keep=POSTERIOR_SAMPLE_MAX) -> List[dict]:
+    """The model's actual per-ping class posteriors, per (true class, range bin).
+
+    POSTERIOR SAMPLING -- why this exists, and why the mean confusion row is not
+    enough. `_confusion` records P(predicted | true, range): one row per bin,
+    the same numbers for every ping in it. The simulator used to emit that row
+    as `p_wall`/`p_pole`, which had two consequences, both bad and pulling in
+    opposite directions.
+
+      1. It is a deterministic function of the TRUE class. Wall rows carry
+         p_pole 0.013-0.109 and pole rows 0.727-0.923 -- disjoint -- so the
+         probability vector identified the truth exactly, even on the pings
+         where the sampled class label was wrong. That is an oracle channel
+         into a policy that reads p_wall/p_pole directly.
+      2. It carries no PER-PING information. On the real robot p_pole varies
+         ping to ping and predicts correctness (p >= 0.9 is 97.9% accurate,
+         p < 0.7 marks the ambiguous ones). A policy trained on a constant
+         never learns to use that, then meets it on the robot.
+
+    Keeping the empirical posteriors and drawing one per observation fixes
+    both: the draw carries realistic per-ping variation, and because the wall
+    and pole distributions genuinely overlap at range, it stops being
+    invertible exactly where the real model stops being certain.
+    """
+    out = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (true_cls == cls_idx) & (true_rng >= lo) & (true_rng < hi)
+        idx = np.where(m)[0]
+        n = int(len(idx))
+        if n > max_keep:
+            idx = rng.choice(idx, size=max_keep, replace=False)
+        out.append({
+            "lo": float(lo), "hi": float(hi), "n": n,
+            "samples": [[float(x) for x in probs[i]] for i in idx],
+            "thin": n < MIN_BIN_N,
+        })
+    return out
+
+
 def main() -> None:
     print(f"Loading acquisition echoes (same filter as the trainer)…")
     sonar, slice_t, classes, pole_az, pole_dist, quads, sess, bin_centers = \
@@ -145,6 +203,14 @@ def main() -> None:
                          "for the pole channels. Retrain with pole_dist_head=True.")
     pred = inv.predict_from_envelope(sonar[..., 0], sonar[..., 1])
     pred_cls = np.asarray(pred["class_label"])
+    # Full posterior per ping, in CLASS_NAMES order, for the sampling tables.
+    n_ping = len(pred_cls)
+    pred_probs = np.column_stack([
+        np.asarray(pred.get("p_wall", np.zeros(n_ping))),
+        np.asarray(pred.get("p_pole", np.zeros(n_ping))),
+        np.asarray(pred.get("p_none", np.zeros(n_ping))),
+    ])
+    fit_rng = np.random.default_rng(0)
 
     # Truth for conditioning: distance to whichever reflector won the cone.
     # For pole-class echoes that is the pole surface; for wall-class it is the
@@ -183,10 +249,11 @@ def main() -> None:
         model["wall_slices"][nm] = bins
         print(f"  {nm}:")
         for b in bins:
-            if not b["n"]:
+            if not b["n"] or b["sigma"] is None:
                 continue
             flag = "  <-- thin" if b["thin"] else ""
-            print(f"    {b['lo']:6.0f}-{b['hi'] if b['hi']<1e8 else float('inf'):>6} "
+            hi = "inf" if b["hi"] > 1e8 else f"{b['hi']:.0f}"
+            print(f"    {b['lo']:6.0f}-{hi:>6} "
                   f"n={b['n']:4d}  bias {b['bias']:+7.0f}  sigma {b['sigma']:6.0f}{flag}")
 
     # ── class confusion ──────────────────────────────────────────────────────
@@ -196,6 +263,8 @@ def main() -> None:
         edges = OUT_RANGE_EDGES if nm == "none" else IN_RANGE_EDGES
         rows = _confusion(classes, pred_cls, true_rng, ci, edges)
         model["class_confusion"][nm] = rows
+        model.setdefault("class_posterior", {})[nm] = _posterior_samples(
+            classes, pred_probs, true_rng, ci, edges, fit_rng)
         print(f"  true={nm}:")
         for b in rows:
             if not b["n"]:
@@ -218,11 +287,42 @@ def main() -> None:
                               ("range", model["pole_range"], "mm")):
         print(f"  {label}:")
         for b in bins:
-            if not b["n"]:
+            if not b["n"] or b["sigma"] is None:
                 continue
             flag = "  <-- thin" if b["thin"] else ""
-            print(f"    {b['lo']:6.0f}-{b['hi']:6.0f} n={b['n']:4d}  "
+            hi = "inf" if b["hi"] > 1e8 else f"{b['hi']:.0f}"
+            print(f"    {b['lo']:6.0f}-{hi:>6} n={b['n']:4d}  "
                   f"bias {b['bias']:+7.1f} {unit}  sigma {b['sigma']:6.1f} {unit}{flag}")
+
+    # ── class-agnostic nearest-reflector range ───────────────────────────────
+    # Emitted for EVERY observation, unlike the pole range channel, because the
+    # head is trained on every ping. Conditioned on the same true_rng the class
+    # confusion uses, so the two stay consistent.
+    if pred.get("agn_dist_mm") is not None:
+        agn = np.asarray(pred["agn_dist_mm"], dtype=np.float64)
+        agn_sig = np.asarray(pred.get("agn_dist_sigma_mm",
+                                      np.full(len(agn), np.nan)), dtype=np.float64)
+        ok_a = np.isfinite(true_rng) & np.isfinite(agn)
+        bins = _binned_residual(true_rng[ok_a], (agn - true_rng)[ok_a],
+                                IN_RANGE_EDGES)
+        # carry the head's own reported sigma so the simulator can emit a
+        # plausible agn_dist_sigma_mm rather than reusing the residual spread
+        for b in bins:
+            m = (true_rng >= b["lo"]) & (true_rng < b["hi"]) & ok_a
+            b["pred_sigma"] = (float(np.nanmedian(agn_sig[m]))
+                               if m.any() and np.isfinite(agn_sig[m]).any() else None)
+        model["agn_range"] = bins
+        print("\n=== class-agnostic nearest-range residuals, by true range ===")
+        for b in bins:
+            if not b["n"] or b["sigma"] is None:
+                continue
+            flag = "  <-- thin" if b["thin"] else ""
+            hi = "inf" if b["hi"] > 1e8 else f"{b['hi']:.0f}"
+            print(f"    {b['lo']:6.0f}-{hi:>6} n={b['n']:4d}  "
+                  f"bias {b['bias']:+7.0f}  sigma {b['sigma']:6.0f}{flag}")
+    else:
+        model["agn_range"] = None
+        print("\n  (inverse has no class-agnostic range head; agn_range omitted)")
 
     # ── phantom poles ────────────────────────────────────────────────────────
     ph = (classes != 1) & (pred_cls == 1)
