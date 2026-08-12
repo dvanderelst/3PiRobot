@@ -286,6 +286,31 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-08-12 — Robot recalibration before Acquisition06: small-angle over-rotation gone, large-angle under-rotation new, drive constants moved a lot
+
+`SCRIPT_CalibrateRobot.py`, both phases, 5 reps per angle, `DRIVE_MM=150` × **`DRIVE_REPEATS=15`** (was 10 on 2026-08-07). Raw per-angle samples preserved in `Library/RobotCalibration/Robot01_calibration.json`. Constants live in `Library/Settings.py` (uncommitted user WIP, as always). Compare against the 2026-08-07 (evening) entry.
+
+| cmd | new median | error | sd (5 reps) | 2026-08-07 | 2026-06-08 |
+|---|---|---|---|---|---|
+| −40 | −36.67 | **+3.33** | 1.19 | −40.01 | −39.80 |
+| −30 | −31.67 | −1.67 | 1.72 | −29.91 | −29.79 |
+| −20 | −20.93 | −0.93 | 1.29 | −18.74 | −20.79 |
+| −10 | −11.94 | −1.94 | 0.81 | −11.19 | −10.92 |
+| −5 | −5.47 | −0.47 | 0.81 | −6.69 | −5.13 |
+| +5 | +4.75 | −0.25 | 0.41 | **+6.98** | +5.14 |
+| +10 | +11.23 | +1.23 | 0.78 | +11.19 | +10.65 |
+| +20 | +20.33 | +0.33 | 0.64 | +20.55 | +19.62 |
+| +30 | +28.51 | −1.49 | 1.04 | +28.98 | +28.18 |
+| +40 | +37.18 | **−2.82** | 1.34 | +38.74 | +38.80 |
+
+- **Drive:** curl **−0.02609** deg/mm (was −0.01244, before that −0.01993), scale **1.0036** (was 0.9807, before that 0.9873).
+- **The fresh-battery small-angle over-rotation has reverted.** 2026-08-07 measured ±5 → +6.98/−6.69 with fresh batteries and read it as a real effect; it is now +4.75/−5.47, i.e. back to the 2026-06-08 behaviour. That supports the battery-state explanation rather than motor wear.
+- **New and in the opposite direction: ±40 now under-rotates by ~3°**, in both directions, where both previous tables were accurate there. At −40 the error exceeds the per-angle sd. Large rotations falling short while small ones are fine is what one would expect from less available torque.
+- **Most of the rest is noise.** Mean |error| across the table is 1.45° against a mean per-angle sd of 1.00° on 5 reps (ranges up to 5°). The ±5, ±20 and −30 entries are within one sd of zero error — do not read them as real effects. **−30 is repeatedly the flakiest entry**: sd 1.72 and a 4.97° range here (samples −27.73, −30.80, −31.86, −31.67, −32.70), and the 2026-08-07 run also flagged −30 with a wild rep. The +5 cell has only 4 samples; one rep was lost, presumably a tracker miss.
+- **The two drive constants moved a lot in five days and do not share one story.** Curl doubled, and the scale crossed 1.0 for the first time on record (history 0.992 → 0.9972 → 0.9873 → 0.9807 → 1.0036). 2026-08-07 attributed its low scale partly to voltage sag over the drive phase (chords 149.5 → 143.9 mm across 10 reps); today ran **15** reps, i.e. more continuous driving, which should sag further and push the scale *down*, yet it rose 2.3%. Both values sit inside the historical range (curl has spanned −0.0124 to −0.0369), so nothing is implausible — but this is not a settled measurement.
+- **Bearing on the 2026-08-07 unresolved discrepancy:** run02 implied an in-run curl of −0.0177 against −0.0124 measured in consecutive straight drives. The measured value is now −0.0261, which *exceeds* the run02-implied figure, so the sign of the gap has flipped. That weakens the "calibration protocol does not match deployment" hypothesis as a systematic effect and favours plain between-session variability in curl.
+- **Fit for Acquisition06, not yet fit for a deploy.** Acquisition labels come from `executed_pose` (tracker at ping time), so drive error costs waypoint accuracy and nothing else — these constants are good enough to run the session. **Re-measure before the Exp-1 re-run and before any Exp-2 policy deploy**, where the drive model does feed the result; if curl comes back near −0.0124 then −0.0261 was the outlier.
+
 ### 2026-08-12 — Acquisition06 arena and plan: the far-range gap is closed by geometry, and a 25 mm dowel does echo at 2.85 m
 
 Offline geometry plus one bench measurement; no session run yet. Commit at measurement `28b7692`. **`AcquisitionArenas/` is gitignored, so the arena and plan artifacts these numbers describe exist only in Dropbox** — hence the detail here.
