@@ -12,6 +12,10 @@ feasible (x, y) waypoints subject to:
   - neighbour spacing:  each new waypoint >= MIN_NEIGHBOR_MM from every prior
                         waypoint (spreads coverage)
 
+Headings at each waypoint follow YAW_MODE (see the settings block). Positions
+never depend on it, so building twice at one pinned SEED under the two modes
+isolates the effect of the heading choice.
+
 Writes plan_<timestamp>.json (full spec) and plan_<timestamp>.png (diagnostic
 plot) into AcquisitionArenas/<ARENA_NAME>/plans/. Run multiple times and
 compare plots until you like the look — the run script consumes a saved plan
@@ -44,6 +48,18 @@ MAX_ATTEMPTS_PER_STEP  = 200       # safety cap on rejection sampling per step
 REORDER_TOUR           = True      # post-hoc nearest-neighbour TSP to cut drive time
 SEED                   = None      # int for reproducibility; None = wall-clock
 
+# How the per-position headings are chosen. "uniform" spaces them 360/n apart
+# from a random offset, which is geometry-blind: the range distribution the
+# session collects is whatever the arena happens to offer. "far_biased" aims
+# N_FAR_YAWS of them down the longest available sight lines and the rest at
+# the nearest reflectors, reallocating pings out of the mid-range band that
+# earlier sessions already cover densely. Positions are unaffected, so two
+# plans built at the same SEED in the two modes differ only in their yaws.
+YAW_MODE               = "uniform"       # "uniform" | "far_biased"
+N_FAR_YAWS             = 3         # far-looking yaws per position (far_biased)
+CONE_HALF_DEG          = 35.0      # must match the inverse model's slice cone
+YAW_MIN_SEP_DEG        = 40.0      # min angular separation between chosen yaws
+
 
 def _resolve(path_str: str) -> Path:
     p = Path(path_str)
@@ -66,8 +82,11 @@ def main():
           f"y=[{b['min_y']:.0f}, {b['max_y']:.0f}] mm")
 
     seed = SEED if SEED is not None else int(time.time())
+    yaw_desc = (f"{YAW_MODE} ({N_FAR_YAWS} far)"
+                if YAW_MODE == "far_biased" else YAW_MODE)
     print(f"\nBuilding plan (seed={seed}, K={TARGET_K}, "
-          f"n_yaws={N_YAWS}, clearance={CLEARANCE_MM:.0f} mm, "
+          f"n_yaws={N_YAWS}, yaws={yaw_desc}, "
+          f"clearance={CLEARANCE_MM:.0f} mm, "
           f"min_step={MIN_STEP_MM:.0f} mm, "
           f"min_neighbor={MIN_NEIGHBOR_MM:.0f} mm)...")
 
@@ -82,6 +101,10 @@ def main():
         arena_name=ARENA_NAME,
         arena_dir=str(arena_dir),
         seed=seed,
+        yaw_mode=YAW_MODE,
+        n_far_yaws=N_FAR_YAWS,
+        cone_half_deg=CONE_HALF_DEG,
+        yaw_min_sep_deg=YAW_MIN_SEP_DEG,
     )
 
     n_pos = len(plan.positions)

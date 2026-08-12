@@ -11,10 +11,21 @@ Each new waypoint must satisfy:
 Constraint #3 is what lets `TrackerNav.go_to_pose` drive the leg open-loop
 without obstacle planning — every segment is feasible by construction.
 
-At each waypoint the robot will ping at `n_yaws` orientations, uniformly
-spaced 360°/n_yaws apart starting from a per-position random offset. The
-yaws are baked into the plan at build time so a saved plan is a complete
-spec of the run.
+At each waypoint the robot will ping at `n_yaws` orientations. Two selection
+modes, set by `yaw_mode`:
+
+  "uniform"     — spaced 360°/n_yaws apart from a per-position random offset.
+                  Geometry-blind, so the range distribution the session
+                  collects is whatever the arena happens to offer.
+  "far_biased"  — `n_far` headings whose ±cone looks furthest, plus the
+                  remainder aimed at the *nearest* reflectors, both greedy
+                  under a minimum angular separation. Reallocates pings from
+                  mid-range (already densely covered by earlier sessions) to
+                  the long-range regime, at identical position count and
+                  route length.
+
+Either way the yaws are baked into the plan at build time, so a saved plan is
+a complete spec of the run.
 """
 
 import json
@@ -138,6 +149,11 @@ class AcquisitionPlan:
     min_step_mm: float
     min_neighbor_mm: float                  # min distance to ANY prior waypoint
     seed: int
+    # Defaulted so `load_plan` still reads plans written before yaw modes
+    # existed; absent keys mean the old uniform behaviour.
+    yaw_mode: str = "uniform"
+    n_far_yaws: Optional[int] = None        # far-looking yaws per position
+                                            # ("far_biased" only)
 
 
 def save_plan(plan: AcquisitionPlan, path):
@@ -194,6 +210,105 @@ def yaw_set(n_yaws: int, rng) -> List[float]:
     return yaws
 
 
+def _angular_separation(a_deg: float, b_deg: float) -> float:
+    """Smallest absolute angle (deg) between two headings."""
+    return abs(((a_deg - b_deg) + 180.0) % 360.0 - 180.0)
+
+
+def cone_ranges(position, headings_deg, walls, poles, pole_radius_mm: float,
+                cone_half_deg: float) -> np.ndarray:
+    """Range (mm) to the nearest reflector inside the ±cone, per heading.
+
+    Deliberately mirrors `AcquisitionSessionLoader.nearest_reflector_in_cone`:
+    walls are their point cloud, poles are centres with the range taken to the
+    *surface* (centre distance − radius), and cone membership uses the centre
+    angle for both. The point of this function is to predict the label the
+    loader will later attach to each ping, so the two must agree; if that
+    function's conventions change, change these with it.
+
+    Returns `inf` for headings whose cone contains nothing at all.
+    """
+    px, py = float(position[0]), float(position[1])
+    headings = np.asarray(headings_deg, dtype=np.float64)
+    out = np.full(headings.shape, np.inf, dtype=np.float64)
+
+    for pts, shrink in ((walls, 0.0), (poles, pole_radius_mm)):
+        pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+        if pts.size == 0:
+            continue
+        dx = pts[:, 0] - px
+        dy = pts[:, 1] - py
+        bearing = np.degrees(np.arctan2(dy, dx))    # world frame
+        dist = np.hypot(dx, dy)
+        for i, h in enumerate(headings):
+            rel = ((bearing - h) + 180.0) % 360.0 - 180.0
+            in_cone = np.abs(rel) <= cone_half_deg
+            if in_cone.any():
+                out[i] = min(out[i], float(dist[in_cone].min()) - shrink)
+    return out
+
+
+def yaw_set_far_biased(n_yaws: int, n_far: int, position,
+                       walls, poles, pole_radius_mm: float,
+                       cone_half_deg: float = 35.0,
+                       min_sep_deg: float = 40.0,
+                       sweep_step_deg: float = 5.0) -> List[float]:
+    """Yaws chosen from arena geometry: `n_far` longest looks, rest shortest.
+
+    Uniform yaws spend pings in proportion to what the arena offers, which in
+    an open arena means most of them land at ranges earlier sessions already
+    cover densely. This picks the `n_far` headings with the greatest
+    nearest-in-cone range, then fills the remainder from the *shortest* looks
+    so close-range coverage is kept deliberately rather than by accident.
+
+    Both passes are greedy under `min_sep_deg`, so the chosen headings cannot
+    collapse onto one direction; the separation is relaxed only if it makes
+    the request unsatisfiable. Takes no RNG — the result is a deterministic
+    function of the position and the arena.
+
+    Falls back to `n_yaws` evenly spaced headings if no cone contains anything
+    (a position outside the annotated arena, which the clearance test alone
+    does not exclude).
+    """
+    n_far = int(np.clip(n_far, 0, n_yaws))
+    headings = np.arange(-180.0, 180.0, sweep_step_deg)
+    ranges = cone_ranges(position, headings, walls, poles,
+                         pole_radius_mm, cone_half_deg)
+
+    if not np.isfinite(ranges).any():
+        return [((i * 360.0 / n_yaws) + 180.0) % 360.0 - 180.0
+                for i in range(n_yaws)]
+
+    # Unreachable headings must never win the "shortest look" pass.
+    finite = np.where(np.isfinite(ranges), ranges, -np.inf)
+    chosen: List[int] = []
+
+    def take(order, count):
+        for i in order:
+            if len(chosen) >= count:
+                break
+            if finite[i] == -np.inf:
+                continue
+            if all(_angular_separation(headings[i], headings[j]) >= min_sep_deg
+                   for j in chosen):
+                chosen.append(int(i))
+
+    take(np.argsort(-finite), n_far)                    # longest looks
+    take(np.argsort(np.where(finite == -np.inf, np.inf, finite)), n_yaws)
+
+    # Separation too strict for this geometry: fill without it rather than
+    # return a short list, which would silently shrink the plan.
+    if len(chosen) < n_yaws:
+        for i in np.argsort(-finite):
+            if len(chosen) >= n_yaws:
+                break
+            if int(i) not in chosen:
+                chosen.append(int(i))
+
+    # Ascending order so the robot sweeps monotonically through the set.
+    return sorted(float(headings[i]) for i in chosen[:n_yaws])
+
+
 # ─── Plan construction ───────────────────────────────────────────────────────
 
 def _find_feasible_start(walls, poles, pole_clearance_mm, arena_path,
@@ -222,7 +337,11 @@ def build_plan(arena,
                n_yaws: int,
                arena_name: str,
                arena_dir,
-               seed: int) -> AcquisitionPlan:
+               seed: int,
+               yaw_mode: str = "uniform",
+               n_far_yaws: Optional[int] = None,
+               cone_half_deg: float = 35.0,
+               yaw_min_sep_deg: float = 40.0) -> AcquisitionPlan:
     """Iteratively grow a tour of feasible waypoints.
 
     `min_step_mm` constrains *consecutive* waypoints; `min_neighbor_mm`
@@ -230,11 +349,29 @@ def build_plan(arena,
     spreads samples uniformly. Set `min_neighbor_mm = 0` to disable the
     neighbor check (reverts to the old behaviour).
 
+    `yaw_mode` selects how the per-position headings are chosen; see the module
+    docstring. "far_biased" changes only the yaws, never the positions, so two
+    plans built at the same seed in the two modes are directly comparable.
+
     Returns a plan with up to `target_k + 1` positions (start + target_k more),
     or fewer if the tour terminates early when no feasible next step is found
     within `max_attempts_per_step` candidates.
     """
-    rng = np.random.default_rng(seed)
+    if yaw_mode not in ("uniform", "far_biased"):
+        raise ValueError(f"unknown yaw_mode {yaw_mode!r}; "
+                         f"expected 'uniform' or 'far_biased'")
+    if n_far_yaws is None:
+        n_far_yaws = max(1, n_yaws - 2)
+
+    # Positions and yaws draw from *separate* streams. They shared one RNG
+    # until yaw modes existed, which meant any change to yaw selection shifted
+    # the position stream and silently produced a different tour — making the
+    # two modes incomparable. Splitting costs byte-reproducibility of plans
+    # built before this change; the saved plan JSONs are the record, so that
+    # is a fair trade.
+    pos_seed, yaw_seed = np.random.SeedSequence(seed).spawn(2)
+    rng = np.random.default_rng(pos_seed)
+    rng_yaw = np.random.default_rng(yaw_seed)
     walls = arena["walls"]
     poles = arena.get("poles", np.empty((0, 2), dtype=np.float32))
     pole_radius_mm = float(arena.get("pole_radius_mm", 0.0))
@@ -246,10 +383,17 @@ def build_plan(arena,
                   "min_step": 0, "min_neighbor": 0,
                   "segment_clearance": 0, "pole_segment": 0}
 
+    def yaws_for(position) -> List[float]:
+        if yaw_mode == "far_biased":
+            return yaw_set_far_biased(
+                n_yaws, n_far_yaws, position, walls, poles, pole_radius_mm,
+                cone_half_deg=cone_half_deg, min_sep_deg=yaw_min_sep_deg)
+        return yaw_set(n_yaws, rng_yaw)
+
     start = _find_feasible_start(walls, poles, pole_clearance_mm,
                                  arena_path, clearance_mm, rng)
     positions: List[np.ndarray] = [start]
-    yaws: List[List[float]] = [yaw_set(n_yaws, rng)]
+    yaws: List[List[float]] = [yaws_for(start)]
 
     for _ in range(target_k):
         added = False
@@ -277,7 +421,7 @@ def build_plan(arena,
                 rejections["pole_segment"] += 1
                 continue
             positions.append(cand)
-            yaws.append(yaw_set(n_yaws, rng))
+            yaws.append(yaws_for(cand))
             added = True
             break
         if not added:
@@ -303,6 +447,8 @@ def build_plan(arena,
         min_step_mm=min_step_mm,
         min_neighbor_mm=min_neighbor_mm,
         seed=int(seed),
+        yaw_mode=yaw_mode,
+        n_far_yaws=int(n_far_yaws) if yaw_mode == "far_biased" else None,
     )
 
 
@@ -520,6 +666,8 @@ def reorder_tour(plan: AcquisitionPlan, arena) -> AcquisitionPlan:
         min_step_mm=plan.min_step_mm,
         min_neighbor_mm=plan.min_neighbor_mm,
         seed=plan.seed,
+        yaw_mode=plan.yaw_mode,
+        n_far_yaws=plan.n_far_yaws,
     )
 
 
@@ -528,10 +676,12 @@ def reorder_tour(plan: AcquisitionPlan, arena) -> AcquisitionPlan:
 def plot_diagnostics(plan: AcquisitionPlan, arena, out_path) -> None:
     """Four-panel diagnostic figure.
 
-    Panel 1 (polar): histogram of all yaws across the plan. With per-position
-        random offset and uniform spacing, this should look close to uniform
-        on the circle; a clear modal direction means the offset randomisation
-        isn't doing what we expect.
+    Panel 1 (polar): histogram of all yaws across the plan. Under
+        `yaw_mode="uniform"` this should look close to uniform on the circle;
+        a clear modal direction means the offset randomisation isn't doing
+        what we expect. Under `"far_biased"` the reading inverts — headings
+        are aimed down the arena's long sight lines, so modes are expected and
+        their absence would be the anomaly.
     Panel 2: histogram of per-waypoint min-wall-distance. The clearance is
         marked. Tells us how close-wall-heavy the plan actually is.
     Panel 3: histogram of per-waypoint nearest-neighbor distance. Quantifies
