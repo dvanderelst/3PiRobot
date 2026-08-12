@@ -42,7 +42,7 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
      - **Design summary to build against:** inside ~1.4 m the full local feature works (class, wall profile, pole azimuth + range). Beyond it the only honest outputs are the agnostic range and a blurry wall profile (300 mm RMSE at 1500–2000), with p(pole) telling the controller which regime it is in.
 
   1d. **Then, in order, to finish Experiment 2.**
-     1. **Fold the class-agnostic range head into `SCRIPT_TrainInverseModel.py`** properly (it exists only as a scratchpad monkeypatch), retrain, and add its channel to `Library/Policy.py`'s observation layout.
+     1. **DONE 2026-08-12 (`8a3936a`).** Class-agnostic range head folded into the trainer, retrained, deploy + CV artifacts written. See Code state. **Still to do from this item: add its channel to `Library/Policy.py`'s observation layout — and emit `agn_dist_mm` from `InverseErrorModel.observe()` in the SAME change**, or the simulator and robot silently disagree.
      2. **Fix and refit the error model.** Two defects beyond staleness, both flattering the simulator exactly where Exp 2 lives. (a) The fitted confusion bins stop at 1000 mm and `_pick_probs` falls back to the *nearest* bin, so a wall at 2.5 m is classified at the 900–1000 mm rate — **89% correct at any range**, against a real 49–59%. (b) `p_wall`/`p_pole` are the population rates for the *true* class, identical for every ping in a bin and disjoint between classes (wall rows 0.013–0.109, pole rows 0.727–0.923) — **an oracle channel straight into the RNN**, where the real p is a per-ping posterior. Fix: extend the bins to the data span, and draw p from the empirical distribution of out-of-fold `p_pole` conditioned on true class and range. run02 likely transferred despite this because it mostly dead-reckoned; a path routed for better perception will lean on the channel harder.
      3. **Redraw the path** at ~350 mm min clearance **against a 1400 mm horizon** — measured: nothing beyond 1400 adds anything (Path01 E[correct] 71.9% at 1400 vs 77.2% at 2500, and flat from 1400 on the confident measure). Route so the forward cone usually holds something within ~1.4 m, preferring under 1 m where it is cheap; that is a different constraint from clearance, which is omnidirectional. Measure with `SCRIPT_AnalysePathRun.py` and `EXPT_gaze_path.py` before training.
      4. **Add the additive rotation bias to the training motion model** (item 6 below) — the robot sheds ~1.1°/step regardless of commanded angle and the multiplicative gain cannot emulate it.
@@ -174,6 +174,16 @@ The inverse has trained successfully under the canonical close-range setup (see 
 
 *Last updated: 2026-08-12.*
 *Current branch for ongoing work: `direct-learning-poletask`.*
+
+### Class-agnostic range head added to the inverse (2026-08-12)
+
+Commit `8a3936a`. The single adopted outcome of the design experiments in Performance notes 2026-08-12 (night). Predecessors archived at `SonarModel_archive/2026-08-12_deploy_preacq06/` (pre-Acq06) and `2026-08-12_deploy_acq06_noagn/` (Acq06 data, no agnostic head — **the model every number in that Performance-notes entry was computed on**).
+
+- **Two range heads now, answering different questions.** `pole_dist_*` stays masked to pole-class pings within 1 m: the terminal approach stop fires on it and needs an unbiased close-range estimate. `agn_dist_*` trains on every ping at every range and answers "how far is the nearest thing, whatever it is" — a time-of-flight question needing no classification.
+- **Out-of-fold, it does not saturate**: predicted mean 450 / 758 / 1062 / 1338 / 1813 / 2157 / 2524 mm across the bands, RMSE 141–401 mm, 12.6–13.7% of range beyond 2 m, z_std 0.85–1.70. Equal for both classes at range (wall 340, pole 303 mm beyond 2000). Deploy split: RMSE **225 mm** against a 546 mm constant-mean baseline.
+- **It costs about 2 points of class accuracy** — CV 79.5% ± 2.0% against 81.6% ± 2.7%, every fold same-or-lower, so a real multi-task cost rather than noise. `LOSS_W_AGN_DIST` is the knob. Accepted because class is at chance past 1.4 m regardless.
+- **Backwards compatible.** The head is off by default and gated on `architecture.wall3_agn_dist` in `feature_params`; all three deploy-era archives verified still loadable with `agn_dist_divisor` None. `predict_from_envelope` emits `agn_dist_mm` / `agn_dist_sigma_mm` only when the head exists, so callers must check membership as they already do for `pole_dist_mm`.
+- ⚠️ **Landmine for the next step: `InverseErrorModel.observe()` does NOT emit `agn_dist_mm`.** The moment `Library/Policy.py` adds the channel, the simulator and the robot will disagree — the same shape of fault as the `p_wall` bug of 2026-08-07, which was silent because `encode_obs` reads with a `.get(..., 0.0)` default. **Add the key to the error model in the same change that adds the observation channel.**
 
 ### Geometry-aware yaw selection in the acquisition planner (2026-08-12)
 
