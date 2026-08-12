@@ -305,7 +305,7 @@ class SonarSlicesUQ_Wall3(nn.Module):
 
     def __init__(self, samples, conv_channels, conv_kernel, pool_out,
                  fc_hidden, head_hidden, n_classes: int = 2, symmetric: bool = True,
-                 pole_dist_head: bool = False):
+                 pole_dist_head: bool = False, agn_dist_head: bool = False):
         super().__init__()
         layers = []
         in_ch = 1
@@ -337,6 +337,18 @@ class SonarSlicesUQ_Wall3(nn.Module):
         if pole_dist_head:
             self.pole_dist_mean_head = make_head(2 * fc_hidden, head_hidden)
             self.pole_dist_log_var_head = make_head(2 * fc_hidden, head_hidden)
+        # Class-AGNOSTIC nearest-reflector range head. Separate from the pole
+        # range head on purpose: that one is masked to poles within 1 m and is
+        # the terminal-stop signal, which needs an unbiased close-range
+        # estimate. This one trains on every ping at every range and answers
+        # "how far is the nearest thing, whatever it is" — a pure
+        # time-of-flight question that needs no classification, and so stays
+        # accurate well past where wall-vs-pole discrimination collapses.
+        # Optional, like the pole head, so earlier checkpoints still load.
+        self.agn_dist_head = agn_dist_head
+        if agn_dist_head:
+            self.agn_dist_mean_head = make_head(2 * fc_hidden, head_hidden)
+            self.agn_dist_log_var_head = make_head(2 * fc_hidden, head_hidden)
         self.n_classes = n_classes
         self.symmetric = symmetric
 
@@ -377,6 +389,12 @@ class SonarSlicesUQ_Wall3(nn.Module):
                                         + self.pole_dist_mean_head(RL))
                 pole_dist_log_var = 0.5 * (self.pole_dist_log_var_head(LR)
                                            + self.pole_dist_log_var_head(RL))
+            if self.agn_dist_head:
+                # Mirror-invariant for the same reason as the pole range head.
+                agn_dist_mean = 0.5 * (self.agn_dist_mean_head(LR)
+                                       + self.agn_dist_mean_head(RL))
+                agn_dist_log_var = 0.5 * (self.agn_dist_log_var_head(LR)
+                                          + self.agn_dist_log_var_head(RL))
         else:
             m, v = self.wall_mean_head(LR), self.wall_log_var_head(LR)
             left_mean, center_mean, right_mean = col(m, 0), col(m, 1), col(m, 2)
@@ -387,6 +405,9 @@ class SonarSlicesUQ_Wall3(nn.Module):
             if self.pole_dist_head:
                 pole_dist_mean = self.pole_dist_mean_head(LR)
                 pole_dist_log_var = self.pole_dist_log_var_head(LR)
+            if self.agn_dist_head:
+                agn_dist_mean = self.agn_dist_mean_head(LR)
+                agn_dist_log_var = self.agn_dist_log_var_head(LR)
 
         out = {
             "right_mean": right_mean, "right_log_var": right_log_var,
@@ -399,6 +420,9 @@ class SonarSlicesUQ_Wall3(nn.Module):
         if self.pole_dist_head:
             out["pole_dist_mean"] = pole_dist_mean
             out["pole_dist_log_var"] = pole_dist_log_var
+        if self.agn_dist_head:
+            out["agn_dist_mean"] = agn_dist_mean
+            out["agn_dist_log_var"] = agn_dist_log_var
         return out
 
 
@@ -702,6 +726,9 @@ class InverseModel:
         # None for models without the pole-range head.
         _pd = params.get("pole_dist_norm")
         self.pole_dist_divisor = float(_pd["divide_by_mm"]) if _pd else None
+        # None for models without the class-agnostic nearest-range head.
+        _ad = params.get("agn_dist_norm")
+        self.agn_dist_divisor = float(_ad["divide_by_mm"]) if _ad else None
         self.class_names     = list(params.get("class_names", ["wall", "pole"]))
         self._lv_min, self._lv_max = params["log_var_clamp"]
 
@@ -753,6 +780,7 @@ class InverseModel:
                 **common,
                 symmetric=bool(arch.get("wall3_symmetric", True)),
                 pole_dist_head=bool(arch.get("wall3_pole_dist", False)),
+                agn_dist_head=bool(arch.get("wall3_agn_dist", False)),
             )
         elif model_class == "SonarSlicesUQ_TwoHeaded":
             model = SonarSlicesUQ_TwoHeaded(**common)
@@ -850,6 +878,17 @@ class InverseModel:
                             self._lv_min, self._lv_max)
             result["pole_dist_mm"]       = d_n * self.pole_dist_divisor
             result["pole_dist_sigma_mm"] = np.exp(d_lvn / 2.0) * self.pole_dist_divisor
+
+        # Class-agnostic nearest-reflector range. Unlike pole_dist_mm this is
+        # meaningful whatever the class posterior says -- it is the one output
+        # that stays accurate past ~1.4 m, where class and azimuth are at
+        # chance. Present only for models trained with the head.
+        if "agn_dist_mean" in out and self.agn_dist_divisor is not None:
+            a_n   = out["agn_dist_mean"].cpu().squeeze(1).numpy()
+            a_lvn = np.clip(out["agn_dist_log_var"].cpu().squeeze(1).numpy(),
+                            self._lv_min, self._lv_max)
+            result["agn_dist_mm"]       = a_n * self.agn_dist_divisor
+            result["agn_dist_sigma_mm"] = np.exp(a_lvn / 2.0) * self.agn_dist_divisor
 
         if squeeze:
             for k, v in result.items():

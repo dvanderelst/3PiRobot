@@ -49,7 +49,7 @@ from Library.SonarModel import (
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A","Acquisition03A","Acquisition04A","Acquisition05A"]
+ACQUISITION_SESSIONS = ["Acquisition01A", "Acquisition02A","Acquisition03A","Acquisition04A","Acquisition05A","Acquisition06A"]
 ACQUISITIONS_ROOT    = "AcquisitionSessions"
 
 OPENING_ANGLE  = 270.0
@@ -103,6 +103,22 @@ POLE_DIST_NORM_MM = 1000.0
 # labelled 'none' there, so the pole mask excludes them anyway).
 POLE_DIST_TRAIN_MAX_MM = 1000.0
 
+# ── Class-agnostic nearest-reflector range head ──────────────────────────────
+# "How far is the nearest thing in the cone, whatever it is." Trained on EVERY
+# ping at EVERY range -- no class mask, no range cap -- which is what makes it
+# different from the pole range head above.
+#
+# Why both heads exist. Range is a monaural time-of-flight cue: it needs an
+# echo detected, not identified. Measured out-of-fold (Performance notes
+# 2026-08-12 night) it tracks true range to 2579 mm at ~11% error with honest
+# sigma, and does so EQUALLY WELL for walls and poles (269 vs 280 mm at 2000+)
+# in the band where telling them apart is a coin flip. Azimuth and class both
+# collapse at ~1.4 m; this does not. But asking one head to cover 0.2-3.2 m
+# costs close-range precision (0-500 RMSE 198 mm against the masked pole
+# head's 110-151), and the terminal approach stop fires on the pole head's
+# output, so that one stays masked. Two heads, two jobs.
+AGN_DIST_NORM_MM = 1000.0   # scale only; the head is NOT capped at this value
+
 # 4-fold cross-validation: for each q in CV_QUADRANTS, hold out that quadrant
 # from every session as the val set and train on the rest. Same per-fold
 # convention as the wall-only trainer; here the loop is wired directly in main()
@@ -132,7 +148,8 @@ HOLDOUT_SEED = 0   # chosen for balanced per-session pole coverage in the holdou
 # sweep architectures. MODEL_CLASS_NAME is recorded in feature_params so
 # InverseModel.load reconstructs the right class at deploy time.
 MODEL_CLASS      = SonarSlicesUQ_Wall3
-MODEL_KWARGS     = {"symmetric": True, "pole_dist_head": True}
+MODEL_KWARGS     = {"symmetric": True, "pole_dist_head": True,
+                    "agn_dist_head": True}
 MODEL_CLASS_NAME = "SonarSlicesUQ_Wall3"
 
 # Architecture (carries forward the wall-only SonarSlicesUQ defaults)
@@ -152,6 +169,9 @@ LOSS_W_POLE  = 1.0
 # CONE_HALF_DEG, so all regression targets sit on a comparable scale and one
 # weight of 1.0 does not silently dominate.
 LOSS_W_POLE_DIST = 1.0
+# Class-agnostic range term. Same scale as the pole range term, so the two
+# range heads are weighted alike; they differ only in what they are shown.
+LOSS_W_AGN_DIST = 1.0
 
 LR             = 1e-3
 BATCH_SIZE     = 64
@@ -329,7 +349,8 @@ def split_indices(quads, sess, val_quadrants):
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
-def make_loader(s, t_wall, cls, t_pole_n, batch_size, shuffle, t_pdist_n=None):
+def make_loader(s, t_wall, cls, t_pole_n, batch_size, shuffle, t_pdist_n=None,
+                t_agn_n=None):
     L = torch.as_tensor(s[..., 0],   dtype=torch.float32)
     R = torch.as_tensor(s[..., 1],   dtype=torch.float32)
     Tw = torch.as_tensor(t_wall,     dtype=torch.float32)
@@ -339,11 +360,14 @@ def make_loader(s, t_wall, cls, t_pole_n, batch_size, shuffle, t_pdist_n=None):
     # loss ignores it because combined_loss only reads it when the head exists.
     Td = torch.as_tensor(t_pdist_n if t_pdist_n is not None
                          else np.zeros_like(t_pole_n), dtype=torch.float32)
-    ds = torch.utils.data.TensorDataset(L, R, Tw, C, Tp, Td)
+    Ta = torch.as_tensor(t_agn_n if t_agn_n is not None
+                         else np.zeros_like(t_pole_n), dtype=torch.float32)
+    ds = torch.utils.data.TensorDataset(L, R, Tw, C, Tp, Td, Ta)
     return torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
 
 
-def combined_loss(out, T_wall_n, C, T_pole_n, in_warmup, T_pdist_n=None):
+def combined_loss(out, T_wall_n, C, T_pole_n, in_warmup, T_pdist_n=None,
+                  T_agn_n=None):
     """Returns total loss + per-component breakdown for logging."""
     # Class loss: CE on (B, 2) logits against integer labels
     loss_class = F.cross_entropy(out["class_logits"], C)
@@ -387,20 +411,35 @@ def combined_loss(out, T_wall_n, C, T_pole_n, in_warmup, T_pdist_n=None):
             T_pdist_n, pdist_mask, in_warmup,
         )
 
+    # Class-agnostic range GNLL — every ping, every range. The only mask is
+    # target validity; there is deliberately no class mask and no range cap,
+    # which is the whole point of this head.
+    loss_agn_dist = torch.tensor(0.0, device=out["class_logits"].device)
+    if "agn_dist_mean" in out and T_agn_n is not None:
+        agn_mask = ~torch.isnan(T_agn_n)
+        agn_safe = torch.where(agn_mask, T_agn_n, torch.zeros_like(T_agn_n))
+        loss_agn_dist = masked_gnll(
+            out["agn_dist_mean"].squeeze(1),
+            out["agn_dist_log_var"].squeeze(1),
+            agn_safe, agn_mask, in_warmup,
+        )
+
     total = (LOSS_W_CLASS * loss_class
              + LOSS_W_WALL * loss_wall
              + LOSS_W_POLE * loss_pole
-             + LOSS_W_POLE_DIST * loss_pole_dist)
+             + LOSS_W_POLE_DIST * loss_pole_dist
+             + LOSS_W_AGN_DIST * loss_agn_dist)
     return total, {"class": loss_class.detach(),
                    "wall":  loss_wall.detach() if torch.is_tensor(loss_wall) else torch.tensor(0.0),
                    "pole":  loss_pole.detach(),
-                   "pole_dist": loss_pole_dist.detach()}
+                   "pole_dist": loss_pole_dist.detach(),
+                   "agn_dist": loss_agn_dist.detach()}
 
 
 def train(tr_s, tr_tw, tr_c, tr_tp_n,
           va_s, va_tw, va_c, va_tp_n,
           sonar_stats, wall_stats, device, save_path,
-          tr_td_n=None, va_td_n=None):
+          tr_td_n=None, va_td_n=None, tr_ta_n=None, va_ta_n=None):
     s_mean, s_std = sonar_stats
     t_mean, t_std = wall_stats
 
@@ -408,9 +447,11 @@ def train(tr_s, tr_tw, tr_c, tr_tp_n,
     def norm_wall(x):  return ((x - t_mean) / t_std).astype(np.float32)
 
     train_loader = make_loader(norm_sonar(tr_s), norm_wall(tr_tw),
-                               tr_c, tr_tp_n, BATCH_SIZE, True, t_pdist_n=tr_td_n)
+                               tr_c, tr_tp_n, BATCH_SIZE, True, t_pdist_n=tr_td_n,
+                               t_agn_n=tr_ta_n)
     val_loader   = make_loader(norm_sonar(va_s), norm_wall(va_tw),
-                               va_c, va_tp_n, BATCH_SIZE, False, t_pdist_n=va_td_n)
+                               va_c, va_tp_n, BATCH_SIZE, False, t_pdist_n=va_td_n,
+                               t_agn_n=va_ta_n)
 
     torch.manual_seed(SEED)
     model = MODEL_CLASS(
@@ -427,24 +468,28 @@ def train(tr_s, tr_tw, tr_c, tr_tp_n,
     for epoch in range(1, EPOCHS + 1):
         in_warmup = epoch <= WARMUP_EPOCHS
         model.train()
-        for L, R, Tw, C, Tp, Td in train_loader:
-            L, R, Tw, C, Tp, Td = (L.to(device), R.to(device), Tw.to(device),
-                                   C.to(device), Tp.to(device), Td.to(device))
+        for L, R, Tw, C, Tp, Td, Ta in train_loader:
+            L, R, Tw, C, Tp, Td, Ta = (L.to(device), R.to(device), Tw.to(device),
+                                       C.to(device), Tp.to(device), Td.to(device),
+                                       Ta.to(device))
             out = model(L, R)
-            loss, _ = combined_loss(out, Tw, C, Tp, in_warmup, T_pdist_n=Td)
+            loss, _ = combined_loss(out, Tw, C, Tp, in_warmup, T_pdist_n=Td,
+                                    T_agn_n=Ta)
             opt.zero_grad(); loss.backward(); opt.step()
 
         if not in_warmup:
             model.eval()
             v_total = []
-            v_breakdown = {"class": [], "wall": [], "pole": [], "pole_dist": []}
+            v_breakdown = {"class": [], "wall": [], "pole": [], "pole_dist": [],
+                           "agn_dist": []}
             with torch.no_grad():
-                for L, R, Tw, C, Tp, Td in val_loader:
-                    L, R, Tw, C, Tp, Td = (L.to(device), R.to(device), Tw.to(device),
-                                           C.to(device), Tp.to(device), Td.to(device))
+                for L, R, Tw, C, Tp, Td, Ta in val_loader:
+                    L, R, Tw, C, Tp, Td, Ta = (L.to(device), R.to(device), Tw.to(device),
+                                               C.to(device), Tp.to(device), Td.to(device),
+                                               Ta.to(device))
                     out = model(L, R)
                     total, parts = combined_loss(out, Tw, C, Tp, in_warmup=False,
-                                                 T_pdist_n=Td)
+                                                 T_pdist_n=Td, T_agn_n=Ta)
                     v_total.append(float(total.item()))
                     for k in v_breakdown:
                         v_breakdown[k].append(float(parts[k].item()))
@@ -461,7 +506,7 @@ def train(tr_s, tr_tw, tr_c, tr_tp_n,
                        f"  val={best_val:+.4f}")
                 if bk:
                     msg += (f"  (class={bk['class']:+.3f}  wall={bk['wall']:+.3f}  "
-                            f"pole={bk['pole']:+.3f}  pdist={bk.get('pole_dist', 0.0):+.3f})")
+                            f"pole={bk['pole']:+.3f}  pdist={bk.get('pole_dist', 0.0):+.3f}  agn={bk.get('agn_dist', 0.0):+.3f})")
                 print(msg)
             else:
                 print(f"  Epoch {epoch:3d}/{EPOCHS}{tag}")
@@ -488,6 +533,7 @@ def predict(model, sonar, sonar_stats, wall_stats, device):
     pole_mean_n = []
     pole_logv   = []
     pdist_mean_n, pdist_logv = [], []
+    agn_mean_n, agn_logv = [], []
     with torch.no_grad():
         for st in range(0, len(L), 256):
             ed = min(st + 256, len(L))
@@ -501,6 +547,9 @@ def predict(model, sonar, sonar_stats, wall_stats, device):
             if "pole_dist_mean" in o:
                 pdist_mean_n.append(o["pole_dist_mean"].cpu().squeeze(1).numpy())
                 pdist_logv.append(o["pole_dist_log_var"].cpu().squeeze(1).numpy())
+            if "agn_dist_mean" in o:
+                agn_mean_n.append(o["agn_dist_mean"].cpu().squeeze(1).numpy())
+                agn_logv.append(o["agn_dist_log_var"].cpu().squeeze(1).numpy())
 
     means_n = np.stack([np.concatenate(out_means_n[k]) for k in SLICE_NAMES], axis=1)
     logv_n  = np.stack([np.concatenate(out_logv_n[k])  for k in SLICE_NAMES], axis=1)
@@ -525,9 +574,18 @@ def predict(model, sonar, sonar_stats, wall_stats, device):
         pole_pred_dist_mm  = pd_n * POLE_DIST_NORM_MM   # de-normalise
         pole_pred_dist_std = np.exp(pd_lv / 2.0) * POLE_DIST_NORM_MM
 
+    agn_pred_dist_mm = agn_pred_dist_std = None
+    if agn_mean_n:
+        a_n  = np.concatenate(agn_mean_n)
+        a_lv = np.clip(np.concatenate(agn_logv), LOG_VAR_MIN, LOG_VAR_MAX)
+        agn_pred_dist_mm  = a_n * AGN_DIST_NORM_MM
+        agn_pred_dist_std = np.exp(a_lv / 2.0) * AGN_DIST_NORM_MM
+
     return {
         "pole_pred_dist_mm":  pole_pred_dist_mm,
         "pole_pred_dist_std": pole_pred_dist_std,
+        "agn_pred_dist_mm":   agn_pred_dist_mm,
+        "agn_pred_dist_std":  agn_pred_dist_std,
         "wall_pred_mean": wall_pred_mean,
         "wall_pred_std":  wall_pred_std,
         "cls_logits":     cls_logits,
@@ -678,7 +736,8 @@ def plot_calibration(true_w, pred_w, std_w, true_az, pred_az, pred_az_std,
 
 def run_fold(q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
              quads, sess, device, sub_prefix, pole_dist_mm=None,
-             pole_dist_n_safe=None, oof_sink=None):
+             pole_dist_n_safe=None, agn_dist_mm=None, agn_dist_n_safe=None,
+             oof_sink=None):
     """Train + evaluate one CV fold (hold out quadrant `q` from every session).
 
     Saves model, plots, and per-fold JSON to OUTPUT_DIR with file prefix
@@ -699,6 +758,9 @@ def run_fold(q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
     tr_td_n = va_td_n = None
     if pole_dist_n_safe is not None:
         tr_td_n, va_td_n = pole_dist_n_safe[~is_val], pole_dist_n_safe[is_val]
+    tr_ta_n = va_ta_n = None
+    if agn_dist_n_safe is not None:
+        tr_ta_n, va_ta_n = agn_dist_n_safe[~is_val], agn_dist_n_safe[is_val]
     print(f"  train: {len(tr_s)} (wall={int((tr_c==0).sum())}, "
           f"pole={int((tr_c==1).sum())}, none={int((tr_c==2).sum())})")
     print(f"  val:   {len(va_s)} (wall={int((va_c==0).sum())}, "
@@ -715,7 +777,7 @@ def run_fold(q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
         tr_s, tr_tw, tr_c, tr_tp_n,
         va_s, va_tw, va_c, va_tp_n,
         (s_mean, s_std), (t_mean, t_std), device, save_path,
-        tr_td_n=tr_td_n, va_td_n=va_td_n)
+        tr_td_n=tr_td_n, va_td_n=va_td_n, tr_ta_n=tr_ta_n, va_ta_n=va_ta_n)
 
     pred = predict(model, va_s, (s_mean, s_std), (t_mean, t_std), device)
 
@@ -818,6 +880,40 @@ def _pole_dist_metrics(c, dist_mm, pred):
     }
 
 
+def _agn_dist_metrics(dist_mm, pred):
+    """RMSE/MAE of the class-agnostic range head over EVERY ping (no class
+    mask), plus a per-band breakdown. The bands matter more than the aggregate:
+    this head exists precisely because its accuracy holds at range, and one
+    number pooled over 0.2-3.2 m hides that."""
+    if pred.get("agn_pred_dist_mm") is None or dist_mm is None:
+        return None
+    m = np.isfinite(dist_mm)
+    if not m.any():
+        return None
+    err = pred["agn_pred_dist_mm"][m] - dist_mm[m]
+    bands = {}
+    for lo, hi in ((0, 500), (500, 1000), (1000, 1400), (1400, 2000),
+                   (2000, 10 ** 9)):
+        b = m & (dist_mm >= lo) & (dist_mm < hi)
+        if b.sum() < 5:
+            continue
+        e = pred["agn_pred_dist_mm"][b] - dist_mm[b]
+        bands[f"{lo}-{hi if hi < 10 ** 8 else 'inf'}"] = {
+            "n": int(b.sum()),
+            "bias_mm": float(np.mean(e)),
+            "rmse_mm": float(np.sqrt(np.mean(e ** 2))),
+        }
+    return {
+        "n": int(m.sum()),
+        "rmse_mm": float(np.sqrt(np.mean(err ** 2))),
+        "mae_mm": float(np.mean(np.abs(err))),
+        "pred_std_median_mm": (float(np.median(pred["agn_pred_dist_std"][m]))
+                               if pred.get("agn_pred_dist_std") is not None else None),
+        "constant_mean_baseline_rmse_mm": float(np.std(dist_mm[m])),
+        "by_band": bands,
+    }
+
+
 def _subset_metrics(c, tw, az_deg, pred):
     """Class / pole-az / wall-slice metrics for one subset. c, tw, az_deg are that
     subset's labels, wall targets, and true pole azimuth (deg); pred is predict()
@@ -870,7 +966,7 @@ def spatial_holdout_mask(poses, sess, frac, seed):
 
 def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
                poses, sess, device, sub_prefix="deploy", pole_dist_mm=None,
-               pole_dist_n_safe=None):
+               pole_dist_n_safe=None, agn_dist_mm=None, agn_dist_n_safe=None):
     """Train the single deployment model on the spatial-holdout split and report
     in-sample (train) vs held-out (val) metrics. Writes loadable
     `{ARTIFACT_PREFIX}_deploy_*` artifacts + the shared feature_params."""
@@ -889,6 +985,9 @@ def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
     tr_td_n = va_td_n = None
     if pole_dist_n_safe is not None:
         tr_td_n, va_td_n = pole_dist_n_safe[~is_val], pole_dist_n_safe[is_val]
+    tr_ta_n = va_ta_n = None
+    if agn_dist_n_safe is not None:
+        tr_ta_n, va_ta_n = agn_dist_n_safe[~is_val], agn_dist_n_safe[is_val]
     print(f"  train: {len(tr_s)} (wall={int((tr_c==0).sum())}, pole={int((tr_c==1).sum())}, "
           f"none={int((tr_c==2).sum())})")
     print(f"  held-out: {len(va_s)} (wall={int((va_c==0).sum())}, pole={int((va_c==1).sum())}, "
@@ -905,7 +1004,7 @@ def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
         tr_s, tr_tw, tr_c, tr_tp_n,
         va_s, va_tw, va_c, va_tp_n,
         (s_mean, s_std), (t_mean, t_std), device, save_path,
-        tr_td_n=tr_td_n, va_td_n=va_td_n)
+        tr_td_n=tr_td_n, va_td_n=va_td_n, tr_ta_n=tr_ta_n, va_ta_n=va_ta_n)
 
     pred_va = predict(model, va_s, (s_mean, s_std), (t_mean, t_std), device)
     pred_tr = predict(model, tr_s, (s_mean, s_std), (t_mean, t_std), device)
@@ -915,6 +1014,9 @@ def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
     if pole_dist_mm is not None:
         held["pole_dist"]     = _pole_dist_metrics(va_c, pole_dist_mm[is_val],  pred_va)
         insample["pole_dist"] = _pole_dist_metrics(tr_c, pole_dist_mm[~is_val], pred_tr)
+    if agn_dist_mm is not None:
+        held["agn_dist"]      = _agn_dist_metrics(agn_dist_mm[is_val],  pred_va)
+        insample["agn_dist"]  = _agn_dist_metrics(agn_dist_mm[~is_val], pred_tr)
 
     def _show(tag, mtr):
         print(f"  [{tag}] class acc {mtr['class_acc']*100:.1f}%")
@@ -947,6 +1049,11 @@ def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
         "pole_dist_norm": ({"divide_by_mm": POLE_DIST_NORM_MM,
                             "trained_max_mm": POLE_DIST_TRAIN_MAX_MM}
                            if MODEL_KWARGS.get("pole_dist_head") else None),
+        # No "trained_max_mm": this head is deliberately uncapped, so unlike the
+        # pole range head a value near the top of the span is a measurement, not
+        # a ceiling.
+        "agn_dist_norm":  ({"divide_by_mm": AGN_DIST_NORM_MM}
+                           if MODEL_KWARGS.get("agn_dist_head") else None),
         "class_names":    CLASS_NAMES,
         "envelope_norm":  {"kind": "none"},
         "log_var_clamp":  [LOG_VAR_MIN, LOG_VAR_MAX],
@@ -960,6 +1067,7 @@ def run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
             "model_class":   MODEL_CLASS_NAME,
             "wall3_symmetric": bool(MODEL_KWARGS.get("symmetric", True)),
             "wall3_pole_dist": bool(MODEL_KWARGS.get("pole_dist_head", False)),
+            "wall3_agn_dist":  bool(MODEL_KWARGS.get("agn_dist_head", False)),
             "n_classes":     len(CLASS_NAMES),
         },
         "profile": {
@@ -1016,6 +1124,12 @@ def main():
     # excluded by the pole mask in the loss, exactly as for azimuth.
     pole_dist_n = (pole_dist_mm / POLE_DIST_NORM_MM).astype(np.float32)
     pole_dist_n_safe = np.where(np.isnan(pole_dist_n), 0.0, pole_dist_n).astype(np.float32)
+    # Class-agnostic range target: the SAME near_dist array, but unmasked. For
+    # the pole head it is filtered to pole-class pings within 1 m; here every
+    # ping counts, because "how far is the nearest thing" needs no class call.
+    agn_dist_mm = np.asarray(pole_dist_mm, dtype=np.float32)
+    agn_dist_n = (agn_dist_mm / AGN_DIST_NORM_MM).astype(np.float32)
+    agn_dist_n_safe = np.where(np.isnan(agn_dist_n), 0.0, agn_dist_n).astype(np.float32)
     print(f"  pole az normalised by /{CONE_HALF_DEG:.0f}°")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1032,7 +1146,8 @@ def main():
         fold_results.append(run_fold(
             q, sonar, slice_t, classes, pole_az_deg, pole_az_n_safe,
             quads, sess, device, sub_prefix=f"q{q}",
-            pole_dist_mm=pole_dist_mm, pole_dist_n_safe=pole_dist_n_safe))
+            pole_dist_mm=pole_dist_mm, pole_dist_n_safe=pole_dist_n_safe,
+            agn_dist_mm=agn_dist_mm, agn_dist_n_safe=agn_dist_n_safe))
 
     print("\n[3/4] CV summary")
 
@@ -1086,6 +1201,11 @@ def main():
         "pole_dist_norm": ({"divide_by_mm": POLE_DIST_NORM_MM,
                             "trained_max_mm": POLE_DIST_TRAIN_MAX_MM}
                            if MODEL_KWARGS.get("pole_dist_head") else None),
+        # No "trained_max_mm": this head is deliberately uncapped, so unlike the
+        # pole range head a value near the top of the span is a measurement, not
+        # a ceiling.
+        "agn_dist_norm":  ({"divide_by_mm": AGN_DIST_NORM_MM}
+                           if MODEL_KWARGS.get("agn_dist_head") else None),
         "class_names":    CLASS_NAMES,
         "envelope_norm":  {"kind": "none"},
         "log_var_clamp":  [LOG_VAR_MIN, LOG_VAR_MAX],
@@ -1099,6 +1219,7 @@ def main():
             "model_class":   MODEL_CLASS_NAME,
             "wall3_symmetric": bool(MODEL_KWARGS.get("symmetric", True)),
             "wall3_pole_dist": bool(MODEL_KWARGS.get("pole_dist_head", False)),
+            "wall3_agn_dist":  bool(MODEL_KWARGS.get("agn_dist_head", False)),
             "n_classes":     len(CLASS_NAMES),
         },
         "profile": {
@@ -1159,12 +1280,19 @@ def main_deploy():
     # excluded by the pole mask in the loss, exactly as for azimuth.
     pole_dist_n = (pole_dist_mm / POLE_DIST_NORM_MM).astype(np.float32)
     pole_dist_n_safe = np.where(np.isnan(pole_dist_n), 0.0, pole_dist_n).astype(np.float32)
+    # Class-agnostic range target: the SAME near_dist array, but unmasked. For
+    # the pole head it is filtered to pole-class pings within 1 m; here every
+    # ping counts, because "how far is the nearest thing" needs no class call.
+    agn_dist_mm = np.asarray(pole_dist_mm, dtype=np.float32)
+    agn_dist_n = (agn_dist_mm / AGN_DIST_NORM_MM).astype(np.float32)
+    agn_dist_n_safe = np.where(np.isnan(agn_dist_n), 0.0, agn_dist_n).astype(np.float32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n[2/3] Training deployment model on {device} "
           f"({EPOCHS} epochs, {WARMUP_EPOCHS} warmup; {HOLDOUT_FRAC*100:.0f}% spatial holdout)")
     run_deploy(sonar, slice_t, classes, pole_az_deg, pole_az_n_safe, poses, sess, device,
-               pole_dist_mm=pole_dist_mm, pole_dist_n_safe=pole_dist_n_safe)
+               pole_dist_mm=pole_dist_mm, pole_dist_n_safe=pole_dist_n_safe,
+               agn_dist_mm=agn_dist_mm, agn_dist_n_safe=agn_dist_n_safe)
 
     print(f"\n[3/3] Done. Deployed model: {ARTIFACT_PREFIX}_deploy_* "
           f"+ {ARTIFACT_PREFIX}_feature_params.json (load with fold='deploy')")
