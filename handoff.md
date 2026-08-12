@@ -76,8 +76,25 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
 
 ## Paper state
 
-*Last updated: 2026-08-04.*
+*Last updated: 2026-08-12.*
 *Current branch for ongoing work: `direct-learning-poletask`. `main` carries up through the direct-learning rename + Par 9 task commitment.*
+
+### PLANNED — rewrite the inverse Results around what the model can and cannot recover (2026-08-12)
+
+**Not drafted. Do this after the Experiment 2 work, so the numbers are final.** Decided 2026-08-12 with Dieter. Not extra work: `\dnote[13]` already flags that `tab:inverse-results` and `fig:inverse-results` predate the range head and `\dnote[14]` asks for a pole-range panel, so these have to be redone anyway. The question is only what replaces them, and an aggregate metrics table is now the weakest option available. All supporting numbers are in Performance notes 2026-08-12 (night) and the two entries above it.
+
+**Claims to make, strongest first:**
+
+1. **Different echo cues survive to different ranges, and the pattern is principled.** Distance is a monaural time-of-flight cue and holds to 2.5 m at ~11% error; azimuth needs a binaural comparison and dies at ~1.4 m; class needs fine temporal/spectral structure and dies at the same point. This is a statement about what echoes support, not only about our network.
+2. **The hard part is attribution, not sensing.** Same architecture, same data: asked "how far is *the pole*" the head saturates at ~750 mm; asked "how far is *the nearest reflector*" it tracks to 2579 mm, and does so equally for walls and poles (269 vs 280 mm beyond 2 m) in the band where discriminating them is at chance. **The model can locate what it cannot name.**
+3. **A vision-supervised sonar inverse can be well calibrated.** Fitted temperature 1.00, ECE 0.010, p ≥ 0.9 → 97.9% accurate. It knows when it does not know, which is what makes a noisy inverse usable by a controller — a better result than a higher accuracy figure would be.
+4. **Discrimination degrades under off-cone competition**, 80.6% vs 65.1% at matched range: perception of a target depends on what else is in the beam, not only on the target.
+
+**Hedge the 1.4 m number carefully.** It is measured in a 3.5 × 4.2 m arena where essentially every distant target is flanked — uncontested far targets provably cannot exist there beyond ~1.9 m (27 such pings in the whole dataset). **Lead with the mechanism and let the number follow:** "discrimination fails once a nearer reflector lies outside the analysed cone; in our arena that condition holds for effectively all targets beyond ~1.4 m." Honest, and it generalises.
+
+**What it costs:** a Methods paragraph for the second (class-agnostic) range head; one figure, suggested as four panels — class accuracy vs range, azimuth error vs range against a chance baseline, both range heads vs range on one axis, and a reliability curve; and a softening of **Par 22**, which currently says the held-out split is only an overfitting guard with no generalisation claim. It is more than that now.
+
+**Why it earns its place structurally:** it explains why Experiment 1 works (everything in it happens inside 1.4 m) and what constrains Experiment 2 (the landmark channel), rather than sitting as a standalone characterisation.
 
 ### Experiment 1 Methods shortened + Results drafted (2026-08-04; commits `3dee986`, `201b101`, `45c71f3`)
 
