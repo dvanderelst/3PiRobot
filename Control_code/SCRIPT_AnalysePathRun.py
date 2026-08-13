@@ -37,6 +37,7 @@ import sys
 import numpy as np
 
 from Library import Settings as _settings
+from Library.AcquisitionPlanner import cone_ranges
 from Library.LocalFeature import true_local_feature
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -85,6 +86,90 @@ def densify(wp, n=DENSIFY):
     return np.array(pts), np.array(hdg)
 
 
+# Measured 1-sigma of the deployed inverse's range estimate, by true distance
+# (Performance notes 2026-08-12 night, out-of-fold on Acq01A-06A). Precision is
+# what decides whether a displacement is visible, and it degrades sharply past
+# a metre -- which is the whole reason the blocks below exist.
+_RANGE_SIGMA_MM = [(0, 500, 164.), (500, 1000, 141.), (1000, 1400, 236.),
+                   (1400, 1700, 401.), (1700, 2000, 311.), (2000, 1e9, 284.)]
+_SLICE_OFFSETS = (-23.3, 0.0, 23.3)      # centres of the three wall slices
+
+
+def _sigma_for(r):
+    for lo, hi, s in _RANGE_SIGMA_MM:
+        if lo <= r < hi:
+            return s
+    return 400.0
+
+
+def _slice_reading(x, y, h, walls, poles, pole_r, horizon=1400.0):
+    """The three slice depths a perfect sensor would report at this pose."""
+    out = []
+    for off in _SLICE_OFFSETS:
+        rw = cone_ranges((x, y), [h + off], walls, np.empty((0, 2)), 0.0, 11.7)[0]
+        rp = (cone_ranges((x, y), [h + off], np.empty((0, 2)), poles, pole_r, 11.7)[0]
+              if len(poles) else np.inf)
+        out.append(min(min(rw, rp), horizon))
+    return np.array(out)
+
+
+def _report_drift_detectability(seg, hdg, walls, poles, pole_r):
+    """Can perception SEE the robot leave the path? The metric that matters.
+
+    Neither clearance nor "informative" caught the failure this was written
+    for. Path04's first redraw pushed the whole path out to a 603 mm median
+    clearance: perfectly safe, still informative, and it lost 19 points of
+    drift detectability -- because the robot ended up looking at things
+    1-1.4 m away, where the model's error (236-401 mm) exceeds the change a
+    200 mm sideways shift produces. The readings were there and useless.
+
+    Two numbers. What is AHEAD -- not omnidirectional clearance, since the
+    cone is forward and a path can sit 470 mm from a wall to its side while
+    seeing nothing closer than a metre in front -- and whether a displacement
+    actually shifts the reading past the model's own noise.
+
+    Reference, all under this script's own sampling: Path02 median-ahead
+    614 mm, 86% under 1 m, detects 76% / 93% of a 200 / 300 mm lateral shift
+    -- and collided, on a 70 mm usable margin. Path04 v3: 946 mm, 56%,
+    66% / 81%, on a 370 mm margin.
+    Sub-500 mm readings are the most informative and ALSO the ones a clearance
+    floor forbids: to have something 400 mm ahead, your clearance to it is
+    400 mm. That much is a real trade, not a drawing mistake.
+    """
+    ahead = []
+    for (x, y), h in zip(seg, hdg):
+        rw = cone_ranges((x, y), [h], walls, np.empty((0, 2)), 0.0, CONE_HALF_DEG)[0]
+        rp = (cone_ranges((x, y), [h], np.empty((0, 2)), poles, pole_r,
+                          CONE_HALF_DEG)[0] if len(poles) else np.inf)
+        ahead.append(min(rw, rp))
+    ahead = np.array(ahead)
+    print(f"\n  what is AHEAD (nearest reflector in the +-{CONE_HALF_DEG:.0f} deg cone):")
+    print(f"    median {np.median(ahead):.0f} mm   under 1000 mm "
+          f"{100 * (ahead < 1000).mean():.0f}%   under 500 mm "
+          f"{100 * (ahead < 500).mean():.0f}%")
+    print(f"    (reference, this same sampling -- Path02: median 614 mm, "
+          f"86% under 1 m, 33% under 500)")
+
+    print(f"\n  DRIFT DETECTABILITY -- share of steps where a displacement shifts")
+    print(f"  the slice readings by more than the model's measured noise:")
+    for label, lat, dyaw in (("200 mm lateral", 200.0, 0.0),
+                             ("300 mm lateral", 300.0, 0.0),
+                             ("10 deg yaw    ", 0.0, 10.0)):
+        det = 0
+        for (x, y), h in zip(seg, hdg):
+            r0 = _slice_reading(x, y, h, walls, poles, pole_r)
+            nx = -np.sin(np.deg2rad(h)) * lat
+            ny = np.cos(np.deg2rad(h)) * lat
+            r1 = _slice_reading(x + nx, y + ny, h + dyaw, walls, poles, pole_r)
+            if (np.abs(r1 - r0) > np.array([_sigma_for(v) for v in r0])).any():
+                det += 1
+        print(f"    {label}: {100 * det / len(seg):5.1f}%")
+    print(f"    (reference, Path02: 76% / 93% / 41%; Path04 v3: 66% / 81% / 28%.")
+    print(f"     Per-step, and so pessimistic: drift is persistent and the RNN")
+    print(f"     accumulates, so sustained error is caught sooner than a")
+    print(f"     single-step test suggests.)")
+
+
 def main(arena=ARENA, session=SESSION):
     pts, walls, poles, pole_r, src = load_arena(arena)
     wp = load_path(arena)
@@ -121,8 +206,11 @@ def main(arena=ARENA, session=SESSION):
     print(f"    definition was not recorded -- it reported 73.5% wall yet 49% informative,")
     print(f"    so 'informative' there was a SUBSET of wall hits, not simply 'not none'.")
     print(f"    Compare paths using THIS number consistently; don't mix the two.")
-    print(f"    The trade-off still holds either way: informative perception comes from")
-    print(f"    being near walls, which is exactly what costs clearance.")
+    print(f"    NOTE (2026-08-13): 'informative' is NECESSARY BUT NOT SUFFICIENT. It")
+    print(f"    asks only whether something is in range, not whether the reading is")
+    print(f"    precise enough to be worth having. See the two blocks below.")
+
+    _report_drift_detectability(seg, hdg, walls, poles, pole_r)
 
     if not session:
         print("\n  no run session given -- skipping tracking/calibration analysis\n")
