@@ -46,7 +46,7 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
      2. **DONE 2026-08-12 (`d6182dd`).** Error model fixed and refitted: bins extended to 2500+, per-ping posteriors replace the oracle, `agn_dist_mm` emitted. See Code state. **Remaining from this item: add the `agn_dist` channel to `Library/Policy.py`'s observation layout** — a deliberate change, since it moves the obs width (14 → 16 with σ) and so invalidates `default_Path02`. Fine to do when the policy is retrained for the new path anyway. **Expect simulated policy performance to drop against the old run**; the simulator is now much closer to the real sensor, so the two are not comparable.
      3. **DONE 2026-08-13. Path04 v3 is the path** — 41 waypoints, 8.8 m, min clearance 455 mm (370 usable), turns max 46°, detects 66% / 81% of a 200 / 300 mm lateral drift. Numbers and the two rejected redraws in Performance notes 2026-08-13 (later). `SCRIPT_AnalysePathRun.py` now reports drift detectability and what-is-ahead, so this is checkable without re-deriving it. **Do not judge a path by clearance, by `cls != none`, by object-facing, or by `EXPT_gaze_path.py` alone** — each of those missed a real failure during this iteration.
      4. **DONE 2026-08-13 (`db22a14`).** `motion_rot_bias_deg` (default 3.0) drawn per episode as U(−x,+x) and added to every step, applied *after* the rotation clip since curl is accumulated while driving rather than commanded. Verified that before the change a commanded 0° produced exactly 0° of motor rotation every episode — the defect. Logged per episode in `motion_noise_log.tsv`.
-     5. Retrain the policy, recalibrate, deploy.
+     5. **Policy trained 2026-08-13** (`PolicyTraining/default_Path04/`, val_mse 114.3, 5-10% collision rate in sim; Performance notes 2026-08-13 evening). **Next: recalibrate (`SCRIPT_CalibrateRobot.py`) and deploy** — `SCRIPT_RunPolicy.py` with `POLICY_INPUT_SOURCE="live"`. The deploy chain reads `min_dist_mm`/`max_dist_mm`/`use_agn` from the policy artifact, so no deploy-side constant needs changing; the inverse must be the current `SonarModel/inverse_deploy_*`, which has the agnostic range head.
      - **Also worth doing, cheap:** a confidence threshold in `feature_from_inverse` instead of argmax. It restores the controller's abstain path, currently dead code, and 0.7–0.8 gives 92–95% accuracy on 57–69% of pings.
      - **Experiment 1 goes last**, on whatever the final inverse turns out to be — re-running it now risks a third run, or two differently-scoped inverses in the paper.
      - **Parked, with a new justification:** gaze. The 2026-08-08 measurement parked it because the horizon extension solved the detection problem it was proposed for, but off-cone competition costs 15 points of class accuracy at matched range, and rotating to increase angular separation from the flanker attacks that directly — now steerable by the calibrated confidence. Not needed to finish Exp 2.
@@ -334,6 +334,25 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-08-13 (evening) — Path04 policy trained: comparable loss to Path02 on a harder sensor, 5-10% collision rate
+
+`PolicyTraining/default_Path04/`, commit at training `83363e0`. Config: `use_poles=True`, **`use_agn=True`**, `use_sigma=False`, `max_dist_mm=2500`, `motion_rot_bias_deg=3.0`, obs width **10**, 2000 epochs.
+
+- **`val_mse` 114.3 (RMSE 10.7° on the rotation command), against `default_Path02`'s 114.65** — essentially identical, and that is the result. This policy faces a materially harder sensor: no class oracle, no abstain flag, a horizon that no longer goes blind at 1 m, and an additive rotation bias the old one never met. Matching the old loss under those conditions is what the day's fixes bought. (`default_Path01_figure8` was 165.1 for scale.) Train and val track closely with no overfitting gap.
+- **Batch evaluation, 60 rollouts from the release box, `max_steps=150` (2.6 laps if perfect):**
+
+  | | |
+  |---|---|
+  | collisions | 3/60 (5%) |
+  | laps completed | median **2.52** of 2.6 |
+  | cross-track error | median **55 mm**, p90 146, p99 284, max 750 |
+  | steps beyond the 370 mm usable margin | **0.3%** |
+
+- **Collision rate vs the per-episode bias** (n=100 each): 6% at zero bias, 9% at the measured 1.08°, 15% at the training maximum 3.0°. **The bias is not the dominant cause** — the per-step 3° Gaussian and the gain noise produce 6% on their own. Note these are noisy: at n≈100 and p≈0.08 the standard error is ~2.7%, and the runs used different seeds, so 6% and 9% are not distinguishable. **Read the collision rate as roughly 5-10% per 2.5-lap run.**
+- **Every collision is with B1 (−31,−612) or B2 (−394,−2137)**, the two interior blocks the path threads between — never the pole, never the boundary. Locations cluster at (−200…−500, −1900…−2250) and (0…180, −500…−820). If the rate wants reducing, nudging the path away from those two is a small edit rather than a redraw.
+- **For scale on how much better this is than Path02:** that path crashed on its *first* real run at lap 3, with 49% of its length tighter than the robot's p90 tracking error. Here 0.3% of steps exceed the margin.
+- **Caveat.** All of the above is simulation, and the simulator is now much closer to the real sensor than it was but still fitted from 2775 pings in five arenas. The number that matters is the robot.
 
 ### 2026-08-13 (later) — Path04 v3 adopted: safe, smooth, and perceptually adequate
 
