@@ -153,17 +153,31 @@ class Config:
     #      sonar feedback to detect and compensate for *sustained* execution
     #      error — the kind that doesn't average out and that the real robot
     #      exhibits (~10 % rotation gain mismatch, ~5 % drive gain mismatch).
+    #   3. Per-episode ADDITIVE rotation bias (`motion_rot_bias_deg`). Every
+    #      term above is either multiplicative on the commanded angle or
+    #      zero-mean, and the real robot's dominant fault is neither: it sheds
+    #      about -1.1 deg per step even after calibration, uncorrelated with
+    #      the commanded angle (run02, n=106). That is drive CURL — the robot
+    #      curves while driving — so a multiplicative gain cannot emulate it:
+    #      at rot_exec = 0 the gain does nothing while the robot still loses
+    #      heading. Without this the policy never meets the perturbation that
+    #      actually threatens it. run02 succeeded despite the omission, not
+    #      because of it.
     motion_rotate_noise_deg:     float = 3.0
     motion_drive_noise_mm:       float = 5.0
     motion_rot_gain_range_pct:   float = 0.15   # rot_gain ~ U(1-x, 1+x); 0 disables
     motion_drive_gain_range_pct: float = 0.05   # drive_gain ~ U(1-x, 1+x); 0 disables
+    # rot_bias ~ U(-x, +x) deg per episode, added to every step. 3.0 spans the
+    # measured -1.1 deg/step comfortably in both directions, so the policy
+    # cannot learn a one-sided correction. 0 disables.
+    motion_rot_bias_deg:         float = 3.0
     # Verbose flag for the kinematic-bias sampling. When True, print the
-    # per-episode (rot_gain, drive_gain) pair at sample time and a one-line
+    # per-episode (rot_gain, drive_gain, rot_bias) at sample time and a one-line
     # summary of the first step's commanded vs perturbed action. Useful for
     # confirming the mechanism is wired correctly; flip off for full training.
     motion_noise_verbose:        bool  = False
     # If set, every per-episode bias sample is appended as one row to this TSV
-    # (columns: episode_no, tag, rot_gain, drive_gain). Independent of the
+    # (columns: episode_no, tag, rot_gain, drive_gain, rot_bias_deg). Independent of the
     # verbose flag so you can keep a permanent record without console spam.
     # Resolved relative to the run's output_dir if not absolute.
     motion_noise_log_path:       Optional[str] = "motion_noise_log.tsv"
@@ -381,7 +395,8 @@ def _open_motion_noise_log(cfg: "Config") -> None:
         path = os.path.join(run_dir, path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     _motion_noise_log_handle = open(path, "w", newline="")
-    _motion_noise_log_handle.write("episode\ttag\trot_gain\tdrive_gain\n")
+    _motion_noise_log_handle.write(
+        "episode\ttag\trot_gain\tdrive_gain\trot_bias_deg\n")
     _motion_noise_log_handle.flush()
 
 
@@ -398,15 +413,19 @@ def _close_motion_noise_log() -> None:
 
 
 def _sample_motion_biases(cfg: "Config", rng: np.random.Generator,
-                          tag: str = "") -> Tuple[float, float]:
-    """Sample per-episode kinematic gain biases. Returns (rot_gain, drive_gain).
-    Each is drawn once at episode reset and applied multiplicatively to every
-    commanded action in the rollout. Set the corresponding *_range_pct to 0 to
-    disable (returns 1.0)."""
+                          tag: str = "") -> Tuple[float, float, float]:
+    """Sample per-episode kinematic biases: (rot_gain, drive_gain, rot_bias_deg).
+
+    The gains are multiplicative on the commanded action; `rot_bias_deg` is
+    ADDITIVE and applies whatever the commanded angle, including zero. Each is
+    drawn once at episode reset and held for the rollout. Set the corresponding
+    range to 0 to disable (returns 1.0 / 1.0 / 0.0)."""
     rg = float(cfg.motion_rot_gain_range_pct)
     dg = float(cfg.motion_drive_gain_range_pct)
+    rb = float(cfg.motion_rot_bias_deg)
     rot_gain   = float(rng.uniform(1.0 - rg, 1.0 + rg)) if rg > 0.0 else 1.0
     drive_gain = float(rng.uniform(1.0 - dg, 1.0 + dg)) if dg > 0.0 else 1.0
+    rot_bias   = float(rng.uniform(-rb, rb)) if rb > 0.0 else 0.0
 
     global _motion_noise_episode_counter
     _motion_noise_episode_counter += 1
@@ -414,17 +433,19 @@ def _sample_motion_biases(cfg: "Config", rng: np.random.Generator,
 
     if cfg.motion_noise_verbose:
         prefix = f"[motion]{(' ' + tag) if tag else ''} ep#{ep:>4d}"
-        print(f"{prefix}  rot_gain={rot_gain:+.4f}  drive_gain={drive_gain:+.4f}")
+        print(f"{prefix}  rot_gain={rot_gain:+.4f}  drive_gain={drive_gain:+.4f}"
+              f"  rot_bias={rot_bias:+.2f}deg")
 
     if cfg.motion_noise_log_path:
         _open_motion_noise_log(cfg)
         if _motion_noise_log_handle is not None:
             _motion_noise_log_handle.write(
-                f"{ep}\t{tag}\t{rot_gain:.6f}\t{drive_gain:.6f}\n"
+                f"{ep}\t{tag}\t{rot_gain:.6f}\t{drive_gain:.6f}"
+                f"\t{rot_bias:.4f}\n"
             )
             _motion_noise_log_handle.flush()
 
-    return rot_gain, drive_gain
+    return rot_gain, drive_gain, rot_bias
 
 
 def _apply_motion_noise(rot_exec: float,
@@ -432,8 +453,9 @@ def _apply_motion_noise(rot_exec: float,
                         rng: np.random.Generator,
                         rot_gain: float,
                         drive_gain: float,
+                        rot_bias: float = 0.0,
                         verbose_first_step: bool = False) -> Tuple[float, float]:
-    """Apply per-episode gain × per-step Gaussian to a commanded (rot, drive).
+    """Apply per-episode gain and bias × per-step Gaussian to a commanded action.
     `rot_exec` is the policy/teacher's commanded rotation (deg); the fixed drive
     distance comes from cfg. Returns (rot_motor_deg, drive_motor_mm) ready to
     feed `simulator.simulate_robot_movement`. If `verbose_first_step` is True
@@ -443,6 +465,12 @@ def _apply_motion_noise(rot_exec: float,
     if cfg.motion_rotate_noise_deg > 0.0:
         rot_motor += float(rng.normal(0.0, cfg.motion_rotate_noise_deg))
     rot_motor = float(np.clip(rot_motor, -cfg.max_rotate_deg, cfg.max_rotate_deg))
+    # Additive bias goes on AFTER the clip, and deliberately so. The clip
+    # models the robot's rotation limit, which bounds what it can be *asked*
+    # to turn. This bias is not a commanded rotation: it is curl accumulated
+    # while DRIVING, so it is not subject to that limit and must not be
+    # clipped away when the commanded angle is already at the stop.
+    rot_motor += rot_bias
 
     drive_motor = cfg.fixed_drive_mm * drive_gain
     if cfg.motion_drive_noise_mm > 0.0:
@@ -450,7 +478,8 @@ def _apply_motion_noise(rot_exec: float,
     drive_motor = max(0.0, drive_motor)
 
     if verbose_first_step and cfg.motion_noise_verbose:
-        print(f"[motion]   step0  rot: cmd={rot_exec:+7.2f}°  → motor={rot_motor:+7.2f}°    "
+        print(f"[motion]   step0  rot: cmd={rot_exec:+7.2f}°  → motor={rot_motor:+7.2f}°"
+              f" (bias {rot_bias:+.2f}°)   "
               f"drive: cmd={cfg.fixed_drive_mm:7.1f}mm → motor={drive_motor:7.1f}mm")
     return rot_motor, drive_motor
 
@@ -481,7 +510,7 @@ def rollout_with_teacher(
 
     # Per-episode kinematic gain biases — held constant across this rollout so
     # the policy has to use sonar feedback to compensate.
-    rot_gain, drive_gain = _sample_motion_biases(cfg, rng, tag="teacher")
+    rot_gain, drive_gain, rot_bias = _sample_motion_biases(cfg, rng, tag="teacher")
 
     x, y, yaw = start
     Xs: List[np.ndarray]  = []
@@ -510,7 +539,7 @@ def rollout_with_teacher(
             rot_exec = rot_clean
 
         rot_motor, drive_motor = _apply_motion_noise(
-            rot_exec, cfg, rng, rot_gain, drive_gain,
+            rot_exec, cfg, rng, rot_gain, drive_gain, rot_bias,
             verbose_first_step=_verbose_step0,
         )
         _verbose_step0 = False
@@ -862,7 +891,7 @@ def rollout_student(
 
     # Per-episode kinematic gain biases (same source of randomness as the teacher
     # rollouts the student is trained against).
-    rot_gain, drive_gain = _sample_motion_biases(cfg, rng, tag="student")
+    rot_gain, drive_gain, rot_bias = _sample_motion_biases(cfg, rng, tag="student")
 
     x, y, yaw = start
     positions: List[Tuple[float, float]] = [(x, y)]
@@ -876,7 +905,7 @@ def rollout_student(
         rot, hidden = policy.step(obs, hidden)
 
         rot_motor, drive_motor = _apply_motion_noise(
-            float(rot), cfg, rng, rot_gain, drive_gain,
+            float(rot), cfg, rng, rot_gain, drive_gain, rot_bias,
             verbose_first_step=_verbose_step0,
         )
         _verbose_step0 = False
