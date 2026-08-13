@@ -48,7 +48,7 @@ from Library.AcquisitionSessionLoader import _load_features_for_session
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-ARENAS:             List[str] = ["Path01"]
+ARENAS:             List[str] = ["Path02"]
 ARENAS_ROOT:        str       = "TargetArenas"
 
 # Radius drawn round each pole, marking where it is reliably detectable as a
@@ -59,6 +59,20 @@ POLE_LANDMARK_RANGE_MM: float = 800.0
 GRID_RESOLUTION_MM: float     = 10.0
 COLORMAP:           str       = "viridis"
 PADDING_MM:         float     = 100.0
+
+# Keep-out line drawn on the picker: centreline distance to the nearest
+# obstacle, so it already includes the robot's 85 mm radius. Judging this off
+# the background colours alone is hard, which is why it is a line.
+#
+# Where the number comes from. The floor is the robot radius plus the tracking
+# error it has to absorb: 85 + 266 (run02's p90) = 351 mm. Path02 ran at 155 mm
+# and collided. But clearance also buys or costs perception, and not in the
+# direction the 2026-08-08 note suggested: what Experiment 2 needs is for the
+# sonar to DETECT a displacement from the path, which needs nearby geometry.
+# Path04 manages it with a 470 mm median (75% of steps detect a 200 mm shift);
+# Path03, at a 438 mm minimum, does not (42%). So aim for a comfortable median
+# rather than a bare minimum, and treat this line as the floor, not the target.
+MIN_CLEARANCE_MM:   float     = 400.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -102,6 +116,31 @@ def _draw_poles(ax, poles: np.ndarray, pole_radius_mm: float):
                label=f"pole (ring = {POLE_LANDMARK_RANGE_MM:.0f} mm landmark range)")
 
 
+def _draw_clearance_line(ax, xs, ys, dist, poles: np.ndarray,
+                         pole_radius_mm: float,
+                         threshold: float = MIN_CLEARANCE_MM):
+    """Contour the keep-out boundary: stay on the open side of this line.
+
+    `dist` is distance to the WALLS only -- poles are deliberately left out of
+    the background field (see `_draw_poles`). A contour taken straight from it
+    would therefore be wrong around a pole, which is an obstacle like any
+    other, so the pole distance is folded in here. The background colouring is
+    left alone: it still means distance to nearest wall, as its colourbar says.
+    """
+    field = dist
+    if poles is not None and len(poles):
+        gx, gy = np.meshgrid(xs, ys)
+        pd = cKDTree(np.asarray(poles, dtype=float).reshape(-1, 2)).query(
+            np.column_stack([gx.ravel(), gy.ravel()]), k=1)[0]
+        # to the pole SURFACE, matching how the planner treats pole clearance
+        field = np.minimum(dist, pd.reshape(gx.shape) - pole_radius_mm)
+    ax.contour(xs, ys, field, levels=[threshold], colors=["#ff2d55"],
+               linewidths=1.6, linestyles="solid", zorder=4)
+    ax.plot([], [], color="#ff2d55", lw=1.6,
+            label=f"keep-out: {threshold:.0f} mm to any obstacle "
+                  f"(centreline; incl. 85 mm robot radius)")
+
+
 def _render_background(ax, walls: np.ndarray, xs, ys, dist, alpha_field=0.85,
                        poles: np.ndarray = None, pole_radius_mm: float = 12.5):
     im = ax.imshow(
@@ -110,6 +149,7 @@ def _render_background(ax, walls: np.ndarray, xs, ys, dist, alpha_field=0.85,
         origin="lower", cmap=COLORMAP, alpha=alpha_field, zorder=1,
     )
     ax.scatter(walls[:, 0], walls[:, 1], s=1.0, c="black", linewidths=0, zorder=2)
+    _draw_clearance_line(ax, xs, ys, dist, poles, pole_radius_mm)
     _draw_poles(ax, poles, pole_radius_mm)
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
