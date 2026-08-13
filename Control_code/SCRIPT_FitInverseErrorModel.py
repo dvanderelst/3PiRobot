@@ -116,6 +116,25 @@ WALL_EDGES = [0., 250., 500., 750., 1000., 1500., 2000., 1e9]
 # console so a thin bin is never mistaken for a measured one.
 MIN_BIN_N = 15
 
+# The range beyond which the SIMULATOR should treat the world as empty.
+#
+# This is NOT MAX_RANGE_MM. That is a labelling constant -- under
+# FAR_LABEL_MODE="true_class" it relabels nothing -- and it was being written
+# into provenance and then used by EnvironmentSimulator as the perception
+# horizon. The two meanings diverged when the cap was lifted, with the result
+# that the simulated sensor went blind past 1 m and reported a clean
+# p_none = 1.0 beyond it, while the deployed inverse has no abstain output at
+# all and emits p_none <= 6.5e-4 on every one of 2775 pings. A policy trained
+# that way learns to read a channel that is identically zero on the robot.
+#
+# None = derive it from the data span, which is the honest answer: the model
+# was shown reflectors out to that range and nothing further, so that is where
+# its measured statistics stop applying. In a 3.5 x 4.2 m arena the resolved
+# value exceeds any in-cone distance, so ground truth never abstains -- which
+# matches the deployed model. Far-range failure is then carried by the
+# confusion and posterior tables, where it was measured, rather than by a gate.
+SENSOR_HORIZON_MM = None
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -219,6 +238,14 @@ def main() -> None:
     wall_near = np.nanmin(np.where(np.isfinite(slice_t), slice_t, np.nan), axis=1)
     true_rng = np.where(classes == 0, wall_near, true_rng)
 
+    _finite = true_rng[np.isfinite(true_rng)]
+    _horizon = (float(SENSOR_HORIZON_MM) if SENSOR_HORIZON_MM
+                else float(np.max(_finite) * 1.05) if len(_finite) else 4000.0)
+    print(f"  sensor horizon for the simulator: {_horizon:.0f} mm "
+          f"({'configured' if SENSOR_HORIZON_MM else 'data span x1.05'}); "
+          f"MAX_RANGE_MM={T.MAX_RANGE_MM:.0f} is a labelling constant and is "
+          f"NOT used as a horizon")
+
     model: Dict = {
         "provenance": {
             "fitted": datetime.now().isoformat(timespec="seconds"),
@@ -228,6 +255,10 @@ def main() -> None:
             "n_by_true_class": {n: int((classes == i).sum())
                                 for i, n in enumerate(CLASS_NAMES)},
             "max_range_mm": float(T.MAX_RANGE_MM),
+            # kept for older readers; the simulator prefers sensor_horizon_mm
+            "sensor_horizon_mm": float(_horizon),
+            "sensor_horizon_source": ("configured" if SENSOR_HORIZON_MM
+                                      else "data span x1.05"),
             "cone_half_deg": float(T.CONE_HALF_DEG),
             "note": ("Residuals of the deployed inverse against geometric truth, "
                      "for the training simulator's error model. The simulator "

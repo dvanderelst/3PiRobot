@@ -343,7 +343,10 @@ class EnvironmentSimulator:
         # perturb three distances -- it had no notion of a class, so a policy
         # trained against it never met a misclassification.
         self.error_model = InverseErrorModel.load(error_model_path)
-        self.max_range_mm  = self.error_model.max_range_mm
+        # The SENSOR horizon, not the trainer's labelling cap. Using the cap
+        # here gated ground truth at 1 m, so the simulated sensor abstained
+        # beyond it while the deployed inverse never abstains at all.
+        self.max_range_mm  = self.error_model.sensor_horizon_mm
         self.cone_half_deg = self.error_model.cone_half_deg
         self.opening_angle = 2.0 * self.cone_half_deg
         self.profile_steps = GEOM_PROFILE_STEPS
@@ -543,6 +546,15 @@ class EnvironmentSimulator:
         out["pole_dist_mm"]  = float(rng_mm) if cls == 1 else float("nan")
         out["pole_az_sigma_deg"]  = 0.0
         out["pole_dist_sigma_mm"] = 0.0
+        # Class-agnostic nearest range. Unlike the pole channels this is NOT
+        # gated on the class: the deployed inverse emits it on every ping
+        # whatever the classifier says, so a preview that omitted it would
+        # hand the policy a channel pinned at zero -- encode_obs reads it with
+        # a .get default -- while training saw it vary. That is the same fault
+        # this whole function exists to prevent for p_wall/p_pole/p_none.
+        out["agn_dist_mm"] = (float(rng_mm) if np.isfinite(rng_mm)
+                              else float(self.max_range_mm))
+        out["agn_dist_sigma_mm"] = 0.0
         out["phantom"] = False
         return out
 

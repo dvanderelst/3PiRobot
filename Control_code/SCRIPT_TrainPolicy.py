@@ -80,7 +80,12 @@ class Config:
     # policy train on distances the sensor cannot produce. rationale.md warns
     # that train and deploy clamps drifting apart puts the policy out of
     # distribution on the real robot; this is that hazard.
-    max_dist_mm:  float = 1000.0
+    # 2500 mm: the validated span of both the agnostic range head (~11% error
+    # to 2579 mm) and the wall slices. Was 1000, a relic of the capped inverse,
+    # which saturated every distance channel at exactly the range where the
+    # agnostic head starts to be the only usable signal. Raising it compresses
+    # near-range resolution in the normalised channel -- that is the cost.
+    max_dist_mm:  float = 2500.0
     min_dist_mm: float = 300.0
     max_sigma_mm: float = 500.0    # σ_sim caps out around ~400-500 mm at the model's far edge
 

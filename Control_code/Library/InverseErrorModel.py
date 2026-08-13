@@ -105,6 +105,14 @@ class InverseErrorModel:
     def __init__(self, tables: Dict):
         self.t = tables
         self.max_range_mm = float(tables["provenance"]["max_range_mm"])
+        # The horizon the simulator should gate ground truth on. Distinct from
+        # max_range_mm, which is the trainer's LABELLING cap and stopped
+        # meaning "how far the sensor sees" when FAR_LABEL_MODE became
+        # "true_class". Older error-model files carry only max_range_mm; using
+        # it as a horizon made the simulated sensor blind past 1 m and made it
+        # emit a clean p_none = 1.0 that the real inverse never produces.
+        self.sensor_horizon_mm = float(
+            tables["provenance"].get("sensor_horizon_mm", self.max_range_mm))
         self.cone_half_deg = float(tables["provenance"]["cone_half_deg"])
 
     @classmethod
@@ -121,7 +129,7 @@ class InverseErrorModel:
     def __repr__(self) -> str:
         p = self.t["provenance"]
         return (f"InverseErrorModel(fold={p['inverse_fold']}, "
-                f"n={p['n_echoes']}, range<={self.max_range_mm:.0f}mm)")
+                f"n={p['n_echoes']}, horizon={self.sensor_horizon_mm:.0f}mm)")
 
     # ── the observation ─────────────────────────────────────────────────────
 
@@ -141,7 +149,7 @@ class InverseErrorModel:
         encoder does not care which produced it.
         """
         if true_cls is None or not np.isfinite(true_range_mm):
-            true_cls, true_range_mm = 2, self.max_range_mm * 1.5
+            true_cls, true_range_mm = 2, self.sensor_horizon_mm
 
         # --- class, from the range-conditioned posteriors -------------------
         # Draw one of the model's ACTUAL per-ping posteriors for this (true
@@ -191,8 +199,11 @@ class InverseErrorModel:
             tr = float(true_slices_mm.get(nm, np.nan))
             b = _pick_bin(self.t["wall_slices"][nm], tr if np.isfinite(tr) else 0.0)
             if not np.isfinite(tr) or b is None:
-                out[f"distance_{nm}_mm"] = float(self.max_range_mm)
-                out[f"sigma_{nm}_mm"] = float(self.max_range_mm)
+                # No wall in this slice: report the horizon, not the old
+                # labelling cap. With the encoder's clamp raised, 1000 mm would
+                # read as "a wall at a metre" rather than "nothing in range".
+                out[f"distance_{nm}_mm"] = float(self.sensor_horizon_mm)
+                out[f"sigma_{nm}_mm"] = float(self.sensor_horizon_mm)
                 continue
             out[f"distance_{nm}_mm"] = float(tr + b["bias"] + rng.normal(0.0, b["sigma"]))
             out[f"sigma_{nm}_mm"] = float(b["sigma"])
