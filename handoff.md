@@ -189,8 +189,20 @@ The inverse has trained successfully under the canonical close-range setup (see 
 
 ## Code state
 
-*Last updated: 2026-08-12.*
+*Last updated: 2026-08-13.*
 *Current branch for ongoing work: `direct-learning-poletask`.*
+
+### Training-pipeline pre-flight review (2026-08-13)
+
+Commits `223c1a1`, `e860e2c`, `83363e0`, `38c9e63`, `db22a14`. Run before the Path04 training and worth having done: six faults, four of them one bug wearing four hats. **The lesson to carry: `MAX_RANGE_MM = 1000` is a LABELLING constant and stopped meaning "how far the sensor sees" the moment `FAR_LABEL_MODE` became `"true_class"`. Every place that read it as a horizon was wrong.**
+
+- **The simulated sensor went blind past 1 m.** `EnvironmentSimulator` took its horizon from the error model's `provenance.max_range_mm`, which the fitter wrote from `MAX_RANGE_MM`. `true_local_feature` then returned class `none` beyond it, so the sim emitted a clean **`p_none = 1.0`** at 1200/1800/2500 mm — while the deployed inverse has no abstain output at all and its `p_none` maxes at 6.5e-4 over 2775 pings. A policy would have learned to read a channel that is identically zero on the robot. **The fitter now records `sensor_horizon_mm` separately** (derived from the data span, 3356 mm); far-range failure is carried by the confusion and posterior tables, where it was measured.
+- **`encode_obs` clamped every distance at `max_dist_mm = 1000`,** so the new agnostic range channel read exactly 1.000 at 1000/1500/2000/2500/3000 mm — saturated precisely where it is the only usable signal, discarding the whole point of the head at the last step. Raised to **2500**, the validated span of both that head and the wall slices. Cost: compressed near-range resolution.
+- **The no-hit slice sentinel was also `max_range_mm`.** With the clamp raised, 1000 mm would have read as "a wall at a metre" rather than "nothing in range". Now tied to the horizon.
+- **`get_clean_measurement` did not emit `agn_dist_mm`** — the deploy preview's path, so it would have pinned the channel at zero via `encode_obs`'s `.get` default. Exactly the fault that function exists to prevent for `p_wall`/`p_pole`/`p_none`.
+- **Poles were not in the simulator's collision geometry** (`_segment_collides_with_walls` tested `arena.walls` only), so the simulated robot drove through the pole and never got a collision signal for it. Found by chasing Dieter's observation that the pole was missing from the teacher-rollout plot — a good argument for drawing things. Poles are now tested with their radius added to the clearance, rather than appended to the wall cloud, because that cloud is a *surface* sampling while a pole is a *centre*. All three rollout plots now share a `_draw_poles` helper.
+- **`use_sigma` stays OFF, and not as an ablation — it would be an oracle.** `observe()` emits the fitted per-BIN σ, so σ is constant within a true-distance bin while the distance is noisy: at a true 400 mm the reported distances scatter 76–648 mm and σ reads exactly 155 every draw. σ therefore identifies which of the 7 wall-slice bins the TRUE distance falls in, exactly — worth *more* than the class-posterior oracle removed in `d6182dd`, because the distance channel is so noisy. **The fix, if the channel is wanted: have the fitter keep the model's actual per-ping predicted σs per bin and have `observe()` draw one, exactly as it now does for the class posterior.** Recorded in the config comment so it is not flipped back unknowingly.
+- **Additive rotation bias added** (`motion_rot_bias_deg`, default 3.0, drawn per episode as U(−x,+x)). Every other perturbation was multiplicative on the commanded angle or zero-mean; the robot's dominant fault is neither. Verified before the change that a commanded 0° produced exactly 0° of motor rotation every episode. Applied **after** the rotation clip, since curl is accumulated while driving rather than commanded, and must not be clipped away when the commanded angle is already at the stop.
 
 ### Simulator error model fixed and refitted (2026-08-12)
 
