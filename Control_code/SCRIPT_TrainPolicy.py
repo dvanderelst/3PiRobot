@@ -92,12 +92,23 @@ class Config:
     # Sensor noise: σ_sim noise is now produced by the simulator (per-slice,
     # geometry-conditioned). No manual noise injection here.
 
-    # Drop σ channels from the policy obs. With use_sigma=False the input is
-    # 4-D (3 distances + prev_rot); with True it's 7-D (also 3 σs). σ at sim
-    # is SonarModel.sigma_sim(d_true) — a deterministic interp through the
-    # per-bin empirical σs from val data — and is mostly redundant with the
-    # d slot (since both are functions of d_true). Set False to test whether
-    # the policy actually uses σ.
+    # σ channels. OFF, and not merely as an ablation -- turning it on would
+    # hand the policy an oracle.
+    #
+    # `InverseErrorModel.observe` emits the fitted per-BIN σ, so σ is constant
+    # within a true-distance bin while the distance itself is noisy: at a true
+    # 400 mm the reported distances scatter 76-648 mm and σ reads exactly 155
+    # every single draw. σ therefore identifies which of the 7 wall-slice bins
+    # the TRUE distance lies in, exactly, and because the distance channel is
+    # so noisy that shortcut is worth more than the class-posterior oracle
+    # removed in d6182dd. The policy would learn to read the true range off
+    # its own uncertainty input, which on the robot is a per-ping prediction
+    # that varies and cannot be inverted that way.
+    #
+    # Worth having once the error model draws σ per ping from the empirical
+    # distribution of the model's predicted σ, the way it now draws the class
+    # posterior. Until then, off. (The old note here -- "4-D vs 7-D",
+    # "SonarModel.sigma_sim" -- described the retired wall-only model.)
     use_sigma: bool = False
 
     # Pole channels: the 3 class posteriors plus pole azimuth and range. On by
