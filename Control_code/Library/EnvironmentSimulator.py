@@ -416,14 +416,32 @@ class EnvironmentSimulator:
         self, x1: float, y1: float, x2: float, y2: float, clearance_mm: float
     ) -> bool:
         """
-        Collision test against wall point cloud.
+        Collision test against the wall point cloud AND the poles.
 
-        Returns True if any wall point is closer than clearance to the segment.
+        Returns True if any obstacle is closer than clearance to the segment.
+
+        Poles were omitted here until 2026-08-13, so the simulated robot drove
+        straight through them and was never given a collision signal for it --
+        while the real one would hit a dowel. The geometry is small (85 mm
+        robot + 12.5 mm pole, against a 3.5 x 4.2 m arena) so it rarely fired,
+        but a policy cannot learn to avoid an obstacle that does not exist, and
+        for Experiment 2 the pole is the landmark the whole task is about.
+        Poles are tested with their radius added to the clearance rather than
+        being appended to the wall cloud, since the wall cloud is a surface
+        sampling while a pole is a centre.
         """
-        if len(self.arena.walls) == 0:
-            return False
-        d2 = self._point_to_segment_distance_sq(self.arena.walls, x1, y1, x2, y2)
-        return bool(np.any(d2 <= (clearance_mm * clearance_mm)))
+        if len(self.arena.walls):
+            d2 = self._point_to_segment_distance_sq(self.arena.walls, x1, y1, x2, y2)
+            if bool(np.any(d2 <= (clearance_mm * clearance_mm))):
+                return True
+        poles = getattr(self.arena, "poles", None)
+        if poles is not None and len(poles):
+            pr = float(getattr(self.arena, "pole_radius_mm", 12.5))
+            lim = clearance_mm + pr
+            d2 = self._point_to_segment_distance_sq(poles, x1, y1, x2, y2)
+            if bool(np.any(d2 <= (lim * lim))):
+                return True
+        return False
 
     def _compute_safe_endpoint(
         self, start_x: float, start_y: float, target_x: float, target_y: float

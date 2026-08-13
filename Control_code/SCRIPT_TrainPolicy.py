@@ -54,7 +54,7 @@ _settings.data_folder = "TargetArenas"
 
 
 # ── Condition ────────────────────────────────────────────────────────────────
-TARGET_ARENA = "Path02"
+TARGET_ARENA = "Path04"
 CONDITION    = "default"
 BLIND        = False        # blind ablation: drop sonar, only prev_rot fed to
                             # the policy (in_dim=1). Output folder gets a
@@ -790,6 +790,25 @@ def save_policy(net: RNNNet, cfg: Config, val_loss: float, epoch: int, path: str
 # Plotting
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _draw_poles(ax, arena) -> None:
+    """Mark the poles on a rollout plot.
+
+    They were missing from all three, which mattered twice over: the pole is
+    the landmark Experiment 2 is about, and until 2026-08-13 it was also
+    absent from the simulator's collision geometry -- a plot showing it would
+    have made that obvious sooner.
+    """
+    poles = getattr(arena, "poles", None)
+    if poles is None or len(poles) == 0:
+        return
+    pr = float(getattr(arena, "pole_radius_mm", 12.5))
+    for px, py in np.asarray(poles).reshape(-1, 2):
+        ax.add_patch(plt.Circle((px, py), max(pr, 25.0), fill=True,
+                                fc="#c05cff", ec="black", lw=0.8, zorder=4))
+    ax.scatter([], [], s=40, c="#c05cff", edgecolors="black", linewidths=0.8,
+               label="pole")
+
+
 def plot_teacher_field(
     path: TargetPath,
     walls: np.ndarray,
@@ -818,6 +837,7 @@ def plot_teacher_field(
     fig, ax = plt.subplots(figsize=(9, 9))
     if walls is not None and len(walls) > 0:
         ax.scatter(walls[:, 0], walls[:, 1], s=0.5, c="#aaaaaa", linewidths=0, zorder=1)
+    _draw_poles(ax, arena)
     pts = path.points
     ax.plot(pts[:, 0], pts[:, 1], color="#d62728", linewidth=2.0, alpha=0.7,
             zorder=2, label="target path")
@@ -851,6 +871,7 @@ def plot_teacher_rollouts(
     fig, ax = plt.subplots(figsize=(8, 8))
     if walls is not None and len(walls) > 0:
         ax.scatter(walls[:, 0], walls[:, 1], s=0.5, c="#aaaaaa", linewidths=0, zorder=1)
+    _draw_poles(ax, simulator.arena)
     pts = path.points
     ax.plot(pts[:, 0], pts[:, 1], color="#d62728", linewidth=2.0, alpha=0.7,
             zorder=1.5, label="target path")
@@ -953,6 +974,7 @@ def plot_trajectories(
     fig, ax = plt.subplots(figsize=(8, 8))
     if walls is not None and len(walls) > 0:
         ax.scatter(walls[:, 0], walls[:, 1], s=0.5, c="#aaaaaa", linewidths=0, zorder=1)
+    _draw_poles(ax, simulator.arena)
     pts = path.points
     ax.plot(pts[:, 0], pts[:, 1], color="#d62728", linewidth=2.0, alpha=0.7,
             zorder=1.5, label="target path")
