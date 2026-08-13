@@ -347,6 +347,27 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-08-13 (night) — Path04 run01 on the robot: 8.5 laps, no collision, and the curl grows within a run
+
+`PolicyRuns/default_Path04_run01`, policy `default_Path04`, `POLICY_INPUT_SOURCE="live"`, 500 steps. Commit at run `bb8ec51`.
+
+- **500 steps = 8.5 laps, no collision.** Path02's run02 crashed on lap 3. That settles the path question.
+- **Tracking error mean 46 / median 33 / p90 83 / max 451 mm**, against run02's 119 / 94 / 266 / 341. The analyser's verdict: 0% of the path is tighter than this run's p90, and a safe path would have needed only **168 mm** of clearance. We built 455.
+- **THE FINDING: the yaw residual grows monotonically through the run**, while drive distance stays flat at ~152 mm — so it is rotation, not the drivetrain. Almost certainly battery sag over ~20 minutes of continuous driving.
+
+  | steps | yaw residual | cross-track mean / max |
+  |---|---|---|
+  | 0–100 | **−0.36**°/step | 37 / 131 mm |
+  | 100–200 | −1.32 | 31 / 85 |
+  | 200–300 | −2.37 | 32 / 126 |
+  | 300–400 | −3.24 | 38 / 122 |
+  | 400–500 | **−3.60** | **87 / 451** |
+
+- **The policy absorbs the disturbance up to almost exactly its training range, then stops.** Training drew `rot_bias ~ U(−3, +3)`. Tracking is flat at 31–38 mm mean right through the fourth fifth at −3.24°/step, then degrades sharply once the residual passes −3.6, outside anything it met. **That is the additive-bias mechanism (`db22a14`) validating itself: it works exactly as far as it was trained and no further.** Suggests widening `motion_rot_bias_deg` 3.0 → ~5.0 at the next retrain.
+- **This explains the 2026-08-07 "unresolved discrepancy".** That entry recorded run01 predicting +1.25°/step against −2.66 observed, gap unexplained, and floated a calibration-protocol mismatch. If curl grows within a run, calibration — measured from a standing start on a rested battery — captures the *beginning* state while the run average is dominated by the degraded later state. Simpler than the protocol hypothesis, and it gets the sign right. **A per-run average yaw residual conflates two regimes and should not be quoted as one number.**
+- **Sim-to-real: the error model is honest.** Real inverse vs geometry, bias +6 mm / RMSE **282 mm**; simulator vs geometry, −18 mm / **312 mm**. Ratio 0.90 — comparable, marginally pessimistic, which is the right direction. Per-band real errors (231 / 168 / 208 / 458 mm at 0–750 / 750–1250 / 1250–1750 / 1750+) track the model's held-out figures on an arena configuration it never saw. The inverse generalises to the new block layout.
+- **Consequence for future path design: the clearance/perception trade-off is much weaker than the 2026-08-13 entries assume.** All of that analysis anchored on run02's 266 mm p90 tracking error, which forced ~435 mm clearance, which pushed readings into the imprecise 1–1.4 m band and cost drift detectability. This policy tracks at **83 mm p90**. At that error a ~250 mm-clearance path is safe — Path02 territory, where 86% of steps see something inside a metre against Path04's 56%. **A future path could hug much closer and perceive far better at no real safety cost.**
+
 ### 2026-08-13 (evening) — Recalibration before the Path04 deploy: yesterday's drive constants were outliers
 
 `SCRIPT_CalibrateRobot.py`, both phases, `DRIVE_MM=150` × `DRIVE_REPEATS=15`, 5 reps per angle. Raw samples in `Library/RobotCalibration/Robot01_calibration.json`. **This resolves the uncertainty flagged in the 2026-08-12 entry.**
