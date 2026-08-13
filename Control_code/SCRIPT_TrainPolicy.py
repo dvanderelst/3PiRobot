@@ -54,7 +54,7 @@ _settings.data_folder = "TargetArenas"
 
 
 # ── Condition ────────────────────────────────────────────────────────────────
-TARGET_ARENA = "Path04"
+TARGET_ARENA = "Path02"
 CONDITION    = "default"
 BLIND        = False        # blind ablation: drop sonar, only prev_rot fed to
                             # the policy (in_dim=1). Output folder gets a
@@ -183,10 +183,18 @@ class Config:
     motion_drive_noise_mm:       float = 5.0
     motion_rot_gain_range_pct:   float = 0.15   # rot_gain ~ U(1-x, 1+x); 0 disables
     motion_drive_gain_range_pct: float = 0.05   # drive_gain ~ U(1-x, 1+x); 0 disables
-    # rot_bias ~ U(-x, +x) deg per episode, added to every step. 3.0 spans the
-    # measured -1.1 deg/step comfortably in both directions, so the policy
-    # cannot learn a one-sided correction. 0 disables.
-    motion_rot_bias_deg:         float = 3.0
+    # rot_bias ~ U(-x, +x) deg per episode, added to every step. 0 disables.
+    #
+    # Raised 3.0 -> 5.0 on 2026-08-13 by direct evidence from the robot. The
+    # first Path04 deploy showed the residual GROWING through a run as the
+    # battery sags -- -0.36 deg/step over the first hundred steps, -3.60 over
+    # the last -- and tracking held flat at 31-38 mm mean right up to -3.24,
+    # then broke to 87 mean once the disturbance passed the U(-3,+3) the
+    # policy had been trained on. It worked exactly as far as it was trained
+    # and no further, which is the cleanest possible read on where to set
+    # this. A later run opened at -4.09. 5.0 covers what the robot actually
+    # does, with margin.
+    motion_rot_bias_deg:         float = 5.0
     # Verbose flag for the kinematic-bias sampling. When True, print the
     # per-episode (rot_gain, drive_gain, rot_bias) at sample time and a one-line
     # summary of the first step's commanded vs perturbed action. Useful for
