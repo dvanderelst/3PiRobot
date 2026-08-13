@@ -102,6 +102,13 @@ class Config:
     # per lap against five phantoms -- and the ablation is how that gets
     # established rather than assumed.
     use_poles: bool = True
+    # Class-agnostic nearest-reflector range channel (+ its sigma when
+    # use_sigma). The pole range channel saturates at ~750 mm by design -- it
+    # is masked to 1 m as the terminal-stop signal -- so without this the
+    # policy has no usable distance beyond a metre, which is exactly the
+    # regime a path-following robot spends its time in. Off by default so
+    # existing policies keep their recorded width; turn on for Path04.
+    use_agn: bool = True
 
     # Blind ablation: when True the policy sees ONLY prev_rot (in_dim=1) —
     # all sonar channels are stripped. Used as a control: with motor noise
@@ -330,6 +337,7 @@ def _obs_from_cfg(meas: Optional[Dict[str, float]], prev_rot: float, cfg: Config
         min_dist_mm=cfg.min_dist_mm, max_dist_mm=cfg.max_dist_mm,
         max_sigma_mm=cfg.max_sigma_mm, max_rotate_deg=cfg.max_rotate_deg,
         use_sigma=cfg.use_sigma, blind=cfg.blind, use_poles=cfg.use_poles,
+        use_agn=cfg.use_agn,
     )
 
 
@@ -344,6 +352,7 @@ def _policy_from_net(net: "RNNNet", cfg: Config) -> Policy:
         use_sigma=cfg.use_sigma,
         blind=cfg.blind,
         use_poles=cfg.use_poles,
+        use_agn=cfg.use_agn,
         max_rotate_deg=net.max_rotate_deg,
         fixed_drive_mm=cfg.fixed_drive_mm,
         min_dist_mm=cfg.min_dist_mm,
@@ -714,6 +723,7 @@ def save_policy(net: RNNNet, cfg: Config, val_loss: float, epoch: int, path: str
         use_sigma=cfg.use_sigma,
         blind=cfg.blind,
         use_poles=cfg.use_poles,
+        use_agn=cfg.use_agn,
         max_rotate_deg=net.max_rotate_deg,
         fixed_drive_mm=cfg.fixed_drive_mm,
         min_dist_mm=cfg.min_dist_mm,
@@ -932,7 +942,8 @@ def main():
     # Derive from the canonical layout rather than hard-coding widths. The
     # literal 1/7/4 predated the class and pole channels and silently built a
     # 4-input network against 9-channel observations.
-    in_dim = len(make_obs_layout(cfg.use_sigma, cfg.blind, cfg.use_poles))
+    in_dim = len(make_obs_layout(cfg.use_sigma, cfg.blind, cfg.use_poles,
+                                 cfg.use_agn))
     cfg.output_dir = os.path.join(
         "PolicyTraining",
         f"{CONDITION}_{cfg.target_arena}{'_blind' if cfg.blind else ''}",

@@ -64,17 +64,34 @@ _OBS_POLE_SIGMA = [
     "pole_az_sigma_deg_norm",
     "pole_dist_sigma_mm_norm",
 ]
+# Class-agnostic nearest-reflector range. The one channel that stays honest
+# past ~1.4 m: distance is monaural time-of-flight and needs no classification,
+# so it tracks to 2.5 m at ~11% error, where class and azimuth are at chance
+# (Performance notes 2026-08-12 night). The pole range channel above saturates
+# at ~750 mm by design, being masked to 1 m as the terminal-stop signal, so
+# without this the policy has NO usable distance beyond a metre.
+_OBS_AGN = [
+    "agn_dist_mm_norm",
+]
+_OBS_AGN_SIGMA = [
+    "agn_dist_sigma_mm_norm",
+]
+
 _OBS_TAIL = ["prev_rot_deg_norm"]
 
 
 def make_obs_layout(use_sigma: bool, blind: bool = False,
-                    use_poles: bool = True) -> List[str]:
+                    use_poles: bool = True, use_agn: bool = False) -> List[str]:
     """Canonical obs-vector channel names. Train and deploy must agree.
 
     `use_poles=False` drops the class and pole channels, leaving the pre-2026-08
     wall-only vector. Kept as an ablation: the pole channel may be worth little
     on a given path, and the ablation is how that gets established rather than
     assumed.
+
+    `use_agn=True` adds the class-agnostic nearest-range channel (+ its σ when
+    `use_sigma`). Defaults False so every policy trained before 2026-08-13
+    still loads and validates at its recorded width.
 
     `blind=True` strips all sonar channels (distances and σs) — the policy
     sees only `prev_rot`. Used as a control condition: with motor noise
@@ -89,6 +106,10 @@ def make_obs_layout(use_sigma: bool, blind: bool = False,
         obs += list(_OBS_CLASS) + list(_OBS_POLE)
         if use_sigma:
             obs += list(_OBS_POLE_SIGMA)
+    if use_agn:
+        obs += list(_OBS_AGN)
+        if use_sigma:
+            obs += list(_OBS_AGN_SIGMA)
     return obs + list(_OBS_TAIL)
 
 
@@ -105,6 +126,7 @@ def encode_obs(
     use_sigma: bool,
     blind: bool = False,
     use_poles: bool = True,
+    use_agn: bool = False,
     cone_half_deg: float = 35.0,
 ) -> np.ndarray:
     """Pack a 6-key sonar measurement + previous rotation into the policy obs.
@@ -119,7 +141,8 @@ def encode_obs(
     than being handed a sentinel it might read as a measurement.
 
     Widths: 1 blind; otherwise 3 distances (+3 σs) (+3 class +2 pole
-    (+2 pole σs)) +1 prev_rot. So 4 / 7 wall-only, 9 / 14 with poles.
+    (+2 pole σs)) (+1 agn (+1 agn σ)) +1 prev_rot. So 4 / 7 wall-only,
+    9 / 14 with poles, 10 / 16 with poles and the agnostic range.
     In blind mode `meas_dict` is unused and may be None.
     """
     if blind:
@@ -167,6 +190,19 @@ def encode_obs(
                 0.0 if not np.isfinite(rgs) else clamp_s(rgs) / max_sigma_mm,
             ]
 
+    if use_agn:
+        # Unlike pole_dist this is meaningful on every ping regardless of the
+        # class posterior, so it is NOT gated. A missing key would mean the
+        # inverse predates the head, which is a configuration error rather
+        # than a "no reading" case -- but zero rather than NaN keeps a stale
+        # artifact from poisoning the forward pass.
+        ad = float(meas_dict.get("agn_dist_mm", float("nan")))
+        obs.append(0.0 if not np.isfinite(ad) else clamp_d(ad) / max_dist_mm)
+        if use_sigma:
+            ads = float(meas_dict.get("agn_dist_sigma_mm", float("nan")))
+            obs.append(0.0 if not np.isfinite(ads)
+                       else clamp_s(ads) / max_sigma_mm)
+
     obs.append(float(prev_rot) / max_rotate_deg)
     return np.asarray(obs, dtype=np.float32)
 
@@ -187,6 +223,7 @@ def make_policy_dict(
     max_sigma_mm: float,
     blind: bool = False,
     use_poles: bool = False,
+    use_agn: bool = False,
     cone_half_deg: float = 35.0,
 ) -> dict:
     """Deploy-relevant subset of the saved policy JSON. SCRIPT_TrainPolicy
@@ -199,9 +236,10 @@ def make_policy_dict(
         "use_sigma":      bool(use_sigma),
         "blind":          bool(blind),
         "use_poles":      bool(use_poles),
+        "use_agn":        bool(use_agn),
         "cone_half_deg":  float(cone_half_deg),
         "obs_layout":     make_obs_layout(bool(use_sigma), bool(blind),
-                                          bool(use_poles)),
+                                          bool(use_poles), bool(use_agn)),
         "max_rotate_deg": float(max_rotate_deg),
         "fixed_drive_mm": float(fixed_drive_mm),
         "min_dist_mm":    float(min_dist_mm),
@@ -234,6 +272,9 @@ class Policy:
         # default must be False -- otherwise every artifact on disk fails its
         # own in_dim check on load.
         self.use_poles      = bool(params.get("use_poles", False))
+        # Same reasoning as use_poles: absent in every artifact trained before
+        # 2026-08-13, so it must default False or those fail their in_dim check.
+        self.use_agn        = bool(params.get("use_agn", False))
         self.cone_half_deg  = float(params.get("cone_half_deg", 35.0))
         self.max_rotate_deg = float(params["max_rotate_deg"])
         self.fixed_drive_mm = float(params["fixed_drive_mm"])
@@ -243,20 +284,22 @@ class Policy:
         self.obs_layout     = list(params["obs_layout"])
 
         expected_in = len(make_obs_layout(self.use_sigma, self.blind,
-                                          self.use_poles))
+                                          self.use_poles, self.use_agn))
         if self.in_dim != expected_in:
             raise ValueError(
                 f"in_dim={self.in_dim} inconsistent with "
                 f"use_sigma={self.use_sigma}, blind={self.blind}, "
-                f"use_poles={self.use_poles} (expected {expected_in})"
+                f"use_poles={self.use_poles}, use_agn={self.use_agn} "
+                f"(expected {expected_in})"
             )
         canonical_layout = make_obs_layout(self.use_sigma, self.blind,
-                                           self.use_poles)
+                                           self.use_poles, self.use_agn)
         if self.obs_layout != canonical_layout:
             raise ValueError(
                 f"obs_layout {self.obs_layout!r} does not match canonical "
                 f"layout {canonical_layout!r} for use_sigma={self.use_sigma}, "
-                f"blind={self.blind}, use_poles={self.use_poles}"
+                f"blind={self.blind}, use_poles={self.use_poles}, "
+                f"use_agn={self.use_agn}"
             )
 
         # Unpack genome → numpy weights, in the same order as RNNNet.to_genome():
@@ -301,7 +344,8 @@ class Policy:
             min_dist_mm=self.min_dist_mm, max_dist_mm=self.max_dist_mm,
             max_sigma_mm=self.max_sigma_mm, max_rotate_deg=self.max_rotate_deg,
             use_sigma=self.use_sigma, blind=self.blind,
-            use_poles=self.use_poles, cone_half_deg=self.cone_half_deg,
+            use_poles=self.use_poles, use_agn=self.use_agn,
+            cone_half_deg=self.cone_half_deg,
         )
 
     def step(
