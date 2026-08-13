@@ -44,7 +44,7 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
   1d. **Then, in order, to finish Experiment 2.**
      1. **DONE 2026-08-12 (`8a3936a`).** Class-agnostic range head folded into the trainer, retrained, deploy + CV artifacts written. See Code state. **Still to do from this item: add its channel to `Library/Policy.py`'s observation layout — and emit `agn_dist_mm` from `InverseErrorModel.observe()` in the SAME change**, or the simulator and robot silently disagree.
      2. **DONE 2026-08-12 (`d6182dd`).** Error model fixed and refitted: bins extended to 2500+, per-ping posteriors replace the oracle, `agn_dist_mm` emitted. See Code state. **Remaining from this item: add the `agn_dist` channel to `Library/Policy.py`'s observation layout** — a deliberate change, since it moves the obs width (14 → 16 with σ) and so invalidates `default_Path02`. Fine to do when the policy is retrained for the new path anyway. **Expect simulated policy performance to drop against the old run**; the simulator is now much closer to the real sensor, so the two are not comparable.
-     3. **Path04 is drawn and is the right shape — just widen four pinch points** to ~350–400 mm (steps 22–28, 38–43, 17–19, 10–12; six of 61). It already matches Path02 on drift detectability, the metric that matters. See Performance notes 2026-08-13, including why object-facing and `EXPT_gaze_path.py`'s distinctiveness are both the wrong criterion. Design against a **1400 mm horizon** — nothing beyond 1400 adds anything. **Do not use `EXPT_gaze_path.py` alone to accept or reject a path**; it omits motor history.
+     3. **DONE 2026-08-13. Path04 v3 is the path** — 41 waypoints, 8.8 m, min clearance 455 mm (370 usable), turns max 46°, detects 66% / 81% of a 200 / 300 mm lateral drift. Numbers and the two rejected redraws in Performance notes 2026-08-13 (later). `SCRIPT_AnalysePathRun.py` now reports drift detectability and what-is-ahead, so this is checkable without re-deriving it. **Do not judge a path by clearance, by `cls != none`, by object-facing, or by `EXPT_gaze_path.py` alone** — each of those missed a real failure during this iteration.
      4. **Add the additive rotation bias to the training motion model** (item 6 below) — the robot sheds ~1.1°/step regardless of commanded angle and the multiplicative gain cannot emulate it.
      5. Retrain the policy, recalibrate, deploy.
      - **Also worth doing, cheap:** a confidence threshold in `feature_from_inverse` instead of argmax. It restores the controller's abstain path, currently dead code, and 0.7–0.8 gives 92–95% accuracy on 57–69% of pings.
@@ -334,6 +334,27 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-08-13 (later) — Path04 v3 adopted: safe, smooth, and perceptually adequate
+
+Three redraws, and the iteration is the lesson. Numbers below are from `SCRIPT_AnalysePathRun.py`, which now reports drift detectability directly (commit for that alongside).
+
+| | Path02 | v1 | v2 | **v3 (adopted)** |
+|---|---|---|---|---|
+| min clearance | 155 | 293 | 472 | **455** |
+| usable margin | 70 | 208 | 387 | **370** |
+| median clearance | 355 | 470 | 603 | 560 |
+| median nearest-AHEAD | 614 | — | 1067 | 946 |
+| steps with <1 m ahead | 86% | — | 42% | 56% |
+| detect 200 / 300 mm lateral | 76 / 93% | 75 / 92% | 56 / 73% | **66 / 81%** |
+| turns median / max | 17 / 61° | 19 / 59° | 16 / 71° | **14 / 46°** |
+
+- **v3 is the first path that is simultaneously safe, smooth and usable.** Its 370 mm usable margin exceeds even the largest tracking error ever recorded (341 mm), against Path02's 70 mm; turns max 46° against the policy's 90° `max_rotate_deg`.
+- **v2 is the instructive failure.** Told to widen four pinch points, the redraw pushed the *whole* path out — median clearance 470 → 603 mm — and lost 19 points of detectability while remaining perfectly safe and "informative". **The mechanism: it ended up looking at things 1–1.4 m away, where the model's error (236–401 mm) exceeds the change a 200 mm sideways shift produces.** The readings were there and useless. Clearance and "informative" both missed this, which is why the diagnostic was added.
+- **What is AHEAD is the controllable quantity, not clearance.** Clearance is omnidirectional; the cone is forward. A path can sit 470 mm from a wall to its side and see nothing closer than a metre in front. Aim legs *at* things and turn away at ~550 mm.
+- **But the sub-500 mm band is a genuine trade, not a drawing error.** To have something 400 mm ahead your clearance to it is 400 mm. v3 has 0% of steps under 500 mm ahead against Path02's 33%; that gap cannot be closed without giving back the safety margin, and should not be. It is most of the residual difference in detectability.
+- **Why 66% is judged sufficient.** The metric is per-step and pessimistic: it asks whether a *single* reading moves detectably. Drift is persistent and the RNN accumulates, so a displacement visible on two steps in three is caught within a few steps. run02 held lap-to-lap at 116 mm on 76%; 66% is the same regime.
+- **Caveats on the metric, since it has been wrong before.** It uses the model's measured per-band σ against *true* geometry, so it is an upper bound on what is detectable — real detection also needs the estimate to be unbiased, and there is a known +50 to +87 mm bias below 1.5 m. And it treats steps independently, which understates paths whose evidence accumulates.
 
 ### 2026-08-13 — Path04 arena and path: the right metric is drift detectability, and by it the drawn path is fine
 
