@@ -347,6 +347,23 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-08-13 (evening) — Recalibration before the Path04 deploy: yesterday's drive constants were outliers
+
+`SCRIPT_CalibrateRobot.py`, both phases, `DRIVE_MM=150` × `DRIVE_REPEATS=15`, 5 reps per angle. Raw samples in `Library/RobotCalibration/Robot01_calibration.json`. **This resolves the uncertainty flagged in the 2026-08-12 entry.**
+
+| date | curl (deg/mm) | scale | drive reps |
+|---|---|---|---|
+| 2026-06-08 | −0.01993 | 0.9873 | — |
+| 2026-08-07 | −0.01244 | 0.9807 | 10 |
+| 2026-08-12 | **−0.02609** | **1.0036** | 15 |
+| **2026-08-13** | **−0.01444** | **0.9772** | 15 |
+
+- **Both of the 2026-08-12 drive constants were bad measurements, not drift.** Curl is back to −0.01444, inside the −0.012 to −0.020 range of the other three sessions; −0.02609 stands alone. Scale is back below unity at 0.9772, near 0.9807 and 0.9873; 1.0036 remains the only reading above 1.0 ever recorded. **The 2026-08-12 entry's worry that "the two drive constants moved a lot and do not share one story" is retired** — they moved because the measurement was noisy.
+- **The deployed curl is now close to what run02's behaviour implied.** run02 suggested an in-run curl of −0.0177 against −0.0124 measured at the time; −0.0144 sits between them. The 2026-08-07 "unresolved discrepancy" looks less like a protocol mismatch and more like between-session measurement noise, consistent with what the 2026-08-12 entry already suspected.
+- **The rotation table is better than yesterday's.** Mean |error| **0.78°** against a mean per-angle sd of **1.04°** (2026-08-12: 1.45° against 1.00°). Yesterday's clearest real effect — ~3° under-rotation at ±40° — is gone: now +1.38 / −1.16.
+- Four of ten entries still exceed one sd (−40, −30, −20, +40) but they do not form a pattern: two over-rotate, two under. With 5 reps per angle that is about what chance gives. Do not read individual cells.
+- **−30 is the flakiest cell for the third session running**: error −1.86°, sd 1.22, range 3.27°. Flagged on 2026-08-07 (one wild rep) and 2026-08-12 (sd 1.72, range 4.97). Three sessions makes it a pattern rather than luck — something about that command is less repeatable than its neighbours. Not worth chasing now; worth remembering if a run misbehaves on left turns near 30°.
+
 ### 2026-08-13 (evening) — Path04 policy trained: comparable loss to Path02 on a harder sensor, 5-10% collision rate
 
 `PolicyTraining/default_Path04/`, commit at training `83363e0`. Config: `use_poles=True`, **`use_agn=True`**, `use_sigma=False`, `max_dist_mm=2500`, `motion_rot_bias_deg=3.0`, obs width **10**, 2000 epochs.
