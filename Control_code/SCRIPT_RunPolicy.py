@@ -53,12 +53,14 @@ from LorexLib.Environment import capture_environment_layout
 POLICY    = "default_Path02"                  # sub-folder under PolicyTraining/
 ARENA     = "Path02"                          # sub-folder under TargetArenas/
 REPEAT    = "01"
+VARIATION = ""
 
 MAX_STEPS = 500
 
 ROBOT_ID    = 1
 POLICY_FILE = "best_policy.json"
 SESSION     = f"{POLICY}_run{REPEAT}"
+if len(VARIATION) > 0: SESSION += '_' + VARIATION
 
 # Dry-run flags (set False for tethered debugging without motion)
 do_rotation    = True
@@ -277,6 +279,36 @@ if _env_dir:
     else:
         print("No arena_features.npz found — trajectory plot will show path only")
 
+# ── Target path, for the live plot and a running cross-track readout ────────
+# Read straight from the JSON rather than via Library.TargetPath: that resamples
+# and needs _settings.data_folder pointed at TargetArenas, which this script
+# does not otherwise touch. Densified here only for the nearest-point distance.
+_path_xy = None
+try:
+    with open(os.path.join("TargetArenas", ARENA, "target_path.json")) as _fh:
+        _wp = np.array([[w["x_mm"], w["y_mm"]]
+                        for w in json.load(_fh)["waypoints"]], dtype=float)
+    _closed = np.vstack([_wp, _wp[:1]])
+    _dense = []
+    for _i in range(len(_closed) - 1):
+        _a, _b = _closed[_i], _closed[_i + 1]
+        _n = max(2, int(np.hypot(*(_b - _a)) / 20.0))
+        for _t in np.linspace(0.0, 1.0, _n, endpoint=False):
+            _dense.append(_a + _t * (_b - _a))
+    _path_xy = np.asarray(_dense)
+    print(f"Target path loaded: {len(_wp)} waypoints "
+          f"({_path_xy.shape[0]} dense pts) for live overlay")
+except (OSError, KeyError, ValueError) as _e:
+    print(f"No target path overlay ({_e}) — plot will show trajectory only")
+
+
+def _cross_track_mm(x, y):
+    """Distance from a pose to the nearest point on the target path."""
+    if _path_xy is None or not np.isfinite(x) or not np.isfinite(y):
+        return float("nan")
+    return float(np.hypot(_path_xy[:, 0] - x, _path_xy[:, 1] - y).min())
+
+
 _traj_x:   list = []
 _traj_y:   list = []
 _traj_yaw: list = []
@@ -403,12 +435,26 @@ def _save_trajectory_plot() -> None:
                                     linewidth=0.6, alpha=0.7))
         ax.scatter([], [], s=40, c="#984ea3", edgecolor="black",
                    linewidth=0.6, label="Poles")
+    if _path_xy is not None:
+        _pc = np.vstack([_path_xy, _path_xy[:1]])
+        ax.plot(_pc[:, 0], _pc[:, 1], color="#d62728", linewidth=2.0,
+                alpha=0.55, zorder=1.5, label="Target path")
     ax.plot(xs, ys, color="black", alpha=0.5, linewidth=1, label="Trajectory")
     ax.scatter(xs, ys, color="blue", s=15, zorder=3)
     for i, (x, y) in enumerate(zip(xs, ys)):
         if i % max(1, PLOT_EVERY) == 0:
             ax.text(x, y, str(i), color="red", fontsize=7)
-    ax.set_title(f"{SESSION}  —  step {len(_traj_x) - 1}")
+    # Cross-track error in the title: the point of the overlay is to see the
+    # departure, and a number reads faster than a picture mid-run.
+    _title = f"{SESSION}  —  step {len(_traj_x) - 1}"
+    if _path_xy is not None:
+        _err = np.array([_cross_track_mm(a, b) for a, b in zip(xs, ys)])
+        _err = _err[np.isfinite(_err)]
+        if len(_err):
+            _title += (f"   |   off-path now {_err[-1]:.0f} mm"
+                       f"   median {np.median(_err):.0f}"
+                       f"   max {_err.max():.0f}")
+    ax.set_title(_title)
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
     ax.set_aspect("equal")
