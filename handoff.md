@@ -67,6 +67,8 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
      **Tooling: `SCRIPT_AnalysePathRun.py` (added 2026-08-07) reproduces every number above** — path clearance profile, informative-perception fraction, robot tracking error, the "% of path tighter than p90 error" verdict, the required minimum clearance, per-step yaw residual and drive scale, and crash locations with their local clearance. Run it on a candidate path **before** training against it: `python3 SCRIPT_AnalysePathRun.py <Arena> [<RunSession>]`. Arena-only mode skips the run analysis.
      ⚠️ **Informative-perception metric mismatch — do not mix the two.** `SCRIPT_AnalysePathRun.py` measures *true geometry, facing along the path, `cls != none`*, and gives **Path02 = 85.5%**. The **26% / 49%** figures quoted for Path01/Path02 in the 2026-08-07 Performance-notes entry came from a different measurement whose definition was not recorded — it reported 73.5% wall yet 49% informative, so "informative" there was a **subset of wall hits**, not simply "not none" (possibly range-limited, or measured through the error model rather than true geometry). Treat the old 26%/49% as unreproducible. The qualitative trade-off (clearance vs informativeness) holds under either definition. **Both paths were re-derived under the script's definition on 2026-08-08 and the numbers are in that Performance-notes entry** (at 1000 mm: Path01 56.6%, Path02 85.5%), swept across horizons — use those, and no longer quote a single informativeness figure without saying which horizon it assumes.
   4. **Then collect repeats and the ablation conditions**, on the robot rather than in sim (user's call, 2026-08-07): `use_poles=False` and the blind control. The plumbing exists. Whether the *simulated* policy degrades without the pole channel says something about the simulator, not the robot. Retraining is needed for the new path anyway, so fold the training-noise fix (item 6) in at the same time.
+     - **IN PROGRESS 2026-08-14 — the robot-side ablation is landmark removal, not channel clamping**, and it is working. Baseline (500 steps) vs pole+B1 removed (500 steps) doubles the cross-track median, 63 → 128 mm. **The error appears downstream of each removed object, not at it** — B1 was the turn cue for the phase-39 corner. Full numbers, the mechanism, and the limitation (both objects removed together, so the run cannot attribute) in Performance notes 2026-08-14. **Next run is specified there: pole out, B1 back in, 500 steps, with a pre-registered null and its falsifier.**
+     - The *simulated* channel-clamp ablation (`SCRIPT_Ablations.py`, rewritten 2026-08-14) is the companion, and its prediction is what the removal runs test: the three-slice wall profile carries the control, the class and pole-geometry channels are close to inert. Beware over-reading `no_class` — it clamps the posterior while leaving all three distances intact, so it is a subtle condition, not "the robot cannot tell what it is looking at".
   5. **`RunPolicy` has no arena guard**, unlike `RunDirectPolicy`'s `check_arena_matches_pole()`. A moved block gives a confusing failure rather than a clear one. Worth adding if the furniture moves between sessions.
   6. **Add an additive rotation bias to the training motion model.** `SCRIPT_TrainPolicy.py` perturbs motion with `rot_motor = rot_exec * rot_gain + N(0, 3deg)` — every term is either multiplicative on the commanded angle or zero-mean. **There is no additive bias term anywhere.** The real robot's fault is exactly a fixed additive offset (about -1.1 deg/step even after calibration, uncorrelated with the commanded angle), so it is a perturbation the policy has never met in training, and the multiplicative gain cannot emulate it (at `rot_exec = 0` the gain does nothing but the robot still sheds heading). Suggested: draw a per-episode `rot_bias ~ U(-3, +3)` deg and add it to `rot_motor`. run02 succeeded *despite* this, not because of it — worth making it robust by design. The same gap is why the pre-flight preview says nothing about calibration: it inherits this noise model.
   7. **Tracker settling is the weak link in the measurements.** ~3% of run02 steps are glitches, and the paired +18.2/-23.1 deg residuals at steps 44/45 are **one bad yaw read**, not two bad steps (a wrong `yaw[45]` biases the step before and after equally and oppositely). The calibration run threw several "pose did not stabilise within 8.0s" warnings for the same reason. A bad pose also feeds the policy a wrong `prev_rot`.
@@ -346,6 +348,45 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-08-14 — Landmark removal on the robot: the path degrades globally, and the error appears *downstream* of the removed object
+
+`PolicyRuns/default_Path04_run01_B1_Pole_removed` (500 steps) against `PolicyRuns/default_Path04_run01` (500 steps, same policy `default_Path04` at rot_bias ±5, `POLICY_INPUT_SOURCE="live"`, fresh batteries, recalibrated before each). Commit at run `f290630`. Two objects removed together: the **pole** at (1415, −624) and **B1**, the central block at (−25, −614). The stored arena was deliberately *not* re-digitized, so `sim_prediction_clean` stays on a common reference across both runs.
+
+| | baseline | removed |
+|---|---|---|
+| cross-track median | 63 mm | **128 mm** |
+| p90 | 108 mm | **374 mm** |
+| max | 201 mm | **639 mm** |
+| min obstacle clearance | 364 mm | **85 mm** |
+| steps under 250 mm clearance | 0 | **15** |
+
+**The effect is real and large — and it is not where the objects were.** Per-phase medians (56-step lap; delta = removed − baseline):
+
+```
+B1 window   33  34  35  36  37  38 | 39   40   41   42
+delta (mm)  -3 +15 +29 +33 +50 +74 |+154 +344 +483 +139
+
+pole window  8   9  10  11  12     | 14   15   16   17
+delta (mm)  +5 +57 +28 +33 +54     |+132 +198 +237 +285
+```
+
+Through each manipulated window the robot tracks near baseline; it falls apart on the following steps. **The prediction going in was a local excursion at B1 and nothing at the pole. Locality was wrong** — this is a recurrent policy, and the landmark encounter is where state registration is lost, not where the trajectory consequence shows.
+
+**The corner at phase 39–41 is the mechanism, and it is concrete.** The path tangent swings 122° → 163° → −171° (top-left turn). Baseline rotates 15.5 / 23.5 / 16.8°; removed rotates **4.7** / 21.2 / 14.3°. It under-turns at the entry, carries straight on, then swings wide to 546 mm. **B1 was not an obstacle to avoid — it was the cue that the corner had arrived.** Seen from outside this reads as the robot hunting for a landmark before giving up; in the data it is a missed turn onset followed by a wide recovery.
+
+**Not accumulating.** Lap medians — baseline 79/61/65/51/60/64/55/77/60, removed 130/135/113/129/117/203/**68**/171/109. Stationary but highly variable; lap 7 came back to near-baseline. The policy has not lost the path, it has become unreliable on it. (An earlier read at 300 steps flagged a possible progressive decline; the full run refutes that.)
+
+**Sensory side — the pole removal was near-silent, as the geometry predicted.** Centre-slice live reading in the pole window 1273 → 1152 mm (the wall sits right behind the dowel, so removing it barely changes the profile). B1's removal *was* seen: 1741 → 2304 mm, +563. The class channel did register the pole's absence moderately — p(pole) in the pole window 0.445 → 0.306, above-0.5 on 46% → 32% of steps. **Note the correction: at 300 steps this looked like no change at all (0.403 / 41%); the full run shows a real but modest shift.**
+
+**Limitation — this run cannot attribute.** Both objects came out together, and since the effects propagate around the loop, the +24 mm in the pole window cannot be assigned to the pole rather than to B1's disturbance arriving from upstream.
+
+**NEXT RUN, decided 2026-08-14: pole out, B1 back in** (not the reverse). Power argument: lap-to-lap SD of a phase median is **24 mm** in baseline but **67 mm** in the removed condition, so testing pole-only against the tight baseline detects a ~20 mm shift where testing B1-only against the noisy both-removed run needs ~55 mm — about 2.7× more sensitive. It is also the right logic: the simulation ablation claims the class channel is inert, and inertness is demonstrated by a predicted null against a low-variance reference.
+- Put B1 back at **(−25, −614)** within ~50 mm — it is the phase-39 turn cue, so a displaced B1 confounds the comparison. Leave the pole out. Recalibrate first. Run 500 steps for matched n. Do not re-digitize the arena.
+- **Pre-registered prediction:** no phase departs from baseline by more than ~20 mm; in particular phases 8–12 and 13–19 sit at baseline.
+- **Falsifier:** phases 14–19 went +132 to +285 mm with both objects out. If they light up again with only the pole gone, the pole was contributing and the B1-centred account is wrong.
+
+Note for the arena: the digitized Path04 arena has **five** free-standing blocks, not four — B1 (−25, −614), B2 (−397, −2138), B3 (1183, 593), B4 (1481, −1765), and B5 (−1395, −1541). Nearest-in-cone windows over the lap are B3 0–7 and 53–55, pole 8–12, B4 13–19, B2 21 and 29–32, B1 33–39, B5 40–43; phases 22–28 and 44–52 have nothing in the ±35° cone.
 
 ### 2026-08-14 — Retrain at rot_bias ±5: the failure mode from run01 is gone
 
