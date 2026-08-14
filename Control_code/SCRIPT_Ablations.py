@@ -2,25 +2,34 @@
 """
 SCRIPT_Ablations.py — input-ablation diagnostic for the supervised RNN.
 
-Supports both observation variants written by SCRIPT_TrainPolicy.py:
-  use_sigma=True  → 7-input  [d_L, d_C, d_R, σ_L, σ_C, σ_R, prev_rot]
-  use_sigma=False → 4-input  [d_L, d_C, d_R, prev_rot]
+The observation layout is read verbatim from best_policy.json's `obs_layout`,
+so this works for every variant the trainer writes: 4/7 wall-only, 9/14 with
+the class and pole channels, 10/16 once the class-agnostic range head is on,
+1 for a blind policy. Conditions name channels; any that are absent from a
+given policy are dropped, and a condition left with nothing to clamp collapses
+into 'full' and is skipped.
 
-The actual layout is read from best_policy.json (in_dim + use_sigma).
-σ-only conditions auto-collapse into 'full' for the 4-input variant.
+(Until 2026-08-14 this assumed in_dim was 4 or 7 and rejected anything else,
+which by then meant every current policy.)
 
 For each ablation, the listed input *names* are clamped to their training-time
 medians (so the policy gets a constant typical signal rather than zero or
 NaN, matching how the old script handled "no_sonar"). Conditions:
 
   full           : nothing clamped (control)
-  no_distances   : d_L, d_C, d_R       — does the policy use distance at all?
-  no_sigmas      : σ_L, σ_C, σ_R       — does the policy actually use σ?
-                                         (drops to 'full' when use_sigma=False)
-  center_only    : d_L, d_R [+σ_L,σ_R] — can it navigate from center sensing only?
-  sides_only     : d_C [+σ_C]          — does it need the center reading?
-  no_prev_rot    : prev_rot            — does action feedback matter?
-  blind          : everything          — dead-reckoning from hidden state alone
+  no_walls       : the 3 slice distances  — does it use the wall profile?
+  no_class       : p_wall/p_pole/p_none   — does the class posterior matter?
+  no_pole_geom   : pole azimuth + range   — is the pole used as a landmark?
+  no_agn_range   : agn_dist               — does the class-agnostic range earn
+                                            its channel? (added 2026-08-13)
+  no_prev_rot    : prev_rot               — does action feedback matter?
+  sonar_only     : prev_rot               — same clamp, kept for symmetry
+  dead_reckoning : every sonar channel    — THE control: all perception frozen
+                                            at its median, action feedback
+                                            intact. If the policy still laps
+                                            the arena, sonar is not doing the
+                                            work and the Experiment 2 claim
+                                            fails.
 
 Per condition we record trajectories, collisions, max arc-length progress
 (in laps), and mean cross-track error. Outputs a 2×4 trajectory grid plus a
@@ -56,31 +65,32 @@ from SCRIPT_TrainPolicy import (
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────
-RUN_DIR    = "PolicyTraining/default_Target02"
-N_ROLLOUTS = 12
+RUN_DIR    = "PolicyTraining/default_Path04"
+N_ROLLOUTS = 24
 SEED       = 1234
 
 # Each condition specifies which input *names* to clamp. Resolved against the
 # actual obs layout in main(); names not present in the layout are silently
 # dropped (e.g. σs in the 4-input variant). Conditions whose clamps all drop
 # out collapse to 'full' and are removed to avoid duplicate work.
+_WALLS = ["distance_right_mm_norm", "distance_center_mm_norm",
+          "distance_left_mm_norm",
+          "sigma_right_mm_norm", "sigma_center_mm_norm", "sigma_left_mm_norm"]
+_CLASS = ["p_wall", "p_pole", "p_none"]
+_POLE  = ["pole_az_deg_norm", "pole_dist_mm_norm",
+          "pole_az_sigma_deg_norm", "pole_dist_sigma_mm_norm"]
+_AGN   = ["agn_dist_mm_norm", "agn_dist_sigma_mm_norm"]
+_SONAR = _WALLS + _CLASS + _POLE + _AGN
+
 CONDITIONS_BY_NAME: Dict[str, List[str]] = {
-    "full":          [],
-    "no_distances":  ["d_L", "d_C", "d_R"],
-    "no_sigmas":     ["sigma_L", "sigma_C", "sigma_R"],
-    "center_only":   ["d_L", "d_R", "sigma_L", "sigma_R"],
-    "sides_only":    ["d_C", "sigma_C"],
-    "no_prev_rot":   ["prev_rot"],
-    "blind":         ["d_L", "d_C", "d_R", "sigma_L", "sigma_C", "sigma_R", "prev_rot"],
+    "full":           [],
+    "no_walls":       list(_WALLS),
+    "no_class":       list(_CLASS),
+    "no_pole_geom":   list(_POLE),
+    "no_agn_range":   list(_AGN),
+    "no_prev_rot":    ["prev_rot_deg_norm"],
+    "dead_reckoning": list(_SONAR),
 }
-
-
-def input_names_for(use_sigma: bool) -> List[str]:
-    return (
-        ["d_L", "d_C", "d_R"]
-        + (["sigma_L", "sigma_C", "sigma_R"] if use_sigma else [])
-        + ["prev_rot"]
-    )
 
 
 def resolve_conditions(input_names: List[str]) -> Dict[str, List[int]]:
@@ -109,18 +119,24 @@ def load_run(run_dir: str) -> Tuple[Config, RNNNet, List[str]]:
     with open(os.path.join(run_dir, "best_policy.json")) as f:
         pol = json.load(f)
 
-    in_dim    = int(pol["in_dim"])
-    use_sigma = bool(pol.get("use_sigma", in_dim == 7))   # fallback for older policies
-    expected  = 7 if use_sigma else 4
-    if in_dim != expected:
+    in_dim = int(pol["in_dim"])
+    # The trainer records the exact channel order it used. Trust that rather
+    # than reconstructing it from flags: the layout has grown twice (pole
+    # channels, then the class-agnostic range) and every reconstruction rule
+    # written so far has gone stale within the month.
+    layout = list(pol.get("obs_layout") or [])
+    if len(layout) != in_dim:
         raise RuntimeError(
-            f"Policy in_dim={in_dim} disagrees with use_sigma={use_sigma} "
-            f"(expected {expected}). Saved policy is inconsistent."
+            f"best_policy.json is inconsistent: in_dim={in_dim} but "
+            f"obs_layout has {len(layout)} entries."
         )
-    if cfg.use_sigma != use_sigma:
-        # Keep them in lockstep so encode_obs in this run produces the same
-        # input layout the policy was trained against.
-        cfg.use_sigma = use_sigma
+    # Keep cfg in lockstep so _obs_from_cfg reproduces the training layout.
+    for flag, val in (("use_sigma", bool(pol.get("use_sigma", False))),
+                      ("use_poles", bool(pol.get("use_poles", False))),
+                      ("use_agn",   bool(pol.get("use_agn", False))),
+                      ("blind",     bool(pol.get("blind", False)))):
+        if hasattr(cfg, flag):
+            setattr(cfg, flag, val)
 
     h, IN, OUT = cfg.hidden_size, in_dim, RNNNet.OUT_DIM
     g = np.array(pol["genome"], dtype=np.float32)
@@ -138,7 +154,7 @@ def load_run(run_dir: str) -> Tuple[Config, RNNNet, List[str]]:
         net.b_h .copy_(torch.from_numpy(b_h))
         net.W_hy.copy_(torch.from_numpy(W_hy))
         net.b_y .copy_(torch.from_numpy(b_y))
-    return cfg, net, input_names_for(use_sigma)
+    return cfg, net, layout
 
 
 # ── Median sonar inputs (in normalised units) ────────────────────────────────
@@ -187,7 +203,9 @@ def measure_input_medians(sim: EnvironmentSimulator, path, starts,
             prev_rot = 0.0
     arr = np.stack(obs_log, axis=0)   # (n_steps, in_dim)
     medians = np.median(arr, axis=0)
-    medians[input_names.index("prev_rot")] = 0.0
+    for i, nm in enumerate(input_names):
+        if nm.startswith("prev_rot"):
+            medians[i] = 0.0
     return medians
 
 
@@ -198,7 +216,20 @@ def rollout_ablated(net: RNNNet, sim: EnvironmentSimulator, path,
                     clamp_idx: List[int], medians: np.ndarray,
                     rng: np.random.Generator,
                     ) -> Dict:
+    """One ablated rollout under the FULL training motion model.
+
+    This used to reimplement the per-step Gaussians inline and omit the
+    per-episode gain and rotation biases entirely, which quietly gutted the
+    experiment: with no sustained disturbance there is nothing for perception
+    to correct, so a policy flying blind can dead-reckon the loop and every
+    ablation looks harmless. The per-episode rotation bias in particular is
+    the disturbance the sonar exists to detect. Call the trainer's own
+    sampler and applier so the ablation is run in the world the policy was
+    trained for.
+    """
+    from SCRIPT_TrainPolicy import _sample_motion_biases, _apply_motion_noise
     sim.reseed(int(rng.integers(2**31 - 1)))
+    rot_gain, drive_gain, rot_bias = _sample_motion_biases(cfg, rng, tag="ablation")
     x, y, yaw = start
     positions: List[Tuple[float, float]] = [(x, y)]
     h = torch.zeros(1, net.hidden_size)
@@ -223,16 +254,8 @@ def rollout_ablated(net: RNNNet, sim: EnvironmentSimulator, path,
             rot  = float(np.clip(float(y_t.item()),
                                  -cfg.max_rotate_deg, cfg.max_rotate_deg))
 
-            rot_motor   = rot
-            drive_motor = cfg.fixed_drive_mm
-            if cfg.motion_rotate_noise_deg > 0.0:
-                rot_motor = float(np.clip(
-                    rot + rng.normal(0.0, cfg.motion_rotate_noise_deg),
-                    -cfg.max_rotate_deg, cfg.max_rotate_deg,
-                ))
-            if cfg.motion_drive_noise_mm > 0.0:
-                drive_motor = max(0.0, cfg.fixed_drive_mm
-                                  + float(rng.normal(0.0, cfg.motion_drive_noise_mm)))
+            rot_motor, drive_motor = _apply_motion_noise(
+                rot, cfg, rng, rot_gain, drive_gain, rot_bias)
             action = {"rotate1_deg": 0.0, "rotate2_deg": rot_motor,
                       "drive_mm": drive_motor}
             r = sim.simulate_robot_movement(x, y, yaw, [action],
@@ -263,6 +286,7 @@ def rollout_ablated(net: RNNNet, sim: EnvironmentSimulator, path,
         "laps":       laps,
         "ct_mean_mm": float(np.mean(cross_track)) if cross_track else 0.0,
         "ct_max_mm":  float(np.max(cross_track))  if cross_track else 0.0,
+        "rot_bias":   rot_bias,
     }
 
 
