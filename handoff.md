@@ -347,6 +347,26 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-08-14 — Retrain at rot_bias ±5: the failure mode from run01 is gone
+
+`PolicyTraining/default_Path04` (new) vs `default_Path04_bias3` (the policy that ran 8.5 laps, renamed and kept as the control). Only `motion_rot_bias_deg` differs, 3.0 → 5.0 (`82532f4`). `val_mse` 118.90 vs 114.31 — 4% higher, which is the expected price of a wider disturbance distribution and **not** the number to judge this on.
+
+Both policies, 40 rollouts per cell at FIXED rotation bias:
+
+| bias °/step | old collisions | **new** | old track med/p90 | **new** |
+|---|---|---|---|---|
+| 0.0 | 10% | 8% | 53 / 144 | 63 / 180 |
+| 1.0 | 2% | 10% | 55 / 150 | 60 / 170 |
+| 2.0 | 2% | 5% | 61 / 169 | 63 / 180 |
+| **3.0** | **18%** | **8%** | 68 / 178 | 65 / 176 |
+| **4.0** | **25%** | **2%** | 85 / 212 | 60 / 157 |
+| **5.0** | **40%** | **15%** | 105 / 261 | 81 / 214 |
+
+- **The old policy collapses at its own training boundary** — 2% collisions at bias 2, then 18 / 25 / 40% past ±3, with tracking degrading 53 → 105 mm median. That is the robot behaviour of run01 reproduced in simulation, which is itself a check on the simulator.
+- **The new one is flat across the range**, 60–81 mm median from bias 0 to 5, with no collision trend until the extreme edge.
+- **The cost at low bias is small and probably noise.** Marginally looser p90 at bias 0–2 (170–180 vs 144–169), the expected price of spreading the same capacity wider. At n=40 the standard error on a 10% rate is ~5%, so the 0–2 rows are not distinguishable, and the 2% at bias 4 against 15% at bias 5 is noisier than it looks. What survives the noise is the 3–5 pattern.
+- **Prediction to test on the robot:** run01 broke at step ~400 when battery sag pushed the residual past −3.6. This policy should hold through it. **The informative part of a deploy is precisely the part that failed last time**, so run long enough to reach it rather than stopping while clean.
+
 ### 2026-08-13 (night) — Path04 run01 on the robot: 8.5 laps, no collision, and the curl grows within a run
 
 `PolicyRuns/default_Path04_run01`, policy `default_Path04`, `POLICY_INPUT_SOURCE="live"`, 500 steps. Commit at run `bb8ec51`.
