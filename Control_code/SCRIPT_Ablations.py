@@ -174,14 +174,18 @@ def measure_input_medians(sim: EnvironmentSimulator, path, starts,
     obs_log: List[np.ndarray] = []
     x, y, yaw = starts[0]
     prev_rot = 0.0
+    # Carried so the teacher's projection cannot jump branches on a
+    # self-crossing path; see _project_with_segment in SCRIPT_TrainPolicy.
+    s_prev = None
     for _ in range(n_steps):
         meas = sim.get_sonar_measurement(x, y, yaw)
         obs_log.append(np.asarray(
             _obs_from_cfg(meas, prev_rot, cfg),
             dtype=np.float32,
         ))
-        rot = teacher_rotation_deg(path, x, y, yaw,
-                                   cfg.teacher_lookahead_mm, cfg.max_rotate_deg)
+        rot, s_prev = teacher_rotation_deg(path, x, y, yaw,
+                                           cfg.teacher_lookahead_mm,
+                                           cfg.max_rotate_deg, s_prev)
         rot_motor   = rot
         drive_motor = cfg.fixed_drive_mm
         if cfg.motion_rotate_noise_deg > 0.0:

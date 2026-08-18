@@ -251,9 +251,38 @@ N_TRAJECTORY_EPISODES = 6
 # Teacher
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _project_with_segment(path: TargetPath, x: float, y: float
+# Half-width of the arc-length window used to disambiguate the projection on a
+# self-intersecting path (see `_project_with_segment`). Must be comfortably
+# larger than one step plus the lookahead (150 + 240 mm) so the true foot is
+# always inside it, and comfortably smaller than the arc separating the two
+# branches at a crossing (4675 mm on Path06) so the wrong branch never is.
+PROJECT_WINDOW_MM: float = 600.0
+
+
+def _project_with_segment(path: TargetPath, x: float, y: float,
+                          s_prev: Optional[float] = None,
+                          window_mm: float = PROJECT_WINDOW_MM,
                           ) -> Tuple[float, int, float]:
-    """Like TargetPath.project but also returns (segment_index, t∈[0,1])."""
+    """Like TargetPath.project but also returns (segment_index, t∈[0,1]).
+
+    `s_prev` makes the projection arc-CONTINUOUS, and on a self-crossing path
+    that is the difference between a usable teacher and a broken one. With
+    s_prev=None this is a global argmin over every segment, so where the loop
+    crosses itself the two branches are millimetres apart and the branch is
+    picked on numerical noise -- the teacher then aims a lookahead along
+    whichever it happened to choose. Measured on Path06 (branches 7 mm apart,
+    crossing at 60 deg): 19 of 55 poses sampled within +-500 mm of the crossing
+    at a realistic 100-200 mm cross-track project onto the OTHER loop. Those
+    poses are not rare in training -- `teacher_perturb_prob` manufactures them
+    on purpose -- so the student would be cloning a teacher that flips loops at
+    random.
+
+    Passing the previous foot arc restricts the search to segments within
+    `window_mm` of it, which is unambiguous as long as the window sits between
+    "one step plus lookahead" and "arc distance between the branches". Callers
+    that have no history (the teacher-field grid plot) pass None and accept the
+    ambiguity; rollouts thread the returned arc forward.
+    """
     pts = path.points
     a = pts[:-1]; b = pts[1:]
     ab = b - a
@@ -265,21 +294,36 @@ def _project_with_segment(path: TargetPath, x: float, y: float
     foot = a + t[:, None] * ab
     diffs = foot - pos
     d2 = np.einsum("ij,ij->i", diffs, diffs)
+    if s_prev is not None:
+        # Distance from each segment's start to s_prev, the short way round the
+        # closed loop. Segments outside the window are masked out rather than
+        # dropped so `i` stays an index into the full arrays.
+        L = path.total_length
+        d_arc = np.abs((path.cum_arc[:-1] - float(s_prev)) % L)
+        d_arc = np.minimum(d_arc, L - d_arc)
+        allowed = d_arc <= window_mm
+        if allowed.any():
+            d2 = np.where(allowed, d2, np.inf)
     i = int(np.argmin(d2))
     return float(np.sqrt(d2[i])), int(i), float(t[i])
 
 
 def teacher_target_unit(
     path: TargetPath, x: float, y: float, lookahead_mm: float,
-) -> Tuple[float, float]:
-    """Pure-pursuit target direction (unit vector) at (x, y).
+    s_prev: Optional[float] = None,
+) -> Tuple[float, float, float]:
+    """Pure-pursuit target direction (unit vector) at (x, y), plus the foot arc.
 
     Project (x, y) onto the path, advance `lookahead_mm` along the path in
     arc-length order, return the unit vector from (x, y) to that target point.
     Yaw-independent: direction along the loop is fixed by arc-length order, so
     a robot starting "the wrong way" will be commanded to U-turn at first.
+
+    Returns (ux, uy, foot_arc). Pass the previous call's `foot_arc` back in as
+    `s_prev` to keep the projection on one branch of a self-crossing path; see
+    `_project_with_segment`. On a simple loop the argument changes nothing.
     """
-    _, seg_i, t = _project_with_segment(path, x, y)
+    _, seg_i, t = _project_with_segment(path, x, y, s_prev)
     foot_arc = float(path.cum_arc[seg_i] +
                      t * (path.cum_arc[seg_i + 1] - path.cum_arc[seg_i]))
     target_arc = (foot_arc + lookahead_mm) % path.total_length
@@ -294,8 +338,8 @@ def teacher_target_unit(
     dy = float(target[1] - y)
     L = float(np.hypot(dx, dy))
     if L < 1e-9:
-        return 0.0, 0.0
-    return dx / L, dy / L
+        return 0.0, 0.0, foot_arc
+    return dx / L, dy / L, foot_arc
 
 
 def teacher_rotation_deg(
@@ -303,16 +347,22 @@ def teacher_rotation_deg(
     x: float, y: float, yaw_deg: float,
     lookahead_mm: float,
     max_rotate_deg: float,
-) -> float:
+    s_prev: Optional[float] = None,
+) -> Tuple[float, float]:
     """Pure-pursuit teacher: rotation in degrees that points the robot at the
-    lookahead target on the path."""
-    tx, ty = teacher_target_unit(path, x, y, lookahead_mm)
+    lookahead target on the path.
+
+    Returns (rotation_deg, foot_arc). Thread `foot_arc` back in as `s_prev` on
+    the next step so the projection cannot jump branches where the path crosses
+    itself.
+    """
+    tx, ty, foot_arc = teacher_target_unit(path, x, y, lookahead_mm, s_prev)
     if tx == 0.0 and ty == 0.0:
-        return 0.0
+        return 0.0, foot_arc
     target_yaw = float(np.arctan2(ty, tx))
     yaw = float(np.deg2rad(yaw_deg))
     delta = (target_yaw - yaw + np.pi) % (2.0 * np.pi) - np.pi
-    return float(np.clip(np.rad2deg(delta), -max_rotate_deg, max_rotate_deg))
+    return float(np.clip(np.rad2deg(delta), -max_rotate_deg, max_rotate_deg)), foot_arc
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -543,14 +593,20 @@ def rollout_with_teacher(
     collided = False
     prev_rot = 0.0
     _verbose_step0 = True
+    # Arc position of the teacher's foot on the path, carried step to step so
+    # the projection stays on one branch where the loop crosses itself. None on
+    # the first step: the start pool sits well away from any crossing, so the
+    # unconstrained global projection is unambiguous there.
+    s_prev: Optional[float] = None
 
     for _ in range(cfg.max_steps):
         meas = None if cfg.blind else simulator.get_sonar_measurement(x, y, yaw)
         Xs.append(_obs_from_cfg(meas, prev_rot, cfg))
-        rot_clean = teacher_rotation_deg(
+        rot_clean, s_prev = teacher_rotation_deg(
             path, x, y, yaw,
             cfg.teacher_lookahead_mm,
             cfg.max_rotate_deg,
+            s_prev,
         )
         Ys.append([rot_clean])
 
@@ -827,7 +883,16 @@ def plot_teacher_field(
 ) -> None:
     """Quiver plot of the teacher's target heading. Pure pursuit's target is a
     function of (x, y) only, so this is a true 2D vector field — one arrow per
-    grid cell points where the teacher would steer the robot from there."""
+    grid cell points where the teacher would steer the robot from there.
+
+    ⚠️ On a SELF-CROSSING path that statement is false, and the plot cannot say
+    so. Near a crossing the teacher's target depends on which branch the robot
+    arrived on, which is history, not position — the rollout resolves it by
+    carrying the foot arc forward (see `_project_with_segment`), but a grid has
+    no history. Arrows within a few hundred mm of a crossing therefore show
+    whichever branch won a global argmin, and are not what the teacher actually
+    commands. Read the rest of the field normally; discount that neighbourhood.
+    """
     xs = np.arange(arena.arena_min_x, arena.arena_max_x + grid_step_mm, grid_step_mm)
     ys = np.arange(arena.arena_min_y, arena.arena_max_y + grid_step_mm, grid_step_mm)
     gx, gy = np.meshgrid(xs, ys)
@@ -836,7 +901,7 @@ def plot_teacher_field(
     V = np.zeros_like(gy, dtype=np.float64)
     for i in range(gx.shape[0]):
         for j in range(gx.shape[1]):
-            tx, ty = teacher_target_unit(
+            tx, ty, _ = teacher_target_unit(
                 path, float(gx[i, j]), float(gy[i, j]), cfg.teacher_lookahead_mm,
             )
             U[i, j] = tx
