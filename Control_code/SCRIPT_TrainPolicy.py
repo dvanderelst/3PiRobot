@@ -239,6 +239,31 @@ class Config:
     output_dir:   str = ""
     plot_trajectories_every_n: int = 5
 
+    # ── Checkpoint selection by CLOSED-LOOP SURVIVAL ─────────────────────────
+    # val_loss does not measure what we care about, and selecting on it is
+    # close to selecting at random. Evidence (2026-08-18, Path06): across 11
+    # checkpoints spanning 2500 epochs, val ranged 125-136 while closed-loop
+    # survival ranged 20-53% with NO relationship between them -- the
+    # lowest-val checkpoint was the worst survivor. Across paths it is worse
+    # still: Path04 and Path06 differ by 12 points of val and threefold in
+    # survival (82.5% vs 27.5%). The cause is ordinary behavioural cloning --
+    # per-step imitation MSE is dominated by the large curvature signal, the
+    # small corrections that hold the path barely register in it, and errors
+    # compound over a 300-step rollout.
+    #
+    # So roll the student out and count how often it survives. `best_policy`
+    # (val-selected) is still written, unchanged, so nothing downstream breaks;
+    # `best_policy_survival.json` is written alongside it and is the one to
+    # deploy. Set survival_eval_every = 0 to disable.
+    #
+    # n=60 gives a standard error of about 6 points, which is the coarsest
+    # that can separate the ~15-point differences seen on Path06. It costs
+    # roughly one rollout-generation pass per evaluation, so evaluating every
+    # 100 epochs adds ~20% to a 2000-epoch run.
+    survival_eval_every: int = 100
+    survival_n_rollouts: int = 60
+    survival_steps:      int = 300
+
     # Parallel rollout (data generation only — training stays single-process)
     parallel_eval: bool          = True
     num_workers:   Optional[int] = None
@@ -1143,6 +1168,24 @@ def main():
 
     history = {"train_loss": [], "val_loss": []}
     best_val = float("inf")
+    best_surv = -1.0
+
+    def _survival(net_, n, steps):
+        """Fraction of rollouts reaching `steps` without a blocked drive, plus
+        median |cross-track|. Fixed seed so the number is comparable across
+        epochs -- the point is to rank checkpoints, not to sample fresh noise."""
+        c2 = dataclasses.replace(cfg, max_steps=steps)
+        r = np.random.default_rng(20260818)
+        ok, errs = 0, []
+        ppts = path.points
+        for _ in range(n):
+            st = starts_all[int(r.integers(len(starts_all)))]
+            pos, collided = rollout_student(net_, sim, st, c2, r)
+            ok += (not collided)
+            pos = np.asarray(pos)
+            errs.append(np.min(np.hypot(ppts[:, 0][None, :] - pos[:, 0][:, None],
+                                        ppts[:, 1][None, :] - pos[:, 1][:, None]), axis=1))
+        return 100.0 * ok / n, float(np.median(np.concatenate(errs)))
 
     for epoch in range(cfg.n_epochs):
         t0 = time.time()
@@ -1180,11 +1223,31 @@ def main():
             save_policy(net, cfg, val_loss, epoch,
                         os.path.join(cfg.output_dir, "best_policy.json"))
 
+        if (cfg.survival_eval_every > 0 and epoch > 0
+                and epoch % cfg.survival_eval_every == 0):
+            surv, xt = _survival(net, cfg.survival_n_rollouts, cfg.survival_steps)
+            history.setdefault("survival_epoch", []).append(epoch)
+            history.setdefault("survival", []).append(surv)
+            flag = ""
+            if surv > best_surv:
+                best_surv = surv
+                save_policy(net, cfg, val_loss, epoch,
+                            os.path.join(cfg.output_dir, "best_policy_survival.json"))
+                flag = "  <- best, saved"
+            print(f"    survival {surv:5.1f}% over {cfg.survival_n_rollouts} rollouts "
+                  f"x {cfg.survival_steps} steps   xtrack med {xt:4.0f} mm{flag}", flush=True)
+
         if cfg.plot_trajectories_every_n > 0 and epoch % cfg.plot_trajectories_every_n == 0:
             plot_trajectories(net, sim, path, val_starts, walls,
                               epoch, cfg.output_dir, cfg, rng)
 
     print(f"\nDone. Best val loss: {best_val:.3f}")
+    if cfg.survival_eval_every > 0:
+        print(f"      Best survival: {best_surv:.1f}%  -> best_policy_survival.json")
+        print("      DEPLOY THE SURVIVAL ARTIFACT. best_policy.json is val-selected and,"
+              "\n      on the evidence, that is close to selecting at random.")
+    with open(os.path.join(cfg.output_dir, "history.json"), "w") as fh:
+        json.dump(history, fh)
 
 
 if __name__ == "__main__":
