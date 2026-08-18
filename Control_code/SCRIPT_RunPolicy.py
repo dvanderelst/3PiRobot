@@ -93,6 +93,34 @@ YAW_STABLE_TIMEOUT_S  = 8.0    # at the current 0.8 Hz fresh-frame rate
 YAW_STABLE_VERBOSE    = False  # warn on timeout / motion-not-observed
 
 PLOT_EVERY            = 1      # save trajectory plot every N steps (0 = disable)
+
+# ── Guards ───────────────────────────────────────────────────────────────────
+# Two failures cost whole runs on 2026-08-18, and neither was visible until the
+# data was analysed afterwards. These catch them at the point they happen.
+#
+# 1. Uncalibrated deploy. SCRIPT_CalibrateRobot RESETS Settings.py to identity
+#    before measuring (it has to observe raw firmware behaviour), and writes the
+#    measured values back only on a final y/n prompt -- which it also skips
+#    silently when the rotation table trips a CRITICAL flag. Answer 'n', or trip
+#    that flag, and you are left with a good calibration JSON on disk and an
+#    identity Settings.py. `default_Path06_run01` flew that way and shed
+#    -4.69 deg/step of uncompensated curl (the JSON, written 25 minutes earlier,
+#    said -0.02927 deg/mm x 150 mm = -4.39). There is no case where flying
+#    uncalibrated is wanted, so this one is a hard stop.
+CHECK_CALIBRATION = True
+
+# 2. Lost robot. `default_Path06_run02` tracked at a 50 mm median for 58 steps,
+#    then diverged 91 -> 200 -> 313 -> 354 -> 399 -> 463 mm over seven steps and
+#    hit a block. A "300 mm for 2 consecutive steps" rule fires at step 63, two
+#    steps before contact.
+#    ⚠️ Defaults to WARN, not abort, and deliberately so: on a landmark
+#    manipulation run the large excursion IS the measurement (B1-removal ran to
+#    p90 374 / max 639 mm and all 500 steps were wanted). No threshold separates
+#    "lost" from "the effect being measured", so the operator decides. Set
+#    CROSS_TRACK_ACTION="pause" for a shakedown run, "abort" to stop dead.
+CROSS_TRACK_WARN_MM   = 300.0  # 0 disables the watch entirely
+CROSS_TRACK_N_CONSEC  = 2      # consecutive steps over the threshold before firing
+CROSS_TRACK_ACTION    = "warn" # "warn" | "pause" | "abort"
 wait_for_confirmation = False
 
 # Pre-flight simulation preview. Before driving the real robot, read the
@@ -241,9 +269,43 @@ def _install_training_walls(arena: str, deploy_env_dir: str) -> None:
     print(f"Wrote features overlay: {out_path}")
 
 
+def _assert_calibrated(cfg) -> None:
+    """Refuse to fly on identity calibration constants. See CHECK_CALIBRATION."""
+    ident_rot = list(cfg.rotation_desired) == list(cfg.rotation_obtained)
+    problems = []
+    if ident_rot:
+        problems.append("  - rotation_obtained == rotation_desired (identity table)")
+    if float(cfg.drive_yaw_curl_deg_per_mm) == 0.0:
+        problems.append("  - drive_yaw_curl_deg_per_mm == 0.0")
+    if float(cfg.drive_distance_scale) == 1.0:
+        problems.append("  - drive_distance_scale == 1.0")
+    if not problems:
+        curl_per_step = float(cfg.drive_yaw_curl_deg_per_mm) * policy.fixed_drive_mm
+        print(f"Calibration OK: curl {cfg.drive_yaw_curl_deg_per_mm:+.5f} deg/mm "
+              f"({curl_per_step:+.2f} deg/step at {policy.fixed_drive_mm:.0f} mm), "
+              f"drive scale {cfg.drive_distance_scale:.4f}")
+        return
+    print("\n" + "=" * 74)
+    print("REFUSING TO RUN: calibration constants in Library/Settings.py are at identity")
+    for p in problems:
+        print(p)
+    print("\nThe robot would fly with no correction applied. SCRIPT_CalibrateRobot")
+    print("resets these to identity before measuring and writes the measured")
+    print("values back only if you answer 'y' to its final prompt -- and it skips")
+    print("that write silently when the rotation table trips a CRITICAL flag.")
+    print("Check Library/RobotCalibration/<robot>_calibration.json: if it holds")
+    print("good values, paste them into Settings.py and re-run.")
+    print("(Set CHECK_CALIBRATION = False to override, e.g. to measure raw behaviour.)")
+    print("=" * 74)
+    raise SystemExit(1)
+
+
 control = PauseControl.PauseControl()
 client  = Client.Client(robot_number=ROBOT_ID)
 tracker = LorexTracker.LorexTracker()
+
+if CHECK_CALIBRATION:
+    _assert_calibrated(client.configuration)
 writer  = DataStorage.DataWriter(SESSION, autoclear=True, verbose=False)
 writer.add_file("SCRIPT_RunPolicy.py")
 writer.add_file(policy_path)
@@ -498,6 +560,10 @@ prev_rot = 0.0
 
 crash_log_path = f"{DATA_FOLDER}/{SESSION}/crashes.tsv"
 last_position  = None
+
+# Lost-robot watch state (see CROSS_TRACK_WARN_MM).
+_xt_over  = 0      # consecutive steps currently over the threshold
+_xt_fired = False  # warned for this excursion already
 
 
 def _log_crash(step_idx, position):
@@ -843,6 +909,33 @@ for step in range(MAX_STEPS):
     _write_metrics_row(step, position, meas_live, meas_sim_clean, meas_sim,
                        rotate, L, R)
     last_position = position
+
+    # ── Lost-robot watch ─────────────────────────────────────────────────────
+    # See CROSS_TRACK_WARN_MM. Fires on N consecutive steps past the threshold,
+    # not a single one, because a lone bad tracker read is common (~3% of steps
+    # glitch) and would otherwise trip it.
+    if CROSS_TRACK_WARN_MM > 0 and None not in (rob_x, rob_y):
+        _xt_now = _cross_track_mm(rob_x, rob_y)
+        if np.isfinite(_xt_now) and _xt_now > CROSS_TRACK_WARN_MM:
+            _xt_over += 1
+        else:
+            _xt_over = 0
+        if _xt_over >= CROSS_TRACK_N_CONSEC and not _xt_fired:
+            _msg = (f"{SESSION}: off-path {_xt_now:.0f} mm for {_xt_over} steps "
+                    f"at step {step} — robot may be lost")
+            print(f"\n  *** {_msg} ***")
+            PushOver.send(_msg)
+            if CROSS_TRACK_ACTION == "abort":
+                print("  CROSS_TRACK_ACTION='abort' — stopping run.")
+                break
+            if CROSS_TRACK_ACTION == "pause":
+                print("  CROSS_TRACK_ACTION='pause' — resume with the pause control.")
+                control.wait_if_paused(force=True) if hasattr(control, "force") \
+                    else input("  Reposition if needed, then press Enter to continue: ")
+            # Warn once per excursion; re-arms when it comes back inside.
+            _xt_fired = True
+        elif _xt_over == 0:
+            _xt_fired = False
 
     # ── Live trajectory plot ──────────────────────────────────────────────────
     _traj_x.append(rob_x if rob_x is not None else np.nan)
