@@ -1170,12 +1170,16 @@ def main():
     best_val = float("inf")
     best_surv = -1.0
 
-    def _survival(net_, n, steps):
+    best_state = None          # weights behind best_policy_survival.json
+
+    def _survival(net_, n, steps, seed=20260818):
         """Fraction of rollouts reaching `steps` without a blocked drive, plus
-        median |cross-track|. Fixed seed so the number is comparable across
-        epochs -- the point is to rank checkpoints, not to sample fresh noise."""
+        median |cross-track|. The selection seed is FIXED so the number is
+        comparable across epochs -- the point is to rank checkpoints, not to
+        resample noise. Pass a different `seed` for an unbiased re-measurement
+        of the winner (see the end of main)."""
         c2 = dataclasses.replace(cfg, max_steps=steps)
-        r = np.random.default_rng(20260818)
+        r = np.random.default_rng(seed)
         ok, errs = 0, []
         ppts = path.points
         for _ in range(n):
@@ -1231,6 +1235,7 @@ def main():
             flag = ""
             if surv > best_surv:
                 best_surv = surv
+                best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
                 save_policy(net, cfg, val_loss, epoch,
                             os.path.join(cfg.output_dir, "best_policy_survival.json"))
                 flag = "  <- best, saved"
@@ -1243,9 +1248,25 @@ def main():
 
     print(f"\nDone. Best val loss: {best_val:.3f}")
     if cfg.survival_eval_every > 0:
-        print(f"      Best survival: {best_surv:.1f}%  -> best_policy_survival.json")
-        print("      DEPLOY THE SURVIVAL ARTIFACT. best_policy.json is val-selected and,"
-              "\n      on the evidence, that is close to selecting at random.")
+        print(f"      Best survival at selection: {best_surv:.1f}%")
+        # Re-measure the winner on seeds it was NOT selected against. Taking the
+        # max over many noisy evaluations overstates the winner -- on Path07 the
+        # 76.7% selection score re-measured at 67.5% across two fresh seeds, a
+        # ~9-point winner's curse. The honest number is this one; quote it, and
+        # never the selection score, in handoff.md.
+        if best_state is not None:
+            probe = RNNNet(cfg.hidden_size, cfg.max_rotate_deg, in_dim=in_dim)
+            probe.load_state_dict(best_state); probe.eval()
+            fresh = [_survival(probe, cfg.survival_n_rollouts, cfg.survival_steps,
+                               seed=sd)[0] for sd in (101, 202)]
+            print(f"      Re-measured on fresh seeds: "
+                  f"{fresh[0]:.1f}% / {fresh[1]:.1f}%  -> mean {np.mean(fresh):.1f}%"
+                  f"   (selection score overstates by {best_surv-np.mean(fresh):+.1f} pts)")
+            history["survival_fresh"] = fresh
+            history["survival_selected"] = best_surv
+        print("      DEPLOY best_policy_survival.json, NOT best_policy.json:"
+              "\n      the latter is val-selected and on the evidence that is close"
+              "\n      to selecting at random.")
     with open(os.path.join(cfg.output_dir, "history.json"), "w") as fh:
         json.dump(history, fh)
 
