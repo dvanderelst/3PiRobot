@@ -29,6 +29,7 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
 ## Where to pick up
 
 - **Paper:** on branch `direct-learning-poletask`. **Introduction fully reworked (2026-06-20/21).** Now a clean, contiguous **Par 1–8**: overlap → inverse model + asymmetry → cross-modal inverse training (defined in Par 3) → sonar (consolidated) → vision → synthesis → "this paper" (two tasks) → biological-plausibility close (Par 8). US spelling throughout; terminology standardized to *cross-modal inverse training*. See Paper state (2026-06-21) for detail. **Next:** the intro has **no Discussion hand-off** (the direct/vicarious pointer was dropped) — draft the (briefer) Discussion treatment of direct + vicarious learning, drawing on the retired material commented after `\end{document}` (vision-as-internal-model / planning argument, Mugan2020/Bennett2023, `\cnote{5}`); reconcile Par 7 "pole" vs Methods "wooden dowel of 25 mm"; confirm Task 2 wording ("path integration + landmark recognition") matches the actual experiment **— RESOLVED 2026-08-14: it does, but specify *which kind* of landmark. The robot navigates on boundary geometry, not object identity; both are landmarks in the spatial-cognition sense. See Performance notes 2026-08-14 (landmark removal)**; trim Par 5 small-mammals/rodents acuity redundancy. **Inverse-model Methods (Par 20–22) + Results (Par 23–27, `tab:inverse-results`, `fig:inverse-results`) are drafted and committed (`b53644e`, `7354057`)** around the B architecture + spatial-holdout deployment model (in-sample vs held-out; no generalization claim). **Experiment 1 Methods and Results are now drafted and committed (2026-08-04, `3dee986`/`201b101`/`45c71f3`)** — see Paper state 2026-08-04. **Next on Experiment 1**, all recorded in `\dnote[17]`: the two pole placements are never explained now that the simulation paragraph is cut (the 1400-rollout sweep belongs in Methods, with how the placements were chosen); Methods says *trials* where Results says *runs*; and the P2/S5 sonar/vision pair did not share a controller seed, unlike the other nine. **Then:** the intro still has **no Discussion hand-off** (the direct/vicarious pointer was dropped) — draft the (briefer) Discussion treatment of direct + vicarious learning, drawing on the retired material commented after `\end{document}` (vision-as-internal-model / planning argument, Mugan2020/Bennett2023, `\cnote{5}`); reconcile Par 7 "pole" vs Methods "wooden dowel of 25 mm"; confirm Task 2 wording ("path integration + landmark recognition") matches the actual experiment **— RESOLVED 2026-08-14: it does, but specify *which kind* of landmark. The robot navigates on boundary geometry, not object identity; both are landmarks in the spatial-cognition sense. See Performance notes 2026-08-14 (landmark removal)**; trim Par 5 small-mammals/rodents acuity redundancy. Also open: an unfinished `\dnote` at Par 2 on the owl's az/el mapping being a simple 2D→2D map against our object-based inverse — the sentence trails off at "take a look at this paper:". Experiment-1 paragraphs use descriptive `% comments` (not `% Par N` — renumber pending).
+- **Second arena (Path06), started 2026-08-17/18.** Figure-of-eight, 5 poles + 1 block. Path drawn, policy trained, deployed once. **Two blocking issues, both in Performance notes 2026-08-18.** (1) **`val_mse` does not predict closed-loop behaviour** — it must stop being used to select `best_policy.json`; use a 300-step survival eval at n≥100. This retroactively qualifies every policy in this file. (2) **Path06 survives only 27–47% in sim against Path04's 82.5%**, and the cause is perception at 1–1.4 m, not the route, the self-crossing (solved, `2169831`), or motor noise. The robot run did two clean laps then lost the path, but at −4.69 °/step of curl it is confounded — **recalibrate and re-run before concluding anything**. Two mechanisms I proposed were tested and refuted; do not act on the "swap dowels for blocks" advice.
 - **Code:** on branch `direct-learning-poletask`. **Experiment 1 is DONE — all 20 robot runs complete (5 starts x 2 pole placements x sonar/vision), written up in the paper in a separate session.** **Experiment 2 (path following) is now UNBLOCKED**: all three blockers recorded on the morning of 2026-08-07 were cleared the same day (see Code state 2026-08-07). The simulator runs on a fitted inverse *error model*, the policy observation carries the class and pole channels, `default_Path02` is trained, and the deploy chain loads and steps end to end.
   **Next, in order — REVISED 2026-08-08.** The horizon result (Performance notes 2026-08-08) changes the order below: the inverse now comes *before* the path redraw, because how far the robot can see determines how much clearance a usable path can afford. Do not redraw against a 1 m horizon.
 
@@ -350,6 +351,94 @@ The `*.copy` and `code_*.zip` snapshots inside `PolicyRuns/.../files/` keep the 
 Chronological record of model and robot-experiment performance, written when measured. Each entry should include the date, what was measured, the config (sessions, key flags, model identity), the commit at the time of measurement, and the metrics — enough to be interpretable months later without re-deriving anything. **Append new entries at the top so the most recent is read first.** Don't edit older entries; if a measurement is re-done later, write a new entry that references the prior one.
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
+
+### 2026-08-18 — Path06 (figure-of-eight) trained and deployed. **`val_mse` does not predict closed-loop behaviour, and never did** — plus a mechanism I asserted twice and got wrong twice
+
+Second arena, `TargetArenas/Path06`: a figure-of-eight with a genuine self-crossing, 5 poles + 1 block, 38 waypoints, 10.6 m, ~71 steps/lap. Policy `PolicyTraining/default_Path06`, same recipe as Path04 (2000 epochs, 1000 episodes, hidden 32, rot_bias ±5, `use_agn=True`). Teacher fix at commit `2169831`.
+
+#### ⚠️ THE FINDING THAT QUALIFIES EVERY OTHER NUMBER IN THIS FILE
+
+**`val_mse` is not a usable selection criterion or quality measure.** Closed-loop evaluation in the simulator (300 steps, n=30–40, survival = reached the cap without a blocked drive):
+
+| | Path04 | Path06 |
+|---|---|---|
+| val_mse | 118.9 | 131.0 |
+| **survived 300 steps** | **82.5%** | **27.5%** |
+| cross-track median / p90 / max | 62 / 178 / 719 mm | 76 / 286 / 1028 mm |
+| laps completed (median) | 5.13 | 2.29 |
+
+Near-identical loss, threefold difference in survival. Worse, *within* Path06 across 11 checkpoints spanning 2500 extra epochs, val ranged 125–136 while survival ranged 20–53% **with no relationship between them** — the lowest-val checkpoint (+500, val 130.4) was the worst survivor at 20%, and the best survivors had among the highest losses. The cause is standard behavioural cloning: per-step imitation MSE is dominated by the large curvature signal, the small corrections that hold the path barely register, and errors compound over 300 steps.
+
+**Consequence: `best_policy.json` is selected on val, so every policy this project has shipped was selected close to arbitrarily — `default_Path04` included, whose 82.5% may not be the best that run produced.** Selection needs a closed-loop survival eval. At n=30 the standard error is ~9 points, which is why the table below is so noisy; use n≥100.
+
+#### The Path06 failure is perception, not the route, the crossing, or the motors
+
+2×2, same 300-step survival metric, n=30:
+
+| | Path04 | Path06 |
+|---|---|---|
+| as trained (motion + sensor noise) | 87% | **27%** |
+| motion noise OFF, sensor noisy | 100% | **50%** |
+| motion noise ON, sensor clean | 97% | 27% |
+| both OFF (pure geometry) | 100% | **100%** |
+
+With no noise the route is driven perfectly, so the figure-eight is learnable and the policy learned it. With the trained sensor and *zero* motor disturbance it still fails half the time; that 50-point gap is sensing. Caveat: `get_clean_measurement` is out of distribution for a policy trained on error-model output (Path06's median cross-track is actually *worse* clean, 85 vs 51 mm), so read the two noisy-sensor rows as the real comparison and the clean rows only as proof the route is drivable.
+
+**Where it dies: median cross-track at the moment of collision is 463 mm.** It gets lost, it does not clip things — so the 375 mm clearance squeeze at 17–21% of the lap is *not* implicated. Failures spread across the whole lap (9 in the first decile, 12 across 20–40%), the signature of accumulating error.
+
+**The self-crossing is solved.** Of 29 failures, **zero** within 600 mm of the crossing. See `2169831`: the pure-pursuit teacher projected statelessly and picked branches on numerical noise (19/55 wrong before, 0/145 after).
+
+#### More training: worth ~15 points, then flat
+
+Continued from the epoch-1974 checkpoint for 2500 more epochs, measuring survival every 250:
+
+```
+ epoch    val  survive        epoch    val  survive
+   +0   133.9    30.0%        +1250  125.4    46.7%
+ +250   135.5    46.7%        +1500  130.0    43.3%
+ +500   130.4    20.0%        +1750  125.3    46.7%
+ +750   134.8    46.7%        +2000  128.6    36.7%
++1000   128.3    43.3%        +2250  127.1    53.3%
+                              +2500  127.1    36.7%
+```
+
+All of the gain arrives by +250; the next 2250 epochs move val from 133.9 to 127.1 and survival not at all. The training curve had *not* flattened (Dieter's observation, and correct) — but Path04's curve has the same shape and reaches 82.5%, so "still descending" does not distinguish them. Ten checkpoints kept as `continued_ep*.json`.
+
+#### ⚠️ Mechanism: it is RANGE, not reflector type. Two wrong claims retracted
+
+**RETRACTED (1): "±5° rot_bias is too much for this path."** Sweeping rot_bias 0/1/3/5° gave flat survival on both paths (Path06: 27.5 / 35.0 / 45.0 / 27.5%; Path04: 80.0 / 77.5 / 75.0 / 82.5%). Motor disturbance is not the cause.
+
+**RETRACTED (2): "a 25 mm dowel is a point reflector and therefore a poor drift detector; swap dowels for blocks."** Controlling for range this is false, and in one band backwards. Detection of a 200 mm lateral drift:
+
+```
+Path06         %steps   detect  |  wall   pole        Path04    detect | wall  pole
+   0- 700 mm    14.9%    84.2%  |  100%    71%          12.9%    85.2% |  87%    0%
+ 700-1000 mm    38.4%    73.5%  |   74%    72%          39.5%    80.0% |  79%   86%
+1000-1400 mm    33.7%    24.4%  |   14%    34%          39.0%    47.2% |  48%    0%
+1400+    mm     13.1%     4.5%  |    0%     5%           8.6%    22.2% |  22%    -
+```
+
+Within a band poles and walls are comparable, and at 1000–1400 mm the **poles are more than twice as good as the walls** (34% vs 14%). Worked example: facing a pole at 1073 mm a 200 mm shift changed the slices by 295/327 mm (detected); facing a wall at 1180 mm the same shift changed them by 73–80 mm (invisible, against 236 mm noise). Where a distant pole *is* detected it is by the discrete mechanism — its range changes only ~16 mm at 1.2 m, but its bearing swings ~9.5° against 23.3°-wide slices, so it jumps slice and the vacated slice snaps to the 1400 mm horizon. Discreteness helps.
+
+**What actually drives detection is range against the model's noise cliff.** The deployed inverse's 1σ range error goes 141 mm (<1 m) → 236 mm (1–1.4 m) → 401 mm (1.4–1.7 m), while the geometric signal from a 200 mm move can never exceed 200 mm. Beyond ~1 m the noise simply overtakes the signal.
+
+**Decomposing the 62.9% vs 49.5% gap: the near bands contribute almost identically (0.426 vs 0.407). The entire deficit is the 1000–1400 mm band** — Path04 draws 0.184 of its total from it, Path06 only 0.082. And comparing like with like, Path04's *walls* at 1000–1400 mm detect 48% against Path06's 14%: same range, same reflector type, threefold difference. **That last step is unexplained.** Probably surface orientation relative to the drift direction (a wall you move parallel to does not change range at all), but it has not been tested and should not be asserted.
+
+**The one safe design rule: below 1000 mm everything detects at 74–85% regardless of type.** Path06 has 53% of steps with something under a metre ahead. Raising that fraction is the lever that does not rest on an unproven mechanism.
+
+#### Robot deploy — 2 good laps, then lost, but the run is confounded
+
+`PolicyRuns/default_Path06_run01`, 210 steps, no logged crash. Cross-track median 68, p90 218, max 549 mm; 2.94 laps travelled. By lap:
+
+| | median | p90 | max |
+|---|---|---|---|
+| lap 1 (steps 0–70) | 60 | 160 | 242 mm |
+| lap 2 (steps 71–141) | 55 | 137 | 281 mm |
+| **lap 3 (steps 142–209)** | **101** | **397** | **549 mm** |
+
+Two clean laps at Path04-class tracking, then it comes apart — which matches the simulator's 27–45% survival at ~2.3 laps.
+
+⚠️ **But do not read this as a clean test of the policy: session curl was −4.69 °/step, against +0.51 / +1.78 / +0.68 in the three Path04 runs.** Seven to ten times larger, sustained from step 0 (−4.69 / −4.50 / −5.28 by lap), with **43% of steps beyond |5|**. The policy was trained on `rot_bias ~ U(−5,+5)` drawn *per episode*, so a typical training episode sees ~2.5 and a sustained −4.7 sits in the far tail — note this also means the sim sweep above (which varied the *range* of the uniform) does not license "curl doesn't matter" for this run. **Recalibrate and re-run before drawing any conclusion about Path06 on the robot.** Doing two good laps under a disturbance Path04 never faced is arguably the more interesting reading.
 
 ### 2026-08-17 — Landmark **displacement**: the route follows the moved landmarks, on every lap. The strongest landmark result so far
 
