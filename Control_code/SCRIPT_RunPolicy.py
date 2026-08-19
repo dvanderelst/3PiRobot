@@ -50,15 +50,18 @@ from LorexLib.Environment import capture_environment_layout
 # ══════════════════════════════════════════════════════════════════════════════
 # Settings — edit these
 # ══════════════════════════════════════════════════════════════════════════════
-POLICY    = "default_Path02"                  # sub-folder under PolicyTraining/
-ARENA     = "Path02"                          # sub-folder under TargetArenas/
+POLICY    = "default_Path07"                  # sub-folder under PolicyTraining/
+ARENA     = "Path07"                          # sub-folder under TargetArenas/
 REPEAT    = "01"
 VARIATION = ""
 
 MAX_STEPS = 500
 
 ROBOT_ID    = 1
-POLICY_FILE = "best_policy.json"
+POLICY_FILE = "best_policy_survival.json"   # NOT best_policy.json:
+                                            # that one is val-selected, which on the
+                                            # evidence is close to selecting at random
+                                            # (53.4% vs 67.5% survival on Path07).
 SESSION     = f"{POLICY}_run{REPEAT}"
 if len(VARIATION) > 0: SESSION += '_' + VARIATION
 
