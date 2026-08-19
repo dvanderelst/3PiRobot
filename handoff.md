@@ -353,6 +353,25 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-08-18 (night) — Second training seed on Path07: **no better**. The ~65% level looks like a property of the path, not of training luck
+
+Ran the identical recipe with `seed = 7` instead of 42 (`CONDITION = "seedB"`, output `PolicyTraining/seedB_Path07/`), everything else byte-identical. Re-measured both winners on seeds 101/202, which neither was selected against:
+
+| artifact | selection score | **fresh seeds** | max off-path |
+|---|---|---|---|
+| `default_Path07` survival-sel (ep 1600) | 76.7% | **67.5%** (66.7 / 68.3) | 592–637 mm |
+| `seedB_Path07` survival-sel (ep 1000) | 63.3% | **60.8%** (60.0 / 61.7) | 835–866 mm |
+| `default_Path07` val-sel | — | 53.4% | 869–1014 mm |
+
+**6.7 points apart, ~1.1 SE — the two seeds are not meaningfully different.** `default_Path07` wins on the point estimate and on worst-case excursion, so it is the one to fly.
+
+**The "two short runs beat one long run" idea is NOT supported.** Two independent seeds landing within noise of each other points the other way: **~65% looks like a ceiling set by Path07's perception, not by training luck** — consistent with the drift-detectability analysis (47.5% at 200 mm against Path04's 66%). If that holds, neither more seeds nor more epochs will move it much, and the way to do better is a route with more informative geometry.
+
+⚠️ **Two process lessons, both mine.**
+
+1. **Do not compare runs at a matched epoch.** At epoch 1000 seedB read 63.3% against run A's 31.7% and I called it a real 3.8-SE difference. It was a transient: seedB then went 55 → 55 → 43 → 25 while run A carried on to its 76.7 peak at epoch 1600. **The only fair comparison is each run's best, re-measured on fresh seeds.** The trace wanders far too much for any single epoch to mean anything.
+2. **seedB died silently at epoch 1416 and went unnoticed for ~12 hours.** No traceback; epoch times ballooned 10s → 46s → 179s beforehand, the signature of an OOM kill or a suspend. The monitor was watching for `Traceback`/`MemoryError`/`Killed` and a silent kill produces none of them. **A watchdog on a long run must check the process is ALIVE, not just that it has not printed an error.**
+
 ### 2026-08-18 (evening) — Path07 policy trained. Survival selection is worth +14 points and **replicates**; Path07 fails 2.7× more often per lap than Path04
 
 `PolicyTraining/default_Path07`, 2000 epochs, standard recipe (1000 episodes, hidden 32, rot_bias ±5, `use_agn=True`), first run with survival-based selection (`8e06001`). Path07 lap ≈ 79 steps.
