@@ -47,7 +47,7 @@ import numpy as np
 
 from Library.AcquisitionSessionLoader import nearest_reflector_in_cone
 from Library.SonarModel import InverseModel
-from SCRIPT_RunDirectPolicy import feature_from_inverse
+from SCRIPT_RunDirectPolicy import POLE_RANGE_VETO_MM, feature_from_inverse
 
 # ── Config ────────────────────────────────────────────────────────────────────
 INVERSE_FOLD  = "deploy"      # the model the re-run would fly
@@ -161,6 +161,11 @@ def report(all_steps, per_run):
     n = len(all_steps)
     print(f"\n=== {n} sonar steps over {len(per_run)} runs "
           f"({', '.join(sorted(per_run))}) ===")
+    print(f"  'current' = the production feature_from_inverse, i.e. argmax with "
+          f"POLE_RANGE_VETO_MM = {POLE_RANGE_VETO_MM}.")
+    print("  The two sweeps below explore rules independently of it: their tau")
+    print("  rows are argmax + tau, their cap rows argmax + veto. Compare them to")
+    print("  'flown', not to 'current', which is already one of them.")
 
     # ── Agreement, on both truth conventions ──────────────────────────────────
     print("\n-- class agreement with ground truth --")
@@ -286,9 +291,18 @@ def report(all_steps, per_run):
     old_calls = [s for s in all_steps if s["old_cls"] == "pole"]
     old_prec = (100 * np.mean([s["true_cls"] == "pole" for s in old_calls])
                 if old_calls else 0.0)
+    far_now = [s for s in all_steps if s["new_cls"] == "pole"
+               and s["true_cls"] != "pole"
+               and (not np.isfinite(s["true_dist"]) or s["true_dist"] > FAR_MM)]
     print("\n=== verdict ===")
-    print(f"  pole precision {old_prec:.1f}% (flown) -> {prec:.1f}% (current, argmax)")
-    if prec < old_prec - 5:
+    print(f"  pole precision {old_prec:.1f}% (flown) -> {prec:.1f}% (current), "
+          f"{len(far_now)} false calls past {FAR_MM:.0f} mm")
+    if POLE_RANGE_VETO_MM is not None and len(far_now) <= 5 and not spurious:
+        print(f"  GO. The {POLE_RANGE_VETO_MM:.0f} mm veto holds the far-range")
+        print("  phantoms down and nothing can reach the terminal stop. Precision")
+        print("  sits below the flown model's by design -- that is the price of")
+        print("  reopening the 800-1000 mm band, where recall goes 25% -> 81%.")
+    elif prec < old_prec - 5:
         print("  Do NOT re-run on the bare argmax: the controller turns toward")
         print("  perceived poles, and this many false calls would send it after")
         print("  phantoms. Gate the pole call first. From the two sweeps above:")

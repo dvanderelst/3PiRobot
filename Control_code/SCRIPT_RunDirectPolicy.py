@@ -235,6 +235,33 @@ ALIGN_TOL_DEG   = 15.0   # |bearing| counting as aligned. Above the inverse's ow
 ALIGN_MAX_STEPS = 6      # corrections before giving up (outcome reached_unaligned)
 ALIGN_GAIN      = 0.8    # fraction of the perceived bearing turned per correction
 
+# ── Range veto on the pole call ───────────────────────────────────────────────
+# The inverse used to abstain past 1 m by construction. It no longer does, and
+# its class head dies beyond ~1.4 m (2026-08-12) while the class-agnostic range
+# head keeps working to ~2.5 m. Left on the bare argmax, the current model turns
+# 61.4% of its pole calls into false ones out where class is a coin flip -- and
+# this controller *turns toward* perceived poles, so it would chase phantoms.
+#
+# So: refuse a pole call when the range head says the nearest reflector is
+# further than this. Measured on the 761 stored envelopes of the 2026-07-30 runs
+# (EXPT_replay_exp1_inverse.py); 1200 mm is the knee of that curve:
+#
+#   no veto   171 calls  61.4% precision   800-1000 mm recall 87.5%   55 false past 1.4 m
+#   1000 mm    85 calls  95.3%             43.8%                       0
+#   1200 mm   102 calls  88.2%             81.2%                       2
+#   1400 mm   119 calls  81.5%             87.5%                      12
+#
+# For reference the 1 m-capped model these runs actually flew: 77 calls, 97.4%
+# precision, and 25.0% recall in 800-1000 -- the blind ring this reopens.
+# At 1200 mm every false call sits at >=800 mm true range, where the robot has
+# five or more steps of runway and where class is essentially perfect on the way
+# in, so a false pole self-corrects well before contact.
+#
+# A confidence threshold on p_pole was tested as the alternative and rejected:
+# it restores precision only by discarding the long-range detections that
+# justify using this model at all.
+POLE_RANGE_VETO_MM = 1200.0   # None disables the veto (bare argmax)
+
 # ── Sim-mode kinematics (SENSE_SOURCE == "sim") ───────────────────────────────
 SIM_START_XY_MM   = None   # (x, y) mm; None → arena centroid
 SIM_START_YAW_DEG = 0.0
@@ -496,6 +523,19 @@ def feature_from_inverse(pred: Dict) -> LocalFeature:
     p_pole = float(pred.get("p_pole", float("nan")))
     p_none = float(pred.get("p_none", float("nan")))
     cl = int(pred["class_label"])
+
+    # Range veto (see POLE_RANGE_VETO_MM). A pole call made where the agnostic
+    # range head says the nearest reflector is beyond the veto is a call from a
+    # regime the class head cannot resolve, so drop it to the runner-up. Falling
+    # back to wall rather than to "empty" is deliberate: wall-following is what
+    # keeps the robot off the walls, and the scan path would give that up on a
+    # ping that did see something.
+    agn = float(pred.get("agn_dist_mm", float("nan")))
+    if (cl == 1 and POLE_RANGE_VETO_MM is not None
+            and np.isfinite(agn) and agn > POLE_RANGE_VETO_MM):
+        p_wall = 1.0 - p_pole - p_none
+        cl = 0 if p_wall >= p_none else 2
+
     if cl == 2:                       # none → abstain (scan), don't chase
         return LocalFeature(cls="empty", p_pole=p_pole, p_none=p_none)
     if cl == 1:
@@ -806,6 +846,15 @@ def run_robot(geom, P, out_dir, source, features_path=None):
                 f"terminal approach can never trigger and the run would time out "
                 f"silently.\n  Retrain with the pole-distance head "
                 f"(pole_dist_head=True) or run SENSE_SOURCE='vision'.")
+        if POLE_RANGE_VETO_MM is not None and inverse.agn_dist_divisor is None:
+            raise SystemExit(
+                f"\nInverse fold '{INVERSE_FOLD}' has no class-agnostic range "
+                f"head, so the {POLE_RANGE_VETO_MM:.0f} mm pole-range veto would "
+                f"silently do nothing and the robot would chase far-range "
+                f"phantoms (61.4% pole precision ungated -- see "
+                f"EXPT_replay_exp1_inverse.py).\n  Retrain with "
+                f"agn_dist_head=True, or set POLE_RANGE_VETO_MM = None "
+                f"deliberately if you really want the bare argmax.")
 
     client  = Client.Client(robot_number=ROBOT_ID)
     tracker = LorexTracker.LorexTracker()
