@@ -1,12 +1,16 @@
 """Architecture overview of the inverse model.
 
 Instantiates SonarSlicesUQ_Wall3 (the deployed B architecture: one shared
-3-output wall head, no z_sym, plus the pole-range head added 2026-07-29), reads
-its real layer dimensions, and renders a Graphviz data-flow diagram that shows
-the shared dual-ear trunk and the symmetric / antisymmetric head wiring (the
-part `print(model)` hides). Note that pole azimuth is the only antisymmetric
-output: range is invariant under the left-right mirror, so it combines the two
-ear orderings by averaging, like the class head.
+3-output wall head, no z_sym, plus the pole-range head added 2026-07-29 and the
+class-agnostic nearest-reflector range head added 2026-08-12), reads its real
+layer dimensions, and renders a Graphviz data-flow diagram that shows the shared
+dual-ear trunk and the symmetric / antisymmetric head wiring (the part
+`print(model)` hides). Note that pole azimuth is the only antisymmetric output:
+both range heads are invariant under the left-right mirror, so they combine the
+two ear orderings by averaging, like the class head.
+
+The five heads match the deployed model's feature_params (architecture.wall3_*):
+symmetric, pole_dist and agn_dist all on.
 
 This is NOT a matplotlib figure -- it shells out to the `dot` binary -- so it
 does not use style.py. Tunables are the constants below.
@@ -58,16 +62,18 @@ TEMPLATE = r'''digraph G {{
     cls  [label="Class head\n(in: z_LR, z_RL → average)"];
     pole [label="Pole-az heads\nμ: ½(z_LR−z_RL)  antisym.\nlogσ²: ½(z_LR+z_RL)  sym."];
     prng [label="Pole-range heads\nμ, logσ²: ½(z_LR+z_RL)  sym."];
+    argn [label="Nearest-range heads\nμ, logσ²: ½(z_LR+z_RL)  sym."];
   }}
-  comb -> wall; comb -> cls; comb -> pole; comb -> prng;
+  comb -> wall; comb -> cls; comb -> pole; comb -> prng; comb -> argn;
 
   subgraph cluster_out {{ label="Outputs"; style=dashed; color=gray;
     ocls  [label="Class logits\n{classes}", style="rounded,filled", fillcolor="{out_fill}"];
     owall [label="Wall depth profile\nleft, center, right\n(mean + logσ² each)", style="rounded,filled", fillcolor="{out_fill}"];
     opole [label="Pole azimuth\n(mean + logσ²)", style="rounded,filled", fillcolor="{out_fill}"];
     oprng [label="Pole range\n(mean + logσ²)", style="rounded,filled", fillcolor="{out_fill}"];
+    oagn  [label="Nearest-reflector range\nany class, any range\n(mean + logσ²)", style="rounded,filled", fillcolor="{out_fill}"];
   }}
-  wall -> owall; cls -> ocls; pole -> opole; prng -> oprng;
+  wall -> owall; cls -> ocls; pole -> opole; prng -> oprng; argn -> oagn;
 }}'''
 
 
@@ -86,7 +92,8 @@ def build_dot(m):
 
 
 def main():
-    m = SonarSlicesUQ_Wall3(**CFG, symmetric=True, pole_dist_head=True)
+    m = SonarSlicesUQ_Wall3(**CFG, symmetric=True, pole_dist_head=True,
+                            agn_dist_head=True)
     dot = build_dot(m)
     (OUT / f"{NAME}.dot").write_text(dot)
     for fmt in FORMATS:

@@ -19,14 +19,16 @@ digraph G {
     cls  [label="Class head\n(in: z_LR, z_RL → average)"];
     pole [label="Pole-az heads\nμ: ½(z_LR−z_RL)  antisym.\nlogσ²: ½(z_LR+z_RL)  sym."];
     prng [label="Pole-range heads\nμ, logσ²: ½(z_LR+z_RL)  sym."];
+    argn [label="Nearest-range heads\nμ, logσ²: ½(z_LR+z_RL)  sym."];
   }
-  comb -> wall; comb -> cls; comb -> pole; comb -> prng;
+  comb -> wall; comb -> cls; comb -> pole; comb -> prng; comb -> argn;
 
   subgraph cluster_out { label="Outputs"; style=dashed; color=gray;
     ocls  [label="Class logits\nwall / pole / none", style="rounded,filled", fillcolor="#e6f5e6"];
     owall [label="Wall depth profile\nleft, center, right\n(mean + logσ² each)", style="rounded,filled", fillcolor="#e6f5e6"];
     opole [label="Pole azimuth\n(mean + logσ²)", style="rounded,filled", fillcolor="#e6f5e6"];
     oprng [label="Pole range\n(mean + logσ²)", style="rounded,filled", fillcolor="#e6f5e6"];
+    oagn  [label="Nearest-reflector range\nany class, any range\n(mean + logσ²)", style="rounded,filled", fillcolor="#e6f5e6"];
   }
-  wall -> owall; cls -> ocls; pole -> opole; prng -> oprng;
+  wall -> owall; cls -> ocls; pole -> opole; prng -> oprng; argn -> oagn;
 }
