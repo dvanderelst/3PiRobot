@@ -215,13 +215,19 @@ COLLISION_MM    = 20.0    # min wall clearance (surface) before we call a crash
 # geometry, which let a sonar run be credited with a success the inverse played
 # no part in.
 #
-# 500 mm, not the old 88 mm. 88 mm sits inside the emission/echo overlap where
+# 400 mm, not the old 88 mm. 88 mm sits inside the emission/echo overlap where
 # there is no echo to measure, and the inverse has NO training data below 253 mm
 # (the acquisition planner held waypoints CLEARANCE_MM=250 off every reflector),
-# so any range estimate down there is extrapolation. 27.7% of pole pings fall
-# below 500 mm, so the range head interpolates throughout. It also matches the
-# 50 cm criterion of the earlier JEB study with these same sensors.
-APPROACH_STOP_MM = 500.0
+# so any range estimate down there is extrapolation in exactly the regime the
+# stop decision would occupy. Pole recall also falls as the robot closes (~82%
+# in 400-500, ~55% in 200-300), so a lower threshold puts the decision where the
+# pole is hardest to see. Comparable to the criterion of the earlier JEB study
+# with these same sensors.
+#
+# ⚠️ This value is REPORTED IN THE PAPER (Methods, and tab:controller-params).
+# It briefly read 500 here, which is not what Experiment 1 ran; see the note on
+# ALIGN_MIN_DETECTIONS below.
+APPROACH_STOP_MM = 400.0
 
 # Azimuth regulation. Reaching the vicinity only says the robot ended up near the
 # pole; nulling the bearing says it localised the pole and turned to face it, and
@@ -232,7 +238,33 @@ APPROACH_STOP_MM = 500.0
 ALIGN_TOL_DEG   = 15.0   # |bearing| counting as aligned. Above the inverse's own
                          # 10.1/12.1 deg azimuth RMSE, so failures are behavioural
                          # rather than the model's noise floor.
-ALIGN_MAX_STEPS = 6      # corrections before giving up (outcome reached_unaligned)
+ALIGN_MAX_STEPS = 10     # sense/rotate cycles before giving up
+
+# Consecutive pole detections required during the terminal phase before arrival
+# is declared. Without this a run ends on ONE ping: the first real trial went
+# straight from 'empty' to reached in a single step, having perceived the pole
+# only twice in 136 steps, 53 steps earlier. With pole precision ~70%, roughly
+# one positive in three is wrong, so a single-ping criterion credits false
+# detections as successes.
+#
+# Confirmation is by ROTATION, not by closing. Requiring N detections while
+# driving cannot work: at DRIVE_MM=150, three closing detections need 450 mm of
+# travel, which only fits from an ~800 mm first detection, and then only if the
+# model detects on every step (~50-75% at these recall rates). Rotating in place
+# costs no range, so confirmations are free.
+#
+# ⚠️ HISTORY, so this is not lost a second time. This rule and the 400 mm stop
+# were written into the working tree on 2026-07-30 while Experiment 1 was being
+# run, and all 20 runs used them -- but they were never committed. The tree
+# later returned to the committed state (500 / 6 / no confirmation), so between
+# then and 2026-08-21 HEAD could not reproduce the published protocol and would
+# have declared arrival on a single ping. The rule survived only inside each
+# run's frozen code_*.zip. The paper is the authority: Methods and
+# tab:controller-params both specify 400 mm, three confirming detections and ten
+# corrections. It matters more now, not less -- the range veto puts pole
+# precision at 88.2%, better than the ~70% above but still short of a criterion
+# that can safely end a trial on one ping.
+ALIGN_MIN_DETECTIONS = 3
 ALIGN_GAIN      = 0.8    # fraction of the perceived bearing turned per correction
 
 # ── Range veto on the pole call ───────────────────────────────────────────────
@@ -473,6 +505,13 @@ def write_run_summary(out_dir, source, outcome, n_steps, n_align, feat,
         "align_tol_deg": ALIGN_TOL_DEG,
         "align_max_steps": ALIGN_MAX_STEPS,
         "approach_stop_mm": APPROACH_STOP_MM,
+        # Recorded per run because both of these have silently drifted out of
+        # the script before: the confirmation rule was working-tree-only during
+        # Experiment 1 and had to be recovered from a frozen code_*.zip, and the
+        # veto is what keeps the uncapped inverse from chasing far-range
+        # phantoms. A run that does not say which it used is not reproducible.
+        "align_min_detections": ALIGN_MIN_DETECTIONS,
+        "pole_range_veto_mm": (POLE_RANGE_VETO_MM if source == "sonar" else None),
         "final_perceived_class": feat.cls,
         "final_perceived_pole_az_deg": _json_num(feat.pole_az_deg),
         "final_perceived_pole_dist_mm": _json_num(feat.pole_dist_mm),
@@ -694,17 +733,35 @@ def run_sim(geom, P, out_dir):
         # referee only scores). On crossing the stop range, stop driving and
         # regulate the perceived bearing toward zero.
         if at_stop_distance(feat):
-            aligned = False
-            for _ in range(ALIGN_MAX_STEPS):
-                rot_a, aligned, usable = alignment_rotation(feat)
-                if aligned:
-                    break
-                if usable:
+            # Log the triggering step before breaking; see the note in run_robot.
+            log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
+                               true_cls, pole_near, min_wall, 0.0, 0.0, "stop",
+                               jam=ctrl.jam_count)
+            sees.append((x, y, feat.cls))
+            n_consec = 1 if feat.cls == "pole" else 0
+            terminal = None
+            for att in range(ALIGN_MAX_STEPS):
+                rot_a, is_aligned, usable = alignment_rotation(feat)
+                if usable and is_aligned and n_consec >= ALIGN_MIN_DETECTIONS:
+                    terminal = "reached_aligned"; break
+                if usable and not is_aligned:
                     yaw = ((yaw + rot_a + 180.0) % 360.0) - 180.0
                     n_align += 1
                 feat = feature_from_geometry(x, y, yaw, geom, CONE_HALF_DEG,
                                              max_range_mm=GEOM_RANGE_HORIZON_MM)
-            outcome = "reached_aligned" if aligned else "reached_unaligned"
+                n_consec = n_consec + 1 if feat.cls == "pole" else 0
+                true_cls, pole_near, min_wall = referee(x, y, yaw, geom, CONE_HALF_DEG)
+                sees.append((x, y, feat.cls))
+                log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
+                                   true_cls, pole_near, min_wall, rot_a, 0.0,
+                                   f"confirm{att + 1}", jam=ctrl.jam_count)
+            if terminal is None and n_consec >= ALIGN_MIN_DETECTIONS:
+                terminal = "reached_unaligned"   # really there, could not centre it
+            if terminal is None:
+                # Unconfirmed: treat as a spurious detection and carry on rather
+                # than ending the trial on it.
+                continue
+            outcome = terminal
             break
         if min_wall < COLLISION_MM:
             outcome = "collision"; break
@@ -920,19 +977,43 @@ def run_robot(geom, P, out_dir, source, features_path=None):
         if at_stop_distance(feat):
             print(f"  *** stop range reached "
                   f"({feat.pole_dist_mm:.0f} mm) — regulating bearing ***")
-            aligned = False
+            # Log and store the triggering step before entering the terminal
+            # phase, so the stop is recoverable from trajectory.tsv, from the
+            # class-coloured plot, and (sonar) from the saved pings.
+            log_trajectory_row(f_log, w_log, step, x, y, yaw, feat,
+                               true_cls, pole_near, min_wall, 0.0, 0.0, "stop",
+                               jam=ctrl.jam_count)
+            sees.append((x, y, feat.cls))
+            if writer is not None:
+                writer.save_data(
+                    sonar_package=sonar_pkg,
+                    position={"x": x, "y": y, "yaw_deg": yaw},
+                    motion={"net_rotation": 0.0, "drive_mm": 0.0},
+                    inverse_prediction=(pred if source == "sonar" else None),
+                    feature={"cls": feat.cls, "pole_az_deg": feat.pole_az_deg,
+                             "pole_dist_mm": feat.pole_dist_mm,
+                             "p_pole": feat.p_pole, "slices_mm": feat.slices_mm},
+                    referee={"true_cls": true_cls, "pole_near_mm": pole_near,
+                             "min_wall_mm": min_wall},
+                    step=step, tag="stop")
+            n_consec = 1 if feat.cls == "pole" else 0
+            terminal = None
             for att in range(ALIGN_MAX_STEPS):
-                rot_a, aligned, usable = alignment_rotation(feat)
-                if aligned:
-                    break
-                if usable:
+                rot_a, is_aligned, usable = alignment_rotation(feat)
+                if usable and is_aligned and n_consec >= ALIGN_MIN_DETECTIONS:
+                    terminal = "reached_aligned"; break
+                if usable and not is_aligned:
                     rotate_in_substeps(client, rot_a, rot_cap)
                     n_align += 1
                     print(f"    correction {n_align}: az={feat.pole_az_deg:+.1f}° "
-                          f"→ rotate {rot_a:+.1f}°")
+                          f"→ rotate {rot_a:+.1f}°  (confirmations {n_consec}/"
+                          f"{ALIGN_MIN_DETECTIONS})")
+                elif usable:
+                    print(f"    aligned, confirming: {n_consec}/"
+                          f"{ALIGN_MIN_DETECTIONS}")
                 else:
                     print(f"    attempt {att + 1}: pole not perceived "
-                          f"({feat.cls}) — re-sensing")
+                          f"({feat.cls}) — confirmations reset")
                 if source == "sonar":
                     pkg = client.read_and_process(do_ping=True, plot=False)
                     pose_a = settled_pose(prior=last)
@@ -950,7 +1031,26 @@ def run_robot(geom, P, out_dir, source, features_path=None):
                         feat = feature_from_geometry(
                             pose_a["x"], pose_a["y"], pose_a["yaw_deg"], geom,
                             CONE_HALF_DEG, max_range_mm=GEOM_RANGE_HORIZON_MM)
-            outcome = "reached_aligned" if aligned else "reached_unaligned"
+                # Record the re-sense, so the correction sequence is recoverable
+                # from the log rather than only counted in the summary.
+                if pose_a is not None:
+                    ax, ay, ayaw = pose_a["x"], pose_a["y"], pose_a["yaw_deg"]
+                    a_true, a_pole, a_wall = referee(ax, ay, ayaw, geom, CONE_HALF_DEG)
+                    xs.append(ax); ys.append(ay)
+                    sees.append((ax, ay, feat.cls))
+                    log_trajectory_row(f_log, w_log, step, ax, ay, ayaw, feat,
+                                       a_true, a_pole, a_wall, rot_a, 0.0,
+                                       f"confirm{att + 1}", jam=ctrl.jam_count)
+                    true_cls, pole_near, min_wall = a_true, a_pole, a_wall
+                    x, y, yaw = ax, ay, ayaw
+                n_consec = n_consec + 1 if feat.cls == "pole" else 0
+            if terminal is None and n_consec >= ALIGN_MIN_DETECTIONS:
+                terminal = "reached_unaligned"   # really there, could not centre it
+            if terminal is None:
+                print(f"  *** detection NOT confirmed "
+                      f"({n_consec}/{ALIGN_MIN_DETECTIONS}) — resuming search ***")
+                continue
+            outcome = terminal
             print(f"  *** {outcome} after {n_align} correction(s) ***")
             break
 
@@ -1105,9 +1205,14 @@ def main():
     print(f"\nTrial: {POLE} x S{START}  [{SENSE_SOURCE}]  -> {SESSION}")
     trial = resolve_trial()
     if trial is not None:
+        # sim_steps is optional: the trial list on disk was regenerated from the
+        # AS-BUILT arena annotations after the 2026-07-30 runs, and that pass
+        # drops the simulated step estimate (it belongs to the planned
+        # coordinates, not the built ones). Without the .get this line raises a
+        # KeyError before the robot moves, on every run.
         print(f"  expected: {trial['range_mm']:.0f} mm, "
               f"{trial['bearing_deg']:+.0f} deg off heading, "
-              f"~{trial['sim_steps']} steps ({trial['hidden_by']})")
+              f"~{trial.get('sim_steps', '?')} steps ({trial['hidden_by']})")
     if SENSE_SOURCE != "sim":
         print(f"  controller seed {CONTROLLER_SEED} "
               f"(same for sonar and vision — matched pair)")
