@@ -100,11 +100,11 @@ SENSE_SOURCE = "sonar"          # "sonar" | "vision" | "sim"
 # agreed trial list lives in TRIAL_LIST (written by SCRIPT_SweepPolePositions);
 # both are checked against it at startup, so running a combination that is not
 # part of the design, or with the arena built for a different placement, is
-# caught before the robot moves rather than discovered in the analysis.
-POLE   = "P1"                   # placement label, must match TRIAL_LIST
-START  = 1                      # start mark index, must match start_poses.json
-ARENA  = "DirectP1"             # TargetArenas/<ARENA>/ BUILT FOR THIS PLACEMENT
-SUFFIX = ''                     # optional tag for a repeat or a re-run
+# caught befoyre the robot moves rather than discovered in the analysis.
+POLE   = "P2"                   # placement label, must match TRIAL_LIST
+START  = 5                      # start mark index, must match start_poses.json
+ARENA  = "DirectPole02"             # TargetArenas/<ARENA>/ BUILT FOR THIS PLACEMENT
+SUFFIX = '_repeat01'                     # optional tag for a repeat or a re-run
 
 TRIAL_LIST = "TempOutput/StartPositionDigitization/pole_positions.json"
 
@@ -1110,7 +1110,8 @@ def run_robot(geom, P, out_dir, source, features_path=None):
                 f"{SESSION} [{source}] — step {step}", feats=sees)
 
     f_log.close()
-    write_run_summary(out_dir, source, outcome, len(xs), n_align, feat)
+    write_run_summary(out_dir, source, outcome, len(xs), n_align, feat,
+                      true_pole_mm=pole_near, true_wall_mm=min_wall)
     print(f"\nOutcome: {outcome} after {len(xs)} poses"
           f"{f', {n_align} bearing correction(s)' if n_align else ''}.")
     out_path = os.path.join(out_dir, "trajectory.png")
