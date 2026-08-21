@@ -138,6 +138,25 @@ GEOM_RANGE_HORIZON_MM = None
 
 # ── Reactive rule constants (curved-bounce wall rule) ─────────────────────────
 DRIVE_MM           = 150.0   # nominal forward step per cycle (mm)
+
+# Forward step while a pole is perceived. Half the cruise step, because the
+# endgame needs finer sampling than the search does: at 150 mm the perceived
+# range jumped 605 -> 375 mm in a single step, straddling the whole useful
+# window, so a stop threshold sitting in a 100-200 mm band can be skipped over
+# entirely. At 75 mm an approach from ~800 mm gives 5+ sense-act cycles inside
+# the reliable detection band instead of 2. Set in the shared controller, so
+# sonar, vision and sim all slow down identically -- the comparison stays fair.
+#
+# RESTORED 2026-08-21. Comment above is verbatim from the as-run code_*.zip.
+# This value is REPORTED IN THE PAPER (Methods, and tab:controller-params), and
+# it went the same way as the terminal protocol: present in the working tree
+# during the 2026-07-30 runs, never committed, and lost when the tree returned
+# to the committed state. fcaf26d restored the terminal protocol but missed
+# this. The 2026-08-21 sonar re-run therefore drove 150 mm on every approach
+# step while the reused 2026-07-30 vision runs drove 75, so those two arms are
+# NOT matched on the approach step -- verified from the drive_mm column of
+# trajectory.tsv in both sets. The sonar arm needs re-running on this file.
+POLE_APPROACH_DRIVE_MM = 75.0
 MAX_TURN_DEG       = 25.0   # cap on pole-steering / scan rotation per step
 K_POLE             = 0.6    # pole steering gain: rotate = K_POLE * pole_azimuth
 BASELINE_CURL_DEG  = 5.0    # constant arc applied while cruising past a far wall;
@@ -331,6 +350,7 @@ ARENAS_ROOT = "TargetArenas"
 @dataclass
 class ReactiveParams:
     drive_mm: float = DRIVE_MM
+    pole_drive_mm: float = POLE_APPROACH_DRIVE_MM
     max_turn_deg: float = MAX_TURN_DEG
     k_pole: float = K_POLE
     baseline_curl_deg: float = BASELINE_CURL_DEG
@@ -422,7 +442,7 @@ class ReactiveController:
         if feat.cls == "pole":
             rot = float(np.clip(P.k_pole * feat.pole_az_deg,
                                 -P.max_turn_deg, P.max_turn_deg))
-            return rot, P.drive_mm, "approach"
+            return rot, P.pole_drive_mm, "approach"
 
         if feat.cls == "wall":
             r = feat.slices_mm.get("right", float("nan"))
@@ -512,6 +532,10 @@ def write_run_summary(out_dir, source, outcome, n_steps, n_align, feat,
         # phantoms. A run that does not say which it used is not reproducible.
         "align_min_detections": ALIGN_MIN_DETECTIONS,
         "pole_range_veto_mm": (POLE_RANGE_VETO_MM if source == "sonar" else None),
+        # Same reason: this one was lost too, and a run that logs only its
+        # trajectory forces the reader to infer the step from drive_mm.
+        "drive_mm": DRIVE_MM,
+        "pole_approach_drive_mm": POLE_APPROACH_DRIVE_MM,
         "final_perceived_class": feat.cls,
         "final_perceived_pole_az_deg": _json_num(feat.pole_az_deg),
         "final_perceived_pole_dist_mm": _json_num(feat.pole_dist_mm),
