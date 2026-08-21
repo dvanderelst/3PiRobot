@@ -52,6 +52,12 @@
 \author{Dieter Vanderelst}
 \date{\today}
 
+% Image-heavy figures (fig:arena_layouts is six photo panels) need more than
+% the default 0.7 of a page to qualify as a top float. Below that they are
+% deferred, and because LaTeX emits floats in order, every later figure
+% queues behind them and lands at the end of the document.
+\renewcommand{\topfraction}{0.85}
+
 \begin{document}
 
 \maketitle
@@ -117,10 +123,12 @@ We trained the inverse model on echoes collected as the robot drove through the 
 
 \begin{figure}[htb]
     \centering
-    \includegraphics[width=\textwidth]{fig_arena_layouts}
-    \caption{Arena layouts for collecting inverse-model training data. Each session used a different arrangement of walls and poles within a fixed outline set by the overhead camera's field of view. Panels A--D show four arenas as overhead images with the digitized geometry overlaid (walls, cyan; poles, red); panel E shows the fifth arena together with the robot positions where we recorded echoes. All panels share the scale bar (1\,m) shown in panel A.}
+    \includegraphics[width=0.85\textwidth]{fig_arena_layouts}
+    \caption{Arena layouts for collecting inverse-model training data. We recorded echoes in six arenas, each sharing an overall outline set by the overhead camera's field of view. Within that outline we moved boundary walls, installed interior walls, and placed four or five poles at semi-random positions, so that the sessions sampled a range of geometries. All panels are overhead images with the digitized geometry overlaid (walls, cyan; poles, red; ping positions, yellow). Panel A shows arena 1 together with the positions at which the robot ensonified it, the sampling scheme used in every session; panels B to F show arenas 2 to 6 with their geometry alone. All panels share the scale bar (1\,m) shown in panel A.}
     \label{fig:arena_layouts}
 \end{figure}
+
+% I know that's why we did this but I am thinking this might be too much detail (for example, we don't mention other areans having boxes in them because we wanted box echoes). So, let's park this for now.: Arena 6 (F) was laid out last and served a different purpose: its interior is unobstructed, and it returns in-cone ranges beyond $3$\,m where arenas 1 to 5 reach at most about $2.1$\,m, so this session supplied the long-range echoes the earlier arenas could not produce.
 
 For each session, we used a predetermined number of semi-random positions within the arena (see Fig.\ref{fig:arena_layouts} for an example). We sequentially drove the robot to each position using the overhead camera system. Once the robot arrived at a position, it rotated to five headings spaced $72^{\circ}$ apart. The emitter, modeled as a 15\,mm-diameter circular piston at 42\,kHz, has a $-6$\,dB main lobe about $\pm 22^{\circ}$ wide; at $\pm 35^{\circ}$ off axis, its directivity falls by roughly 18\,dB. Because successive headings are $72^{\circ}$ apart—well beyond this main lobe—the five emissions sample approximately non-overlapping, and therefore approximately independent, regions of the environment. At each heading, the robot emitted one sonar pulse and recorded the resulting echo envelopes at both ears.
 

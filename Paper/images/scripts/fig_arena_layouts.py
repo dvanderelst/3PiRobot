@@ -1,10 +1,12 @@
-"""Figure: the five arenas used to collect inverse-model training data.
+"""Figure: the six arenas used to collect inverse-model training data.
 
-Panels A-D  : top-down warp of arenas 1-4 with the digitized geometry
-              (wall tops + poles) overlaid -- a cleaned-up annotated image.
-Panel  E    : arena 5 with the acquisition plan -- the positions at which
+Panel  A    : arena 1 with the acquisition plan -- the positions at which
               the robot ensonified the arena.
-Panel  F    : shared legend + scale bar.
+Panels B-E  : arenas 2-5 as top-down warps with the digitized geometry
+              (wall tops + poles) overlaid -- a cleaned-up annotated image.
+Panel  F    : arena 6, the open far-range arena. No interior walls, so sight
+              lines reach the boundary; this is the session that supplied the
+              beyond-1.7 m echoes the first five arenas could not produce.
 
 Reads the orthorectified top-down (arena.png) and overlays geometry in world
 mm using the warp bounds from meta.json (imshow extent), so no projection is
@@ -23,8 +25,10 @@ style.setup()
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
-ARENAS = ["Acquisition01", "Acquisition02", "Acquisition03", "Acquisition04", "Acquisition05"]
-PLAN_ARENA = "Acquisition05"          # shown as the sampling-plan panel
+ARENAS = ["Acquisition01", "Acquisition02", "Acquisition03", "Acquisition04",
+          "Acquisition05", "Acquisition06"]
+PLAN_ARENA = "Acquisition01"          # shown as the sampling-plan panel
+NCOLS = 3                             # 3 -> 2x3 grid; 6 -> single row
 WALL_C, POLE_C, POS_C = "#00e0ff", "#ff2d2d", "#ffd400"
 
 
@@ -72,8 +76,13 @@ def main():
     bx0, bx1, by0, by1 = common_bbox(list(data.values()))
     xlim, ylim = (bx0, bx1), (by0, by1)
 
-    fig, axes = plt.subplots(1, 5, figsize=(style.WIDTH_2COL, 2.6))
-    letters = "ABCDE"
+    nrows = int(np.ceil(len(ARENAS) / NCOLS))
+    panel_w = style.WIDTH_2COL / NCOLS
+    panel_h = panel_w * (by1 - by0) / (bx1 - bx0)
+    fig, axes = plt.subplots(nrows, NCOLS,
+                             figsize=(style.WIDTH_2COL, nrows * panel_h + 0.55))
+    axes = np.atleast_1d(axes).ravel()
+    letters = "ABCDEF"
 
     for ax, name, letter in zip(axes, ARENAS, letters):
         A = data[name]
@@ -82,7 +91,7 @@ def main():
             ax.scatter(A["walls"][0], A["walls"][1], s=0.8, c=WALL_C, alpha=0.35, lw=0)
             ax.scatter(A["pos"][:, 0], A["pos"][:, 1], s=5, c=POS_C,
                        edgecolors="k", linewidths=0.2, zorder=4)
-            sub = "Arena 5 (plan)"
+            sub = f"Arena {name[-1]} (plan)"
         else:
             ax.scatter(A["walls"][0], A["walls"][1], s=1.2, c=WALL_C, alpha=0.6, lw=0)
             sub = f"Arena {name[-1]}"
@@ -92,6 +101,9 @@ def main():
         ax.text(0.05, 0.96, letter, transform=ax.transAxes, va="top", ha="left",
                 fontweight="bold", fontsize=8, color="w",
                 bbox=dict(boxstyle="round,pad=0.12", fc="k", ec="none", alpha=0.6))
+
+    for ax in axes[len(ARENAS):]:
+        ax.axis("off")
 
     # 1 m scale bar in panel A
     frac = 1000.0 / (bx1 - bx0)
@@ -108,7 +120,9 @@ def main():
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False,
                bbox_to_anchor=(0.5, 0.0), fontsize=8)
 
-    fig.subplots_adjust(left=0.01, right=0.99, top=0.9, bottom=0.14, wspace=0.06)
+    bottom = 0.14 if nrows == 1 else 0.07
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.9, bottom=bottom,
+                        wspace=0.06, hspace=0.18)
     style.save(fig, "fig_arena_layouts")
     fig.savefig(style.IMAGES / "fig_arena_layouts.png", dpi=150)  # for quick inspection
 
