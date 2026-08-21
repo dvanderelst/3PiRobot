@@ -266,8 +266,10 @@ def report(all_steps, per_run):
           "agn_dist <= cap --")
     print(f"{'tau':>6s} {'cap':>6s} {'calls':>6s} {'precision':>10s} {'recall<1m':>10s} "
           f"{'recall<1.4m':>12s} {'false past 1.4m':>16s}")
+    # tau 0.50 IS the argmax: every argmax-pole call in these runs scores
+    # p_pole >= 0.5, so that row is 'argmax + veto' and isolates the veto.
     for tau in (0.50, 0.60, 0.70):
-        for cap in (1000.0, 1400.0, 1800.0):
+        for cap in (900.0, 1000.0, 1200.0, 1400.0):
             calls = [s for s in all_steps if gated(s, tau, cap) == "pole"]
             good = [s for s in calls if s["true_cls"] == "pole"]
             far = [s for s in calls if s["true_cls"] != "pole"
@@ -290,12 +292,16 @@ def report(all_steps, per_run):
         print("  Do NOT re-run on the bare argmax: the controller turns toward")
         print("  perceived poles, and this many false calls would send it after")
         print("  phantoms. Gate the pole call first. From the two sweeps above:")
-        print("    tau 0.50 + agn cap 1000  -> safest: beats the flown model on")
-        print("                                recall inside 1 m with no far phantoms")
-        print("    tau 0.60 + agn cap 1400  -> buys real range (74% recall to 1.4 m,")
-        print("                                where the flown model had none) at ~87%")
-        print("    tau 0.70 alone           -> restores precision but discards the")
-        print("                                range gain that motivates the re-run")
+        print("    argmax + veto 1200  -> the knee. 88.2% precision, 800-1000 mm")
+        print("                           recall 25% -> 81%, median first detection")
+        print("                           798 -> 995 mm, and only 2 false calls past")
+        print("                           1.4 m against 55 with no veto.")
+        print("    argmax + veto 1000  -> conservative. 95.3% precision, but gives")
+        print("                           back half the 800-1000 mm gain (43.8%).")
+        print("    veto 1400           -> +6 points of recall for 6x the far")
+        print("                           phantoms (12 vs 2). Not worth it.")
+        print("    tau alone (0.70)    -> restores precision by discarding exactly")
+        print("                           the range gain that motivates the re-run.")
         print("  The gate lives in feature_from_inverse, which only the direct")
         print("  policy uses -- SCRIPT_RunPolicy feeds encode_obs the raw dict, so")
         print("  none of this touches the Experiment 2 artifacts.")
