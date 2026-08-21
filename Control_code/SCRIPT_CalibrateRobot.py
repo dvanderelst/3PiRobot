@@ -85,7 +85,7 @@ ROTATION_REPEATS    = 5    # 3 was too few — a single contaminated rep can pul
 # Phase 2 — forward drive (single distance; two metrics extracted per rep)
 DRIVE_MM            = 150.0  # matches the deploy step (Config.fixed_drive_mm),
                              # so curl is measured at the operating point
-DRIVE_REPEATS       = 10   # large enough that median is well-defined and
+DRIVE_REPEATS       = 15   # large enough that median is well-defined and
                            # robust against the occasional settle-artifact rep.
                            # 10 x 150mm needs ~1.5m of run-out; 16 x 200mm
                            # (the previous setting) needed 3.2m.
