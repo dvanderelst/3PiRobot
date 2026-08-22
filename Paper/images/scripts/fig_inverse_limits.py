@@ -297,6 +297,7 @@ def main():
     def pole_row(m):
         e = pred["pole_pred_dist_mm"][m] - rng[m]
         return dict(pred_mean=float(np.nanmean(pred["pole_pred_dist_mm"][m])),
+                    pred_sd=float(np.nanstd(pred["pole_pred_dist_mm"][m])),
                     bias=float(np.nanmean(e)),
                     rmse=float(np.sqrt(np.nanmean(e ** 2))))
     pole_rows = band_stats(rng, finite & is_pole, pole_row)
@@ -600,11 +601,18 @@ def main():
         pct_above_768=float((tgt > 768).mean()),
         pct_above_900=float((tgt > 900).mean()))
 
-    for ax, rows, deprows, colour, title, lab in (
+    # Bars differ between the two panels, deliberately. In D the head tracks
+    # the truth, so +-RMSE is a meaningful error. In C it does not: past 1 m
+    # the error is almost pure bias (at 2000-2500, bias -1454 against RMSE
+    # 1463), so a +-RMSE bar would just retrace the diagonal and would imply
+    # the estimate becomes uncertain. It does not become uncertain, it becomes
+    # CONSTANT, which is the failure that matters for a stop criterion. C
+    # therefore shows the standard deviation of the predictions themselves.
+    for ax, rows, deprows, colour, title, lab, ekey in (
             (axc, pole_rows, dep_pole, C_POLE, "Pole range",
-             "pole echoes per range"),
+             "bars: SD of predictions", "pred_sd"),
             (axd, agn_rows, dep_agn, C_AGN, "Nearest-reflector range",
-             "trained on every echo")):
+             "bars: $\\pm$RMSE", "rmse")):
         if ax is axc:
             ax.fill_between(hist_x, 0, hist_all_y, step="mid", color="0.55",
                             alpha=.13, lw=0, zorder=-2)
@@ -617,7 +625,7 @@ def main():
                     alpha=.8, zorder=-1, label="used by this head")
         ax.plot([0, R_LIM], [0, R_LIM], "--", color="0.4", lw=.8, zorder=0)
         ax.errorbar([r["centre"] for r in rows], [r["pred_mean"] for r in rows],
-                    yerr=[r["rmse"] for r in rows], fmt="o-", color=colour,
+                    yerr=[r[ekey] for r in rows], fmt="o-", color=colour,
                     ms=4, lw=1.2, capsize=2, label="Quadrant models")
         ax.plot([r["centre"] for r in deprows],
                 [r["pred_mean"] for r in deprows], color=colour,
