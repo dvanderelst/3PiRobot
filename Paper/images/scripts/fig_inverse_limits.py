@@ -532,7 +532,9 @@ def main():
     tgt = rng[finite & is_pole & (rng <= T.POLE_DIST_TRAIN_MAX_MM)]
     hist, edges_x = np.histogram(tgt, bins=30, range=(0, R_LIM))
     hist_x = 0.5 * (edges_x[:-1] + edges_x[1:])
-    hist_y = 0.20 * R_LIM * hist / hist.max()
+    # Stretched to fill roughly half the panel: only the relative counts
+    # matter, and at a faithful scale the histogram was too flat to read.
+    hist_y = 0.46 * R_LIM * hist / hist.max()
     numbers["pole_head_training_targets"] = dict(
         n=int(len(tgt)), mean=float(tgt.mean()),
         pct_above_768=float((tgt > 768).mean()),
@@ -545,7 +547,9 @@ def main():
              "trained on every echo")):
         if ax is axc:
             ax.fill_between(hist_x, 0, hist_y, step="mid", color="0.55",
-                            alpha=.35, lw=0, zorder=-1)
+                            alpha=.28, lw=0, zorder=-1)
+            ax.step(hist_x, hist_y, where="mid", color="0.45", lw=.8,
+                    alpha=.75, zorder=-1)
         ax.plot([0, R_LIM], [0, R_LIM], "--", color="0.4", lw=.8, zorder=0)
         ax.errorbar([r["centre"] for r in rows], [r["pred_mean"] for r in rows],
                     yerr=[r["rmse"] for r in rows], fmt="o-", color=colour,
