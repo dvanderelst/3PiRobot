@@ -204,6 +204,33 @@ def main():
             n=int(m.sum()),
             mean_pred=float(np.nanmean(pred["pole_pred_dist_mm"][m])))
 
+    # ---- wall depth profile (no panel, but Experiment 2 reads it) ---------
+    # The controller in Experiment 2 steers on these three distances, so the
+    # section cannot be silent about them even though they get no panel.
+    is_wall = classes == 0
+    wall_rows = {}
+    for i, sname in enumerate(T.SLICE_NAMES):
+        t = slice_t[:, i].astype(float)
+        pp = pred["wall_pred_mean"][:, i]
+        m = is_wall & np.isfinite(t) & np.isfinite(pp)
+        e = pp[m] - t[m]
+        wall_rows[sname] = dict(n=int(m.sum()),
+                                rmse=float(np.sqrt(np.nanmean(e ** 2))),
+                                mae=float(np.nanmean(np.abs(e))))
+    numbers["wall_slices"] = wall_rows
+    # And the same restricted to the far half, since the claim that the wall
+    # profile survives where class does not needs its own number.
+    wall_far = {}
+    for i, sname in enumerate(T.SLICE_NAMES):
+        t = slice_t[:, i].astype(float)
+        pp = pred["wall_pred_mean"][:, i]
+        m = is_wall & np.isfinite(t) & np.isfinite(pp) & (rng >= 1400)
+        if m.sum() >= MIN_N:
+            e = pp[m] - t[m]
+            wall_far[sname] = dict(n=int(m.sum()),
+                                   rmse=float(np.sqrt(np.nanmean(e ** 2))))
+    numbers["wall_slices_beyond_1400"] = wall_far
+
     # ---- (D) reliability of the class posterior ---------------------------
     edges = np.linspace(0.5, 1.0, 11)
     rel = []
