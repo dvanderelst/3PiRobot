@@ -67,6 +67,7 @@ C_CLASS = "#4C72B0"
 C_BASE = "#999999"
 C_POLE = "#C44E52"
 C_AGN = "#55A868"
+C_DEP = "#8172B2"   # deployed model overlaid on the fold curves
 
 
 def _panel_letter(ax, letter):
@@ -116,9 +117,31 @@ def main():
     style.setup()
     import matplotlib.pyplot as plt
 
-    sonar, slice_t, classes, pole_az_deg, near_dist_mm, quads, sess, bins = \
-        T.load_and_filter()
+    sonar, slice_t, classes, pole_az_deg, near_dist_mm, quads, sess, bins, poses = \
+        T.load_and_filter(with_poses=True)
     pred = out_of_fold_predictions(sonar, quads)
+
+    # The deployed model is a FIFTH model, not a combination of the four folds:
+    # it trains once on 85% of a different, single spatial split. So the fold
+    # curves describe the procedure, not the weights on the robot. Score the
+    # deployed model on its own held-out 15% and overlay it, so the reader can
+    # see the deployed instance sitting on the same curve rather than having to
+    # assume it does. Only the bands where that holdout has members are drawn;
+    # past ~1400 mm it is too thin and the fold curve carries the claim alone.
+    dep_val = T.spatial_holdout_mask(poses, sess, T.HOLDOUT_FRAC, T.HOLDOUT_SEED)
+    dep_inv = InverseModel.load(model_dir=str(SONAR_MODEL), fold="deploy")
+    dep_raw = T.predict(dep_inv.model, sonar[dep_val],
+                        (dep_inv._s_mean, dep_inv._s_std),
+                        (dep_inv._t_mean, dep_inv._t_std), dep_inv.device)
+    dep = {}
+    for k, v in dep_raw.items():
+        if v is None:
+            continue
+        v = np.asarray(v)
+        full = np.full((len(sonar),) + v.shape[1:], np.nan, dtype=float)
+        full[dep_val] = v
+        dep[k] = full
+    print(f"  deployed model: {int(dep_val.sum())} echoes on its own holdout")
 
     # near_dist is the range to whichever reflector won the cone, for every
     # ping -- the same array the agnostic head is trained on, and the natural
@@ -251,6 +274,31 @@ def main():
                                                == classes[conf >= t])))
         for t in (0.7, 0.8, 0.9)}
 
+    # ---- the deployed model on its own holdout, for the overlay -----------
+    DEP_MIN_N = 15
+    def _dep_rows(mask, fn):
+        rows = []
+        for lo, hi in BANDS:
+            m = mask & (rng >= lo) & (rng < hi)
+            if m.sum() < DEP_MIN_N:
+                continue
+            rows.append(dict(lo=lo, hi=hi, n=int(m.sum()),
+                             centre=float(np.mean(rng[m])), **fn(m)))
+        return rows
+
+    dep_acc = _dep_rows(finite & dep_val, lambda m: dict(
+        acc=100.0 * float(np.mean(dep["cls_pred"][m] == classes[m]))))
+    dep_az = _dep_rows(finite & is_pole & dep_val, lambda m: dict(
+        mae=float(np.nanmedian(np.abs(dep["pole_pred_az_deg"][m] - pole_az_deg[m])))))
+    dep_agn = _dep_rows(finite & dep_val, lambda m: dict(
+        pred_mean=float(np.nanmean(dep["agn_pred_dist_mm"][m]))))
+    numbers["deployed_holdout"] = dict(
+        n=int(dep_val.sum()),
+        accuracy=float(np.mean(dep["cls_pred"][dep_val] == classes[dep_val])),
+        class_accuracy_by_range=dep_acc,
+        pole_azimuth_by_range=dep_az,
+        agnostic_range_by_range=dep_agn)
+
     # ---- draw -------------------------------------------------------------
     fig, axes = plt.subplots(2, 2, figsize=(style.WIDTH_2COL, 5.6))
     (axa, axb), (axc, axd) = axes
@@ -261,6 +309,8 @@ def main():
              label="Model")
     axa.plot(x, [r["majority"] for r in acc_rows], "s--", color=C_BASE, ms=3,
              label="Majority class")
+    axa.plot([r["centre"] for r in dep_acc], [r["acc"] for r in dep_acc], "^",
+             color=C_DEP, ms=5, mfc="none", label="Deployed model, own holdout")
     axa.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
     axa.set_xlabel("Range to nearest reflector (mm)")
     axa.set_ylabel("Correctly classified (%)")
@@ -274,6 +324,8 @@ def main():
              label="Model")
     axb.plot(xb, [r["baseline"] for r in az_rows], "s--", color=C_BASE, ms=3,
              label="Straight ahead")
+    axb.plot([r["centre"] for r in dep_az], [r["mae"] for r in dep_az], "^",
+             color=C_DEP, ms=5, mfc="none", label="Deployed, own holdout")
     axb.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
     axb.set_xlabel("Range to nearest reflector (mm)")
     axb.set_ylabel("Median |azimuth error| (deg)")
@@ -291,6 +343,8 @@ def main():
                  [r["pred_mean"] for r in pole_rows],
                  yerr=[r["rmse"] for r in pole_rows], fmt="s-", color=C_POLE,
                  ms=3.5, lw=1.2, capsize=2, label="The pole (masked head)")
+    axc.plot([r["centre"] for r in dep_agn], [r["pred_mean"] for r in dep_agn],
+             "^", color=C_DEP, ms=5, mfc="none", label="Deployed, own holdout")
     axc.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
     # Bars are +-RMSE and the masked head's are large enough to run negative,
     # which is a plotting artefact of a symmetric bar on a positive quantity.
