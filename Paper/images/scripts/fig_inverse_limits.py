@@ -65,11 +65,17 @@ WINDOW = 300        # echoes per sliding window for the crossing estimate
 WINDOW_POLE = 150   # ditto for azimuth, where only pole echoes count
 N_BOOT = 300
 
-C_CLASS = "#4C72B0"
+# Colour carries WHAT THE DATA IS ABOUT; line style carries WHICH MODEL
+# (solid/filled = quadrant, dashed/open = deployed, grey dotted = baseline).
+# The two are orthogonal, so a reader never has to ask which of the two a
+# colour change is signalling.
+C_BOTH = "#4C72B0"   # walls and poles together: class, nearest-reflector range
+C_POLE = "#C44E52"   # pole only: azimuth, the masked pole-range head
+C_WALL = "#937860"   # wall only: the three depth slices, as shades of one hue
 C_BASE = "#999999"
-C_POLE = "#C44E52"
-C_AGN = "#55A868"
-SLICE_COLORS = {"left": "#4C72B0", "center": "#937860", "right": "#DA8BC3"}
+C_CLASS = C_BOTH     # kept as an alias so the class panels read naturally
+C_AGN = C_BOTH
+SLICE_COLORS = {"left": "#BFA48E", "center": "#937860", "right": "#6B5340"}
 # One scheme, applied in every panel, so that "which model" and "what kind of
 # line" are the same question everywhere:
 #   quadrant models -> solid line, filled markers
@@ -499,13 +505,13 @@ def main():
 
     xb = [r["centre"] for r in az_rows]
     axb.plot(xb, [r["baseline"] for r in az_rows], label="Straight ahead", **BASE)
-    axb.plot(xb, [r["mae"] for r in az_rows], color=C_CLASS,
+    axb.plot(xb, [r["mae"] for r in az_rows], color=C_POLE,
              label="Quadrant models", **QUAD)
     axb.plot([r["centre"] for r in match_az], [r["mae"] for r in match_az],
-             color=C_CLASS, label="Quadrant models, same echoes",
-             **{**DEP, "mfc": C_CLASS})
+             color=C_POLE, label="Quadrant models, same echoes",
+             **{**DEP, "mfc": C_POLE})
     axb.plot([r["centre"] for r in dep_az], [r["mae"] for r in dep_az],
-             color=C_CLASS, label="Deployed model", **DEP)
+             color=C_POLE, label="Deployed model", **DEP)
     _mark_crossing(axb, xa)
     axb.set_xlabel("Range (mm)")
     axb.set_ylabel("Median |az. error| (deg)")
