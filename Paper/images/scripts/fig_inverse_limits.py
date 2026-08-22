@@ -67,7 +67,16 @@ C_CLASS = "#4C72B0"
 C_BASE = "#999999"
 C_POLE = "#C44E52"
 C_AGN = "#55A868"
-C_DEP = "#8172B2"   # deployed model overlaid on the fold curves
+# One scheme, applied in every panel, so that "which model" and "what kind of
+# line" are the same question everywhere:
+#   quadrant models -> solid line, filled markers
+#   deployed model  -> dashed line, open markers, SAME colour as the quadrant
+#                      series it should be compared against
+#   baselines       -> thin grey dotted, no markers, drawn behind: these are
+#                      not models and must not read as a third one
+QUAD = dict(ls="-", marker="o", ms=4, mfc=None)
+DEP = dict(ls="--", marker="o", ms=4.5, mfc="none", lw=1.0)
+BASE = dict(ls=":", marker="", lw=1.2, color=C_BASE, zorder=0)
 
 
 def _panel_letter(ax, letter):
@@ -292,12 +301,25 @@ def main():
         mae=float(np.nanmedian(np.abs(dep["pole_pred_az_deg"][m] - pole_az_deg[m])))))
     dep_agn = _dep_rows(finite & dep_val, lambda m: dict(
         pred_mean=float(np.nanmean(dep["agn_pred_dist_mm"][m]))))
+    dep_pole = _dep_rows(finite & is_pole & dep_val, lambda m: dict(
+        pred_mean=float(np.nanmean(dep["pole_pred_dist_mm"][m]))))
+    dep_conf = np.nanmax(dep["cls_probs"], axis=1)
+    dep_rel = []
+    dep_edges = np.linspace(0.5, 1.0, 6)
+    for lo, hi in zip(dep_edges[:-1], dep_edges[1:]):
+        m = dep_val & (dep_conf >= lo) & (dep_conf < hi if hi < 1.0 else dep_conf <= hi)
+        if m.sum() < DEP_MIN_N:
+            continue
+        dep_rel.append(dict(conf=float(np.mean(dep_conf[m])), n=int(m.sum()),
+                            acc=float(np.mean(dep["cls_pred"][m] == classes[m]))))
     numbers["deployed_holdout"] = dict(
         n=int(dep_val.sum()),
         accuracy=float(np.mean(dep["cls_pred"][dep_val] == classes[dep_val])),
         class_accuracy_by_range=dep_acc,
         pole_azimuth_by_range=dep_az,
-        agnostic_range_by_range=dep_agn)
+        agnostic_range_by_range=dep_agn,
+        pole_range_by_range=dep_pole,
+        reliability=dep_rel)
 
     # ---- draw -------------------------------------------------------------
     fig, axes = plt.subplots(2, 2, figsize=(style.WIDTH_2COL, 5.6))
@@ -305,12 +327,11 @@ def main():
     fig.subplots_adjust(hspace=.42, wspace=.28)
 
     x = [r["centre"] for r in acc_rows]
-    axa.plot(x, [r["acc"] for r in acc_rows], "o-", color=C_CLASS, ms=4,
-             label="Model")
-    axa.plot(x, [r["majority"] for r in acc_rows], "s--", color=C_BASE, ms=3,
-             label="Majority class")
-    axa.plot([r["centre"] for r in dep_acc], [r["acc"] for r in dep_acc], "^",
-             color=C_DEP, ms=5, mfc="none", label="Deployed model, own holdout")
+    axa.plot(x, [r["majority"] for r in acc_rows], label="Majority class", **BASE)
+    axa.plot(x, [r["acc"] for r in acc_rows], color=C_CLASS,
+             label="Quadrant models", **QUAD)
+    axa.plot([r["centre"] for r in dep_acc], [r["acc"] for r in dep_acc],
+             color=C_CLASS, label="Deployed model", **DEP)
     axa.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
     axa.set_xlabel("Range to nearest reflector (mm)")
     axa.set_ylabel("Correctly classified (%)")
@@ -320,17 +341,17 @@ def main():
     _panel_letter(axa, "A")
 
     xb = [r["centre"] for r in az_rows]
-    axb.plot(xb, [r["mae"] for r in az_rows], "o-", color=C_CLASS, ms=4,
-             label="Model")
-    axb.plot(xb, [r["baseline"] for r in az_rows], "s--", color=C_BASE, ms=3,
-             label="Straight ahead")
-    axb.plot([r["centre"] for r in dep_az], [r["mae"] for r in dep_az], "^",
-             color=C_DEP, ms=5, mfc="none", label="Deployed, own holdout")
+    axb.plot(xb, [r["baseline"] for r in az_rows], label="Straight ahead", **BASE)
+    axb.plot(xb, [r["mae"] for r in az_rows], color=C_CLASS,
+             label="Quadrant models", **QUAD)
+    axb.plot([r["centre"] for r in dep_az], [r["mae"] for r in dep_az],
+             color=C_CLASS, label="Deployed model", **DEP)
     axb.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
     axb.set_xlabel("Range to nearest reflector (mm)")
     axb.set_ylabel("Median |azimuth error| (deg)")
     axb.set_title("Pole azimuth")
-    axb.legend(frameon=False, fontsize=7, loc="upper left")
+    axb.legend(frameon=False, fontsize=7, loc="upper left",
+               bbox_to_anchor=(0.0, 0.93))
     _panel_letter(axb, "B")
 
     hi = max(max(r["centre"] for r in agn_rows), 2600)
@@ -338,13 +359,17 @@ def main():
     axc.errorbar([r["centre"] for r in agn_rows],
                  [r["pred_mean"] for r in agn_rows],
                  yerr=[r["rmse"] for r in agn_rows], fmt="o-", color=C_AGN,
-                 ms=4, lw=1.2, capsize=2, label="Nearest reflector (any class)")
+                 ms=4, lw=1.2, capsize=2,
+                 label="Nearest reflector, quadrant models")
+    axc.plot([r["centre"] for r in dep_agn], [r["pred_mean"] for r in dep_agn],
+             color=C_AGN, label="Nearest reflector, deployed", **DEP)
     axc.errorbar([r["centre"] for r in pole_rows],
                  [r["pred_mean"] for r in pole_rows],
                  yerr=[r["rmse"] for r in pole_rows], fmt="s-", color=C_POLE,
-                 ms=3.5, lw=1.2, capsize=2, label="The pole (masked head)")
-    axc.plot([r["centre"] for r in dep_agn], [r["pred_mean"] for r in dep_agn],
-             "^", color=C_DEP, ms=5, mfc="none", label="Deployed, own holdout")
+                 ms=3.5, lw=1.2, capsize=2, label="The pole, quadrant models")
+    axc.plot([r["centre"] for r in dep_pole], [r["pred_mean"] for r in dep_pole],
+             color=C_POLE, label="The pole, deployed",
+             **{**DEP, "marker": "s"})
     axc.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
     # Bars are +-RMSE and the masked head's are large enough to run negative,
     # which is a plotting artefact of a symmetric bar on a positive quantity.
@@ -353,12 +378,18 @@ def main():
     axc.set_xlabel("True range (mm)")
     axc.set_ylabel("Predicted range (mm)")
     axc.set_title("Range")
-    axc.legend(frameon=False, fontsize=7, loc="upper left")
+    axc.legend(frameon=False, fontsize=6, loc="upper left",
+               bbox_to_anchor=(0.0, 0.94), labelspacing=.3)
     _panel_letter(axc, "C")
 
     axd.plot([0.5, 1.0], [50, 100], "--", color="0.4", lw=.8, zorder=0)
-    axd.plot([r["conf"] for r in rel], [100 * r["acc"] for r in rel], "o-",
-             color=C_CLASS, ms=4)
+    axd.plot([r["conf"] for r in rel], [100 * r["acc"] for r in rel],
+             color=C_CLASS, label="Quadrant models", **QUAD)
+    if dep_rel:
+        axd.plot([r["conf"] for r in dep_rel], [100 * r["acc"] for r in dep_rel],
+                 color=C_CLASS, label="Deployed model", **DEP)
+    axd.legend(frameon=False, fontsize=7, loc="upper left",
+               bbox_to_anchor=(0.0, 0.93))
     axd.set_xlabel("Predicted probability of the reported class")
     axd.set_ylabel("Correct (%)")
     axd.set_xlim(0.5, 1.0)
