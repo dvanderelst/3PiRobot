@@ -532,7 +532,11 @@ def main():
     # at the same scale: that comparison is the section's central claim and it
     # is now made across two panels rather than inside one.
     fig, axes = plt.subplots(2, 3, figsize=(style.WIDTH_2COL, 5.5))
-    (axa, axb, axc), (axd, axe, axf) = axes
+    # Layout groups the two panels about the CLASSIFIER first: its accuracy,
+    # then whether its reported probability can be believed. The four geometry
+    # heads follow. Variable names stay tied to content, so only the positions
+    # and the letters move.
+    (axa, axf, axb), (axc, axd, axe) = axes
     fig.subplots_adjust(hspace=.58, wspace=.42, left=.09, right=.99,
                     top=.93, bottom=.10)
 
@@ -567,7 +571,7 @@ def main():
     axb.set_title("Pole azimuth")
     axb.legend(frameon=False, fontsize=6, loc="upper left",
                bbox_to_anchor=(0.0, 0.95), labelspacing=.3)
-    _panel_letter(axb, "B")
+    _panel_letter(axb, "C")
 
     R_LIM = 2900
 
@@ -637,8 +641,8 @@ def main():
         ax.legend(frameon=False, fontsize=6, loc="upper left",
                   bbox_to_anchor=(0.0, 0.95), labelspacing=.3, title=lab,
                   title_fontsize=6)
-    _panel_letter(axc, "C")
-    _panel_letter(axd, "D")
+    _panel_letter(axc, "D")
+    _panel_letter(axd, "E")
 
     # Inset on D: why the error grows with range. The head is asked for the
     # nearest reflector INSIDE the cone, but the sensor hears wider, so a
@@ -681,7 +685,7 @@ def main():
     axe.legend(frameon=False, fontsize=6, loc="upper left",
                bbox_to_anchor=(0.0, 0.95), labelspacing=.3,
                title="dotted: constant predictor", title_fontsize=6)
-    _panel_letter(axe, "E")
+    _panel_letter(axe, "F")
 
     axf.plot([0.5, 1.0], [50, 100], "--", color="0.4", lw=.8, zorder=0)
     axf.plot([r["conf"] for r in rel], [100 * r["acc"] for r in rel],
@@ -696,7 +700,7 @@ def main():
     axf.set_xlim(0.5, 1.0)
     axf.set_ylim(40, 100)
     axf.set_title(f"Reliability (ECE {ece:.3f})")
-    _panel_letter(axf, "F")
+    _panel_letter(axf, "B")
 
     style.save(fig, NAME)
 
