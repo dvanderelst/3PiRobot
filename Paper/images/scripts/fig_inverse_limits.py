@@ -461,7 +461,12 @@ def main():
     # Uncontested echoes, for the third series in D.
     clean = uncontested_mask(sess, poses, rng)
     agn_clean_rows = band_stats(rng, finite & clean, agn_row)
+    # The comparison has to be against the DISJOINT set. Comparing uncontested
+    # against "all echoes" compares a set with a superset that it dominates
+    # (301 of 509 at 1000-1400 mm), which hides the effect almost entirely.
+    agn_cont_rows = band_stats(rng, finite & ~clean, agn_row)
     numbers["agnostic_range_uncontested"] = agn_clean_rows
+    numbers["agnostic_range_contested"] = agn_cont_rows
     numbers["uncontested_definition"] = dict(half_deg=50.0, margin_mm=100.0,
                                              n=int(clean.sum()))
 
@@ -635,12 +640,17 @@ def main():
     # echoes stop existing in an arena this size -- the same ceiling that
     # limits every other far-range claim here.
     insd = axd.inset_axes([0.55, 0.13, 0.42, 0.34])
-    insd.plot([r["centre"] for r in agn_rows], [r["mae"] for r in agn_rows],
-              "o-", color=C_AGN, ms=2.5, lw=1.0, label="all")
+    # RMSE rather than the median, for two reasons: it is the same quantity as
+    # the error bars in the main panel, and at 1700-2000 mm the medians are
+    # identical (170 against 167 mm) while the RMSE differs by 126 -- the whole
+    # effect in that band sits in the tail, which a median cannot show.
+    insd.plot([r["centre"] for r in agn_cont_rows],
+              [r["rmse"] for r in agn_cont_rows], "o-", color=C_AGN, ms=2.5,
+              lw=1.0, label="contested")
     insd.plot([r["centre"] for r in agn_clean_rows],
-              [r["mae"] for r in agn_clean_rows], "^--", color=C_AGN, ms=3,
+              [r["rmse"] for r in agn_clean_rows], "^--", color=C_AGN, ms=3,
               lw=1.0, alpha=.65, mfc="none", label="uncontested")
-    insd.set_title("median |error| (mm)", fontsize=5.5, pad=2)
+    insd.set_title("RMSE (mm)", fontsize=5.5, pad=2)
     insd.tick_params(labelsize=5, length=2, pad=1)
     insd.legend(frameon=False, fontsize=5, loc="upper left", handlelength=1.2)
 
