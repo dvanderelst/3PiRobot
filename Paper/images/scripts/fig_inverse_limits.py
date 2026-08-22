@@ -529,12 +529,24 @@ def main():
     # The plateau height (~770 mm) is neither the cap nor the mean of the
     # targets (636 mm): the head pins near the top of the output range it was
     # ever asked to produce, and that mass runs out above ~900 mm (11%).
-    tgt = rng[finite & is_pole & (rng <= T.POLE_DIST_TRAIN_MAX_MM)]
-    hist, edges_x = np.histogram(tgt, bins=30, range=(0, R_LIM))
+    # TWO histograms, because the cliff is a design decision and not a gap in
+    # the data. Acquisition06 was run to get distant poles and did: 207 of the
+    # 429 pole echoes beyond 1 m come from it, and the furthest sits at
+    # 3196 mm. Those echoes train the classifier, the azimuth head and the
+    # agnostic range head. Only THIS head excludes them, because widening its
+    # span costs close-range accuracy where the terminal stop fires. Showing
+    # only the masked subset makes the panel read as "no data out there",
+    # which is wrong.
+    all_poles = rng[finite & is_pole]
+    tgt = all_poles[all_poles <= T.POLE_DIST_TRAIN_MAX_MM]
+    hist_all, edges_x = np.histogram(all_poles, bins=30, range=(0, R_LIM))
+    hist, _ = np.histogram(tgt, bins=30, range=(0, R_LIM))
     hist_x = 0.5 * (edges_x[:-1] + edges_x[1:])
     # Stretched to fill roughly half the panel: only the relative counts
     # matter, and at a faithful scale the histogram was too flat to read.
-    hist_y = 0.46 * R_LIM * hist / hist.max()
+    _scale = 0.46 * R_LIM / hist_all.max()
+    hist_y = _scale * hist
+    hist_all_y = _scale * hist_all
     numbers["pole_head_training_targets"] = dict(
         n=int(len(tgt)), mean=float(tgt.mean()),
         pct_above_768=float((tgt > 768).mean()),
@@ -542,14 +554,19 @@ def main():
 
     for ax, rows, deprows, colour, title, lab in (
             (axc, pole_rows, dep_pole, C_POLE, "Pole range",
-             "shaded: training echoes per range"),
+             "pole echoes per range"),
             (axd, agn_rows, dep_agn, C_AGN, "Nearest-reflector range",
              "trained on every echo")):
         if ax is axc:
-            ax.fill_between(hist_x, 0, hist_y, step="mid", color="0.55",
-                            alpha=.28, lw=0, zorder=-1)
-            ax.step(hist_x, hist_y, where="mid", color="0.45", lw=.8,
-                    alpha=.75, zorder=-1)
+            ax.fill_between(hist_x, 0, hist_all_y, step="mid", color="0.55",
+                            alpha=.13, lw=0, zorder=-2)
+            ax.step(hist_x, hist_all_y, where="mid", color="0.55", lw=.7,
+                    alpha=.6, ls=(0, (2, 1.5)), zorder=-2,
+                    label="all pole echoes")
+            ax.fill_between(hist_x, 0, hist_y, step="mid", color="0.45",
+                            alpha=.30, lw=0, zorder=-1)
+            ax.step(hist_x, hist_y, where="mid", color="0.35", lw=.8,
+                    alpha=.8, zorder=-1, label="used by this head")
         ax.plot([0, R_LIM], [0, R_LIM], "--", color="0.4", lw=.8, zorder=0)
         ax.errorbar([r["centre"] for r in rows], [r["pred_mean"] for r in rows],
                     yerr=[r["rmse"] for r in rows], fmt="o-", color=colour,
