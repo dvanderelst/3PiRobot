@@ -382,6 +382,16 @@ def main():
         pred_mean=float(np.nanmean(dep["agn_pred_dist_mm"][m]))))
     dep_pole = _dep_rows(finite & is_pole & dep_val, lambda m: dict(
         pred_mean=float(np.nanmean(dep["pole_pred_dist_mm"][m]))))
+    # The quadrant models restricted to the echoes the deployed model was
+    # scored on. Without this, panel B invites a wrong reading: the deployed
+    # curve sits below the quadrant curve, which looks like the deployed model
+    # being better, when in fact its holdout simply contains easier pole
+    # echoes. Drawn only in B, because that is the panel where the artefact is
+    # large; for class the holdout is representative (see paired stats below).
+    match_az = _dep_rows(finite & is_pole & dep_val, lambda m: dict(
+        mae=float(np.nanmedian(np.abs(pred["pole_pred_az_deg"][m]
+                                      - pole_az_deg[m])))))
+
     dep_conf = np.nanmax(dep["cls_probs"], axis=1)
     dep_rel = []
     dep_edges = np.linspace(0.5, 1.0, 6)
@@ -399,6 +409,41 @@ def main():
         agnostic_range_by_range=dep_agn,
         pole_range_by_range=dep_pole,
         reliability=dep_rel)
+
+    # Like-for-like: both model sets on identical echoes, so any residual
+    # difference is a model difference rather than a sampling one.
+    rs = np.random.default_rng(0)
+    pm_val = finite & is_pole & dep_val
+    eq = np.abs(pred["pole_pred_az_deg"][pm_val] - pole_az_deg[pm_val])
+    ed = np.abs(dep["pole_pred_az_deg"][pm_val] - pole_az_deg[pm_val])
+    bs = [np.median(ed[i]) - np.median(eq[i])
+          for i in (rs.integers(0, len(eq), len(eq)) for _ in range(2000))]
+    okq = (cls_pred == classes)[dep_val]
+    okd = (dep["cls_pred"] == classes)[dep_val]
+    bsc = [okd[i].mean() - okq[i].mean()
+           for i in (rs.integers(0, len(okq), len(okq)) for _ in range(2000))]
+    numbers["like_for_like"] = dict(
+        n_pole=int(pm_val.sum()),
+        azimuth_quadrant_median=float(np.median(eq)),
+        azimuth_deployed_median=float(np.median(ed)),
+        azimuth_diff_ci=[float(np.percentile(bs, 2.5)),
+                         float(np.percentile(bs, 97.5))],
+        azimuth_quadrant_on_other_echoes=float(np.nanmedian(
+            np.abs(pred["pole_pred_az_deg"][finite & is_pole & ~dep_val]
+                   - pole_az_deg[finite & is_pole & ~dep_val]))),
+        n_all=int(dep_val.sum()),
+        class_quadrant=float(okq.mean()), class_deployed=float(okd.mean()),
+        class_diff_ci=[float(np.percentile(bsc, 2.5)),
+                       float(np.percentile(bsc, 97.5))],
+        class_quadrant_on_other_echoes=float(
+            (cls_pred == classes)[~dep_val].mean()))
+    lfl = numbers["like_for_like"]
+    print(f"  like-for-like on the deployed holdout: azimuth "
+          f"{lfl['azimuth_quadrant_median']:.2f} vs "
+          f"{lfl['azimuth_deployed_median']:.2f} deg "
+          f"(quadrant models score {lfl['azimuth_quadrant_on_other_echoes']:.2f} "
+          f"on the other echoes); class {lfl['class_quadrant']:.3f} vs "
+          f"{lfl['class_deployed']:.3f}")
 
     # ---- draw -------------------------------------------------------------
     fig, axes = plt.subplots(2, 2, figsize=(style.WIDTH_2COL, 5.6))
@@ -423,6 +468,9 @@ def main():
     axb.plot(xb, [r["baseline"] for r in az_rows], label="Straight ahead", **BASE)
     axb.plot(xb, [r["mae"] for r in az_rows], color=C_CLASS,
              label="Quadrant models", **QUAD)
+    axb.plot([r["centre"] for r in match_az], [r["mae"] for r in match_az],
+             color=C_CLASS, label="Quadrant models, same echoes",
+             **{**DEP, "mfc": C_CLASS})
     axb.plot([r["centre"] for r in dep_az], [r["mae"] for r in dep_az],
              color=C_CLASS, label="Deployed model", **DEP)
     _mark_crossing(axb, xa)
