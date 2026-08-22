@@ -553,11 +553,13 @@ def main():
     axb.plot(xb, [r["baseline"] for r in az_rows], label="Straight ahead", **BASE)
     axb.plot(xb, [r["mae"] for r in az_rows], color=C_POLE,
              label="Quadrant models", **QUAD)
-    axb.plot([r["centre"] for r in match_az], [r["mae"] for r in match_az],
-             color=C_POLE, label="Quadrant models, same echoes",
-             **{**DEP, "mfc": C_POLE})
-    axb.plot([r["centre"] for r in dep_az], [r["mae"] for r in dep_az],
-             color=C_POLE, label="Deployed model", **DEP)
+    # The deployed model is deliberately NOT drawn here. Its points came from
+    # 17-23 held-out pole echoes while the baseline is computed over every echo
+    # in the band, so it appeared to beat a baseline it was never measured
+    # against. On its own echoes beyond 2000 mm the baseline scores 4.9 deg and
+    # the deployed model 6.8, i.e. it does not beat it. Showing the series
+    # meant displaying an artefact and then explaining it away; the panel's
+    # message is the quadrant curve meeting the baseline near 2 m.
     _mark_crossing(axb, xa)
     axb.set_xlabel("Range (mm)")
     axb.set_ylabel("Median |az. error| (deg)")
