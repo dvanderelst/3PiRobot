@@ -94,6 +94,22 @@ Everything below was checked against a config, an artifact or a log rather than 
 
 **Dieter's edits in the same pass.** He first trimmed the arena-6 rationale out of the caption as uneven detail (we do not explain the other arenas' boxes either), then reinstated it in the body once it emerged that session 6 also differed in *protocol*, not just layout: a deviation from a stated method needs its motive. He also added a `\cnote` questioning whether the Barchi 6 x 5 min flight-time argument is the right one. **An unclosed `\cnote` silently swallowed the whole labelling paragraph** (two braces opened, one closed; no LaTeX error, the only symptom was the page count moving and the text rendering red). Fixed. Worth remembering: unbalanced `\cnote`/`\dnote` braces fail silently and consume text until some later stray `}`.
 
+### PLANNED — how to interpret the Experiment 2 manipulations (2026-08-21)
+
+Dieter's observation: what was left of `\dnote[18]` is not a Methods gap at all. Methods says what we did; landmarks-against-path-integration is how to *read* what happened. The note stays where it is but is now marked as an interpretation item, and `\dnote[22]` marks the matching spot in the Discussion.
+
+**The interpretive problem, and what already solves it.**
+
+1. **The non-separability argument cuts both ways.** Methods now justifies manipulating the arena on the grounds that sensing and ego-motion cannot be pulled apart in the controller. True, but it means a *null* result under a manipulation cannot by itself be read as "the robot ignored that object" -- the contribution could be present and swamped. The two ~30 mm pole displacements are exactly this case and must not be reported as "poles are not used".
+2. **The dissociation is what rescues it.** Pole *removal* moved the route (+66 east / +102 north over the north lobe, six laps, never negative, baseline elsewhere) while pole *displacement* did essentially nothing, twice, in different directions and magnitudes. **Presence matters, position barely does** -- and neither run alone supports that. **Report them as a pair; the comparison is the result.**
+3. **The walls go the other way, and that is the headline.** A wall displaced 420--500 mm across the trained path pulled the route 416 mm, near-complete capture, against the Path04 blocks' one third. **For thin dowels presence matters and position barely does; for walls position is nearly everything.**
+
+**What this licenses us to claim.** The controller navigates on **boundary geometry plus object presence, not object identity.** That is a narrower claim than "landmark recognition" and it is the honest one. It also picks the precedent: Neuweiler and Möhres (1967) is about a spatial *Raumbild* rather than a set of recognised objects, which is the same distinction (scratchpad section 6).
+
+**Where each piece gets written.** The dissociation and the wall/pole contrast go in Experiment 2 Results, with the replicate (42 mm against 42 mm on Path07) as the noise floor that makes the null a null. The biological framing and the landmark-kind distinction go in the Discussion.
+
+**The Introduction item is moot.** The old open item "confirm Task 2 wording (path integration + landmark recognition) matches the experiment" no longer applies: the Introduction's two-task paragraph is gone, and *landmark* now appears in the paper only in `\dnote[18]`, in the Schumacher2017 electrosensory example (Par 2), and in the Discussion's "familiar landmark types", which is what `\dnote[22]` flags.
+
 ### PLANNED — rewrite the inverse Results around what the model can and cannot recover (2026-08-12)
 
 **Not drafted. Do this after the Experiment 2 work, so the numbers are final.** Decided 2026-08-12 with Dieter. Not extra work: `\dnote[13]` already flags that `tab:inverse-results` and `fig:inverse-results` predate the range head and `\dnote[14]` asks for a pole-range panel, so these have to be redone anyway. The question is only what replaces them, and an aggregate metrics table is now the weakest option available. All supporting numbers are in Performance notes 2026-08-12 (night) and the two entries above it.
