@@ -61,7 +61,9 @@ FOLD_PREFIX = "q"
 BANDS = [(200, 500), (500, 750), (750, 1000), (1000, 1400),
          (1400, 1700), (1700, 2000), (2000, 2500), (2500, 3300)]
 MIN_N = 20          # bands thinner than this are dropped, not plotted faint
-CLIFF_MM = 1400.0
+WINDOW = 300        # echoes per sliding window for the crossing estimate
+WINDOW_POLE = 150   # ditto for azimuth, where only pole echoes count
+N_BOOT = 300
 
 C_CLASS = "#4C72B0"
 C_BASE = "#999999"
@@ -77,6 +79,15 @@ C_AGN = "#55A868"
 QUAD = dict(ls="-", marker="o", ms=4, mfc=None)
 DEP = dict(ls="--", marker="o", ms=4.5, mfc="none", lw=1.0)
 BASE = dict(ls=":", marker="", lw=1.2, color=C_BASE, zorder=0)
+
+
+def _mark_crossing(ax, c):
+    """Vertical mark at the measured crossing, with its bootstrap interval.
+
+    Panel C gets none on purpose: nothing crosses there, which is the point.
+    """
+    ax.axvspan(c["ci_lo"], c["ci_hi"], color="0.6", alpha=.16, lw=0, zorder=0)
+    ax.axvline(c["mm"], color="0.35", ls=":", lw=1.0, zorder=0)
 
 
 def _panel_letter(ax, letter):
@@ -108,6 +119,42 @@ def out_of_fold_predictions(sonar, quads):
             out[k][sel] = v
         print(f"  fold {FOLD_PREFIX}{q}: {int(sel.sum())} echoes scored out of fold")
     return out
+
+
+def crossing(rng_sorted, margin_fn, window, n_boot=N_BOOT, seed=0):
+    """Range at which the model stops beating its baseline, without binning.
+
+    Slides a fixed-count window along range and finds the last window in which
+    the model is still ahead. Bins cannot answer this: a bin edge placed where
+    the crossing is believed to be will reproduce that belief, which is how
+    1400 mm survived in this project for as long as it did -- it was a bin edge
+    inherited from an earlier binned analysis, and the model is in fact still
+    ahead of the base rate there.
+
+    margin_fn(slice) must return a positive number while the model is winning.
+    """
+    def _once(order):
+        r = rng_sorted[order]
+        xs, d = [], []
+        for i in range(0, len(r) - window):
+            w = order[i:i + window]
+            xs.append(float(np.median(rng_sorted[w])))
+            d.append(margin_fn(w))
+        xs = np.asarray(xs); d = np.asarray(d)
+        ahead = np.where(d[:-1] > 0)[0]
+        return xs[ahead.max() + 1] if len(ahead) else float("nan")
+
+    base_order = np.arange(len(rng_sorted))
+    point = _once(base_order)
+    rs = np.random.default_rng(seed)
+    boot = []
+    for _ in range(n_boot):
+        idx = np.sort(rs.integers(0, len(rng_sorted), len(rng_sorted)))
+        boot.append(_once(idx))
+    boot = np.asarray(boot); boot = boot[np.isfinite(boot)]
+    return dict(mm=float(point), boot_median=float(np.median(boot)),
+                ci_lo=float(np.percentile(boot, 2.5)),
+                ci_hi=float(np.percentile(boot, 97.5)), window=int(window))
 
 
 def band_stats(true_range, mask, value_fn):
@@ -283,6 +330,38 @@ def main():
                                                == classes[conf >= t])))
         for t in (0.7, 0.8, 0.9)}
 
+    # ---- where each quantity stops beating its baseline --------------------
+    order_all = np.argsort(np.where(finite, rng, np.inf))
+    order_all = order_all[finite[order_all]]
+    r_all = rng[order_all]
+    ok_all = (cls_pred == classes).astype(float)
+
+    def _class_margin(idx):
+        f = float(np.mean(classes[idx] == 0))
+        return float(np.mean(ok_all[idx])) - max(f, 1.0 - f)
+
+    pm = finite & is_pole
+    order_pole = np.argsort(np.where(pm, rng, np.inf))
+    order_pole = order_pole[pm[order_pole]]
+    az_err = np.abs(pred["pole_pred_az_deg"] - pole_az_deg)
+
+    def _az_margin(idx):
+        return float(np.nanmedian(np.abs(pole_az_deg[idx]))
+                     - np.nanmedian(az_err[idx]))
+
+    numbers["crossings"] = {
+        "class": crossing(rng[order_all], lambda w: _class_margin(order_all[w]),
+                          WINDOW),
+        "pole_azimuth": crossing(rng[order_pole],
+                                 lambda w: _az_margin(order_pole[w]),
+                                 WINDOW_POLE),
+    }
+    xc = numbers["crossings"]["class"]
+    xa = numbers["crossings"]["pole_azimuth"]
+    print(f"  class crosses its base rate at {xc['mm']:.0f} mm "
+          f"(CI {xc['ci_lo']:.0f}-{xc['ci_hi']:.0f}); azimuth at {xa['mm']:.0f} mm "
+          f"(CI {xa['ci_lo']:.0f}-{xa['ci_hi']:.0f})")
+
     # ---- the deployed model on its own holdout, for the overlay -----------
     DEP_MIN_N = 15
     def _dep_rows(mask, fn):
@@ -332,7 +411,7 @@ def main():
              label="Quadrant models", **QUAD)
     axa.plot([r["centre"] for r in dep_acc], [r["acc"] for r in dep_acc],
              color=C_CLASS, label="Deployed model", **DEP)
-    axa.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
+    _mark_crossing(axa, xc)
     axa.set_xlabel("Range to nearest reflector (mm)")
     axa.set_ylabel("Correctly classified (%)")
     axa.set_ylim(0, 100)
@@ -346,7 +425,7 @@ def main():
              label="Quadrant models", **QUAD)
     axb.plot([r["centre"] for r in dep_az], [r["mae"] for r in dep_az],
              color=C_CLASS, label="Deployed model", **DEP)
-    axb.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
+    _mark_crossing(axb, xa)
     axb.set_xlabel("Range to nearest reflector (mm)")
     axb.set_ylabel("Median |azimuth error| (deg)")
     axb.set_title("Pole azimuth")
@@ -370,7 +449,6 @@ def main():
     axc.plot([r["centre"] for r in dep_pole], [r["pred_mean"] for r in dep_pole],
              color=C_POLE, label="The pole, deployed",
              **{**DEP, "marker": "s"})
-    axc.axvline(CLIFF_MM, color="k", ls=":", lw=.8)
     # Bars are +-RMSE and the masked head's are large enough to run negative,
     # which is a plotting artefact of a symmetric bar on a positive quantity.
     # Clip at zero rather than let the panel imply negative distances.
