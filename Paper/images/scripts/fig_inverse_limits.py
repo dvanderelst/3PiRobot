@@ -164,6 +164,39 @@ def crossing(rng_sorted, margin_fn, window, n_boot=N_BOOT, seed=0):
                 ci_hi=float(np.percentile(boot, 97.5)), window=int(window))
 
 
+def uncontested_mask(sess, poses, near, half_deg=50.0, margin_mm=100.0):
+    """Echoes with no reflector outside the analysed cone returning earlier.
+
+    The agnostic head is asked for the nearest reflector INSIDE the +-35 deg
+    cone, but the sensor hears wider than that, so a reflector just outside can
+    return first and has to be rejected. This marks the echoes where that does
+    not happen: nothing outside the cone is more than `margin_mm` nearer than
+    the in-cone target.
+
+    +-50 deg is the window used because it is the tightest one wider than the
+    analysed cone, and it keeps enough uncontested echoes to plot out to 2 m.
+    The effect is the same sign at +-70 and +-180; those windows just run out
+    of uncontested echoes sooner.
+    """
+    from pathlib import Path
+    from Library.AcquisitionSessionLoader import (_load_walls_for_session,
+                                                  _load_features_for_session,
+                                                  nearest_reflector_in_cone)
+    root = Path(T.ACQUISITIONS_ROOT)
+    nearest_any = np.full(len(near), np.nan)
+    for s_name in sorted(set(sess)):
+        d = root / s_name
+        walls = _load_walls_for_session(d)
+        feats = _load_features_for_session(d)
+        poles = feats["poles"]
+        pr = float(feats.get("pole_radius_mm", 12.5))
+        for i in np.where(sess == s_name)[0]:
+            x, y, yaw = poses[i]
+            nearest_any[i] = nearest_reflector_in_cone(walls, poles, pr,
+                                                       x, y, yaw, half_deg)[2]
+    return np.isfinite(nearest_any) & ((near - nearest_any) <= margin_mm)
+
+
 def band_stats(true_range, mask, value_fn):
     """Apply value_fn to each band's members; skip bands with too few."""
     rows = []
@@ -256,6 +289,7 @@ def main():
         return dict(pred_mean=float(np.nanmean(pred["agn_pred_dist_mm"][m])),
                     bias=float(np.nanmean(e)),
                     rmse=float(np.sqrt(np.nanmean(e ** 2))),
+                    mae=float(np.nanmedian(np.abs(e))),
                     pct=float(100.0 * np.sqrt(np.nanmean(e ** 2))
                               / max(np.mean(rng[m]), 1.0)))
     agn_rows = band_stats(rng, finite, agn_row)
@@ -424,6 +458,13 @@ def main():
         mae=float(np.nanmedian(np.abs(pred["pole_pred_az_deg"][m]
                                       - pole_az_deg[m])))))
 
+    # Uncontested echoes, for the third series in D.
+    clean = uncontested_mask(sess, poses, rng)
+    agn_clean_rows = band_stats(rng, finite & clean, agn_row)
+    numbers["agnostic_range_uncontested"] = agn_clean_rows
+    numbers["uncontested_definition"] = dict(half_deg=50.0, margin_mm=100.0,
+                                             n=int(clean.sum()))
+
     dep_wall_by_range = _wall_rows(is_wall & finite & dep_val, dep, 15)
     dep_conf = np.nanmax(dep["cls_probs"], axis=1)
     dep_rel = []
@@ -583,6 +624,25 @@ def main():
                   title_fontsize=6)
     _panel_letter(axc, "C")
     _panel_letter(axd, "D")
+
+    # Inset on D: why the error grows with range. The head is asked for the
+    # nearest reflector INSIDE the cone, but the sensor hears wider, so a
+    # reflector just outside can return first and has to be rejected.
+    # Restricting to echoes where that does not happen takes about a third off
+    # the error from 1 m outward. Shown as error rather than as another
+    # predicted-against-true series because the two have nearly the same mean
+    # prediction and differ in spread. It stops at 2 m because uncontested
+    # echoes stop existing in an arena this size -- the same ceiling that
+    # limits every other far-range claim here.
+    insd = axd.inset_axes([0.55, 0.13, 0.42, 0.34])
+    insd.plot([r["centre"] for r in agn_rows], [r["mae"] for r in agn_rows],
+              "o-", color=C_AGN, ms=2.5, lw=1.0, label="all")
+    insd.plot([r["centre"] for r in agn_clean_rows],
+              [r["mae"] for r in agn_clean_rows], "^--", color=C_AGN, ms=3,
+              lw=1.0, alpha=.65, mfc="none", label="uncontested")
+    insd.set_title("median |error| (mm)", fontsize=5.5, pad=2)
+    insd.tick_params(labelsize=5, length=2, pad=1)
+    insd.legend(frameon=False, fontsize=5, loc="upper left", handlelength=1.2)
 
     # (E) the wall profile, which Experiment 2 steers on. Plotted as error
     # against range rather than predicted-against-true: the claim is that it
