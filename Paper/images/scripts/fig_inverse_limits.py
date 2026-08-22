@@ -69,6 +69,7 @@ C_CLASS = "#4C72B0"
 C_BASE = "#999999"
 C_POLE = "#C44E52"
 C_AGN = "#55A868"
+SLICE_COLORS = {"left": "#4C72B0", "center": "#937860", "right": "#DA8BC3"}
 # One scheme, applied in every panel, so that "which model" and "what kind of
 # line" are the same question everywhere:
 #   quadrant models -> solid line, filled markers
@@ -310,6 +311,31 @@ def main():
                                    rmse=float(np.sqrt(np.nanmean(e ** 2))))
     numbers["wall_slices_beyond_1400"] = wall_far
 
+    # Band-resolved, for panel E. Baseline is a constant predictor: answer the
+    # band's mean true distance for that slice and never listen. It plays the
+    # part the majority class plays in A and straight-ahead plays in B.
+    def _wall_rows(mask, source, min_n):
+        out = {}
+        for i, sname in enumerate(T.SLICE_NAMES):
+            t = slice_t[:, i].astype(float)
+            pp = source["wall_pred_mean"][:, i]
+            ok = mask & np.isfinite(t) & np.isfinite(pp)
+            rows = []
+            for lo, hi in BANDS:
+                m = ok & (rng >= lo) & (rng < hi)
+                if m.sum() < min_n:
+                    continue
+                e = pp[m] - t[m]
+                rows.append(dict(lo=lo, hi=hi, n=int(m.sum()),
+                                 centre=float(np.mean(rng[m])),
+                                 rmse=float(np.sqrt(np.nanmean(e ** 2))),
+                                 baseline=float(np.nanstd(t[m]))))
+            out[sname] = rows
+        return out
+
+    wall_by_range = _wall_rows(is_wall & finite, pred, MIN_N)
+    numbers["wall_slices_by_range"] = wall_by_range
+
     # ---- (D) reliability of the class posterior ---------------------------
     edges = np.linspace(0.5, 1.0, 11)
     rel = []
@@ -392,6 +418,7 @@ def main():
         mae=float(np.nanmedian(np.abs(pred["pole_pred_az_deg"][m]
                                       - pole_az_deg[m])))))
 
+    dep_wall_by_range = _wall_rows(is_wall & finite & dep_val, dep, 15)
     dep_conf = np.nanmax(dep["cls_probs"], axis=1)
     dep_rel = []
     dep_edges = np.linspace(0.5, 1.0, 6)
@@ -446,9 +473,15 @@ def main():
           f"{lfl['class_deployed']:.3f}")
 
     # ---- draw -------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(style.WIDTH_2COL, 5.6))
-    (axa, axb), (axc, axd) = axes
-    fig.subplots_adjust(hspace=.42, wspace=.28)
+    # One panel per output head, in the order Fig. 3 draws them, then
+    # reliability. C and D are the two range heads and share identical axes, so
+    # that the masked head's flatness and the agnostic head's diagonal are read
+    # at the same scale: that comparison is the section's central claim and it
+    # is now made across two panels rather than inside one.
+    fig, axes = plt.subplots(2, 3, figsize=(style.WIDTH_2COL, 5.5))
+    (axa, axb, axc), (axd, axe, axf) = axes
+    fig.subplots_adjust(hspace=.58, wspace=.42, left=.09, right=.99,
+                    top=.93, bottom=.10)
 
     x = [r["centre"] for r in acc_rows]
     axa.plot(x, [r["majority"] for r in acc_rows], label="Majority class", **BASE)
@@ -457,11 +490,11 @@ def main():
     axa.plot([r["centre"] for r in dep_acc], [r["acc"] for r in dep_acc],
              color=C_CLASS, label="Deployed model", **DEP)
     _mark_crossing(axa, xc)
-    axa.set_xlabel("Range to nearest reflector (mm)")
+    axa.set_xlabel("Range (mm)")
     axa.set_ylabel("Correctly classified (%)")
     axa.set_ylim(0, 100)
     axa.set_title("Class")
-    axa.legend(frameon=False, fontsize=7, loc="lower left")
+    axa.legend(frameon=False, fontsize=6, loc="lower left")
     _panel_letter(axa, "A")
 
     xb = [r["centre"] for r in az_rows]
@@ -474,54 +507,69 @@ def main():
     axb.plot([r["centre"] for r in dep_az], [r["mae"] for r in dep_az],
              color=C_CLASS, label="Deployed model", **DEP)
     _mark_crossing(axb, xa)
-    axb.set_xlabel("Range to nearest reflector (mm)")
-    axb.set_ylabel("Median |azimuth error| (deg)")
+    axb.set_xlabel("Range (mm)")
+    axb.set_ylabel("Median |az. error| (deg)")
     axb.set_title("Pole azimuth")
-    axb.legend(frameon=False, fontsize=7, loc="upper left",
-               bbox_to_anchor=(0.0, 0.93))
+    axb.legend(frameon=False, fontsize=6, loc="upper left",
+               bbox_to_anchor=(0.0, 0.95), labelspacing=.3)
     _panel_letter(axb, "B")
 
-    hi = max(max(r["centre"] for r in agn_rows), 2600)
-    axc.plot([0, hi], [0, hi], "--", color="0.4", lw=.8, zorder=0)
-    axc.errorbar([r["centre"] for r in agn_rows],
-                 [r["pred_mean"] for r in agn_rows],
-                 yerr=[r["rmse"] for r in agn_rows], fmt="o-", color=C_AGN,
-                 ms=4, lw=1.2, capsize=2,
-                 label="Nearest reflector, quadrant models")
-    axc.plot([r["centre"] for r in dep_agn], [r["pred_mean"] for r in dep_agn],
-             color=C_AGN, label="Nearest reflector, deployed", **DEP)
-    axc.errorbar([r["centre"] for r in pole_rows],
-                 [r["pred_mean"] for r in pole_rows],
-                 yerr=[r["rmse"] for r in pole_rows], fmt="s-", color=C_POLE,
-                 ms=3.5, lw=1.2, capsize=2, label="The pole, quadrant models")
-    axc.plot([r["centre"] for r in dep_pole], [r["pred_mean"] for r in dep_pole],
-             color=C_POLE, label="The pole, deployed",
-             **{**DEP, "marker": "s"})
-    # Bars are +-RMSE and the masked head's are large enough to run negative,
-    # which is a plotting artefact of a symmetric bar on a positive quantity.
-    # Clip at zero rather than let the panel imply negative distances.
-    axc.set_ylim(0, None)
-    axc.set_xlabel("True range (mm)")
-    axc.set_ylabel("Predicted range (mm)")
-    axc.set_title("Range")
-    axc.legend(frameon=False, fontsize=6, loc="upper left",
-               bbox_to_anchor=(0.0, 0.94), labelspacing=.3)
+    R_LIM = 2900
+    for ax, rows, deprows, colour, title, lab in (
+            (axc, pole_rows, dep_pole, C_POLE, "Pole range",
+             "trained on poles within 1 m"),
+            (axd, agn_rows, dep_agn, C_AGN, "Nearest-reflector range",
+             "trained on every echo")):
+        ax.plot([0, R_LIM], [0, R_LIM], "--", color="0.4", lw=.8, zorder=0)
+        ax.errorbar([r["centre"] for r in rows], [r["pred_mean"] for r in rows],
+                    yerr=[r["rmse"] for r in rows], fmt="o-", color=colour,
+                    ms=4, lw=1.2, capsize=2, label="Quadrant models")
+        ax.plot([r["centre"] for r in deprows],
+                [r["pred_mean"] for r in deprows], color=colour,
+                label="Deployed model", **DEP)
+        ax.set_xlim(0, R_LIM); ax.set_ylim(0, R_LIM)
+        ax.set_xlabel("True range (mm)")
+        ax.set_ylabel("Predicted range (mm)")
+        ax.set_title(title)
+        ax.legend(frameon=False, fontsize=6, loc="upper left",
+                  bbox_to_anchor=(0.0, 0.95), labelspacing=.3, title=lab,
+                  title_fontsize=6)
     _panel_letter(axc, "C")
+    _panel_letter(axd, "D")
 
-    axd.plot([0.5, 1.0], [50, 100], "--", color="0.4", lw=.8, zorder=0)
-    axd.plot([r["conf"] for r in rel], [100 * r["acc"] for r in rel],
+    # (E) the wall profile, which Experiment 2 steers on. Plotted as error
+    # against range rather than predicted-against-true: the claim is that it
+    # does NOT degrade where class does, and an error curve shows that directly.
+    for sname in T.SLICE_NAMES:
+        rows = wall_by_range[sname]
+        if not rows:
+            continue
+        axe.plot([r["centre"] for r in rows], [r["baseline"] for r in rows],
+                 **{**BASE, "color": SLICE_COLORS[sname], "alpha": .45})
+        axe.plot([r["centre"] for r in rows], [r["rmse"] for r in rows],
+                 color=SLICE_COLORS[sname], label=sname.capitalize(), **QUAD)
+    axe.set_xlabel("Range (mm)")
+    axe.set_ylabel("Wall RMSE (mm)")
+    axe.set_title("Wall depth")
+    axe.legend(frameon=False, fontsize=6, loc="upper left",
+               bbox_to_anchor=(0.0, 0.95), labelspacing=.3,
+               title="dotted: constant predictor", title_fontsize=6)
+    _panel_letter(axe, "E")
+
+    axf.plot([0.5, 1.0], [50, 100], "--", color="0.4", lw=.8, zorder=0)
+    axf.plot([r["conf"] for r in rel], [100 * r["acc"] for r in rel],
              color=C_CLASS, label="Quadrant models", **QUAD)
     if dep_rel:
-        axd.plot([r["conf"] for r in dep_rel], [100 * r["acc"] for r in dep_rel],
+        axf.plot([r["conf"] for r in dep_rel], [100 * r["acc"] for r in dep_rel],
                  color=C_CLASS, label="Deployed model", **DEP)
-    axd.legend(frameon=False, fontsize=7, loc="upper left",
-               bbox_to_anchor=(0.0, 0.93))
-    axd.set_xlabel("Predicted probability of the reported class")
-    axd.set_ylabel("Correct (%)")
-    axd.set_xlim(0.5, 1.0)
-    axd.set_ylim(40, 100)
-    axd.set_title(f"Reliability (ECE {ece:.3f})")
-    _panel_letter(axd, "D")
+    axf.legend(frameon=False, fontsize=6, loc="upper left",
+               bbox_to_anchor=(0.0, 0.95))
+    axf.set_xlabel("Reported probability")
+    axf.set_ylabel("Correct (%)")
+    axf.set_xlim(0.5, 1.0)
+    axf.set_ylim(40, 100)
+    axf.set_title(f"Reliability (ECE {ece:.3f})")
+    _panel_letter(axf, "F")
 
     style.save(fig, NAME)
 
