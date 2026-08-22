@@ -230,7 +230,7 @@ Fig.~\ref{fig:inverse-results}E shows the performance of the 3-segment wall dist
 
 
 
-Fig.~\ref{fig:inverse-results}E [I am not sure what this shows. Can we have a very simple explanation?]
+Fig.~\ref{fig:inverse-results}F shows whether the classifier's confidence can be believed. Besides choosing between wall and pole, the model reports how certain it is of that choice. The plot compares the probability it reported with how often it turned out to be right when reporting it. Points on the diagonal mean the reported probability can be taken at face value. Our model stays close to the diagonal: when it reports being $90\%$ certain, it is correct on $97.8\%$ of those echoes. This is useful for a controller, which can act on the class where the model is confident and disregard it where it is not, without needing a separate category for \emph{unsure}.
 
 
 
