@@ -522,15 +522,17 @@ def main():
 
     R_LIM = 2900
 
-    # Panel C background: where the pole-range head's training targets lie, as
-    # a density in y. The head plateaus at ~770 mm, which is neither its 1 m
-    # training cap nor the mean of its targets (636 mm) -- it pins near the top
-    # of the output range it was ever asked to produce, and the mass runs out
-    # above ~900 mm (11% of targets). Drawn in y because the plateau is an
-    # OUTPUT value: the question is which outputs the head has ever been
-    # trained to emit.
+    # Panel C background: how many training echoes the pole-range head saw at
+    # each true range, as a histogram along x. It makes the plateau
+    # self-explaining -- the curve stops dead at the 1 m mask, and every point
+    # to the right of it is the head extrapolating with no examples at all.
+    # The plateau height (~770 mm) is neither the cap nor the mean of the
+    # targets (636 mm): the head pins near the top of the output range it was
+    # ever asked to produce, and that mass runs out above ~900 mm (11%).
     tgt = rng[finite & is_pole & (rng <= T.POLE_DIST_TRAIN_MAX_MM)]
-    hist, edges_y = np.histogram(tgt, bins=36, range=(0, R_LIM))
+    hist, edges_x = np.histogram(tgt, bins=30, range=(0, R_LIM))
+    hist_x = 0.5 * (edges_x[:-1] + edges_x[1:])
+    hist_y = 0.20 * R_LIM * hist / hist.max()
     numbers["pole_head_training_targets"] = dict(
         n=int(len(tgt)), mean=float(tgt.mean()),
         pct_above_768=float((tgt > 768).mean()),
@@ -538,13 +540,12 @@ def main():
 
     for ax, rows, deprows, colour, title, lab in (
             (axc, pole_rows, dep_pole, C_POLE, "Pole range",
-             "shaded: density of training targets"),
+             "shaded: training echoes per range"),
             (axd, agn_rows, dep_agn, C_AGN, "Nearest-reflector range",
              "trained on every echo")):
         if ax is axc:
-            ax.imshow(hist[:, None] / hist.max(), extent=(0, R_LIM, 0, R_LIM),
-                      origin="lower", aspect="auto", cmap="Greys", vmin=0,
-                      vmax=2.6, alpha=.55, zorder=-1, interpolation="nearest")
+            ax.fill_between(hist_x, 0, hist_y, step="mid", color="0.55",
+                            alpha=.35, lw=0, zorder=-1)
         ax.plot([0, R_LIM], [0, R_LIM], "--", color="0.4", lw=.8, zorder=0)
         ax.errorbar([r["centre"] for r in rows], [r["pred_mean"] for r in rows],
                     yerr=[r["rmse"] for r in rows], fmt="o-", color=colour,
