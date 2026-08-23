@@ -232,14 +232,25 @@ def main():
                              ("moved", C_TRAJ, "Two blocks displaced")):
         axp.plot(x, prof(run), "-", color=colour, lw=1.2, label=lab, zorder=3)
 
-    for pos, txt in ((26, "pole"), (62, "block"), (70, "block")):
-        axp.plot([pos], [0], marker="^", ms=4, color="k", clip_on=False, zorder=5)
-        axp.text(pos, -30, txt, fontsize=5, ha="center")
-    axp.set_xlabel("Position around the loop (%)", labelpad=9)
+    axp.text(0.004, 0.97, "E", transform=axp.transAxes, fontsize=6.5,
+             fontweight="bold", va="top", ha="left")
+    axp.set_xlabel("Position around the loop (%)")
     axp.set_ylabel("Distance from\npath (mm)")
     axp.set_xlim(0, 100); axp.set_ylim(0, None)
+    axp.autoscale_view()
     axp.legend(frameon=False, fontsize=5.5, ncol=4, loc="upper center",
                columnspacing=1.2)
+    # The stretch the displaced blocks border, which the text refers to, and
+    # the positions of the manipulated objects. The objects are drawn as lines
+    # rather than as marks under the axis because the alignment between them
+    # and the peaks is the panel's result, and a mark below the frame does not
+    # let the reader check it.
+    axp.axvspan(54, 75, color="#7A5C3E", alpha=.13, lw=0, zorder=0)
+    for pos, txt in ((26, "pole"), (62, "block"), (70, "block")):
+        axp.axvline(pos, color="0.35", lw=.8, ls=(0, (2, 2)), zorder=2)
+        axp.text(pos, axp.get_ylim()[1] * .035, txt, fontsize=5, ha="center",
+                 va="bottom", color="0.25",
+                 bbox=dict(boxstyle="round,pad=0.12", fc="#F2E9DA", ec="none"))
 
     style.save(fig, NAME)
     print("[fig] blocks named:", {k: int(v) for k, v in named.items()},
