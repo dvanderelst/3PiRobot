@@ -191,36 +191,50 @@ def main():
                  alpha=.85, zorder=4)
 
     # ---- profile around the loop -------------------------------------------
-    def profile(run, nbin=20):
+    # Plotted as a RATIO to the unmanipulated runs rather than in millimetres.
+    # The baseline error itself varies around the loop (20 to 85 mm by section),
+    # so absolute curves are hard to compare against it by eye; dividing by it
+    # removes the baseline line altogether and puts "no effect" at 1. The
+    # denominator is the median over both baseline runs pooled, and it never
+    # falls below 20 mm, so the ratio does not blow up.
+    NB = 16
+    edges = np.linspace(0, 1, NB + 1)
+
+    def frac_dist(run):
         xy = T[run]
         d = np.linalg.norm(xy[:, None, :] - P[None, :, :], axis=2)
-        j = d.argmin(1)
-        f = j / len(P)
-        dist = d.min(1)
-        edges = np.linspace(0, 1, nbin + 1)
-        xs, ys = [], []
-        for lo, hi in zip(edges[:-1], edges[1:]):
-            m = (f >= lo) & (f < hi)
-            if m.sum() > 3:
-                xs.append(100 * (lo + hi) / 2); ys.append(np.median(dist[m]))
-        return xs, ys
+        return d.argmin(1) / len(P), d.min(1)
+
+    FD = {k: frac_dist(k) for k in RUNS}
+    base = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        v = np.concatenate([FD[k][1][(FD[k][0] >= lo) & (FD[k][0] < hi)]
+                            for k in ("baseline", "replicate")])
+        base.append(np.median(v) if len(v) > 5 else np.nan)
+    base = np.array(base)
+    mid = 100 * (edges[:-1] + edges[1:]) / 2
 
     axp.axvspan(54, 75, color="#7A5C3E", alpha=.13, lw=0, zorder=0)
-    for run, colour, lab, ls in (
-            ("baseline", "0.45", "Trained arena (both runs)", "-"),
-            ("replicate", "0.45", None, "-"),
-            ("pole_out", "#4C72B0", "Pole removed", "-"),
-            ("both_out", "#8172B2", "Pole and block removed", "-"),
-            ("moved", C_TRAJ, "Two blocks displaced", "-")):
-        xs, ys = profile(run)
-        axp.plot(xs, ys, ls, color=colour, lw=1.2, label=lab)
+    axp.axhline(1.0, color="0.45", lw=1.0, zorder=1)
+    for run, colour, lab in (("pole_out", "#4C72B0", "Pole removed"),
+                             ("both_out", "#8172B2", "Pole and block removed"),
+                             ("moved", C_TRAJ, "Two blocks displaced")):
+        r = []
+        for i, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+            m = (FD[run][0] >= lo) & (FD[run][0] < hi)
+            r.append(np.median(FD[run][1][m]) / base[i] if m.sum() > 3 else np.nan)
+        axp.plot(mid, r, "-", color=colour, lw=1.2, label=lab)
+
+    # Where the manipulated objects stand on the loop. The rises are at them,
+    # which is the point: an object's absence is felt where the object is.
+    for pos, txt in ((26, "pole"), (70, "block")):
+        axp.plot([pos], [0.35], marker="^", ms=4, color="k", clip_on=False)
+        axp.text(pos, 0.05, txt, fontsize=5, ha="center")
     axp.set_xlabel("Position around the loop (%)")
-    axp.set_ylabel("Distance from\npath (mm)")
-    axp.set_xlim(0, 100)
-    axp.legend(frameon=False, fontsize=5.5, ncol=4, loc="upper center",
-               columnspacing=1.2)
-    axp.text(64.5, axp.get_ylim()[1] * .05, "stretch the moved blocks border",
-             fontsize=5, ha="center", color="#5A4430")
+    axp.set_ylabel("Error relative\nto baseline")
+    axp.set_xlim(0, 100); axp.set_ylim(0.3, None)
+    axp.legend(frameon=False, fontsize=5.5, ncol=3, loc="upper center",
+               columnspacing=1.4)
 
     style.save(fig, NAME)
     print("[fig] blocks named:", {k: int(v) for k, v in named.items()},
