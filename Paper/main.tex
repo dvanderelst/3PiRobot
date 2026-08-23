@@ -242,7 +242,7 @@ Fig.~\ref{fig:inverse-results}F shows the performance of the 3-segment wall dist
 
 
 
-
+In summary, we trained an inverse model using visual input from the overhead camera system to convert binaural sonar data into an estimate of the closest object's position (if a pole) and layout (if a wall). Overall, the model was successful at this, with clear limits. (1) It classified the nearest object as pole or wall better than the base rate only up to about $1500$\,mm. (2) For echoes whose nearest object was a pole, it inferred the azimuth better than a straight-ahead guess up to about $2000$\,mm. (3) For echoes whose nearest object was a wall, it inferred the closest distance in three sectors in front of the robot better than baseline, but with considerable noise. (4) Distance was the exception: asked for the range to the pole specifically, the model was accurate only within the metre it was trained on, but asked for the range to the nearest object of any kind, it remained accurate to about $2500$\,mm. In other words, the model could locate an object well beyond the range at which it could identify it.    
 
 
 
