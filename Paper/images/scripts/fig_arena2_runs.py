@@ -321,7 +321,11 @@ def main():
              (float(np.mean(WALL_STRETCH)), "added wall")]
     for pos, txt in marks:
         axp.axvline(pos, color="0.35", lw=.8, ls=(0, (2, 2)), zorder=2)
-        axp.text(pos, axp.get_ylim()[1] * .025, txt, fontsize=5, ha="center",
+        # Keep the label inside the frame: centring it on a line near either
+        # edge pushes half the text outside the axes.
+        ha = "left" if pos < 10 else ("right" if pos > 90 else "center")
+        dx = 1.0 if ha == "left" else (-1.0 if ha == "right" else 0.0)
+        axp.text(pos + dx, axp.get_ylim()[1] * .025, txt, fontsize=5, ha=ha,
                  va="bottom", color="0.25",
                  bbox=dict(boxstyle="round,pad=0.12", fc="#F2E9DA", ec="none"))
 
