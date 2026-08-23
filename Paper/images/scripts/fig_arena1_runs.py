@@ -109,7 +109,15 @@ def main():
     walls, blocks, named, pole = load_arena()
     P = load_path()
 
-    fig, axes = plt.subplots(1, 4, figsize=(style.WIDTH_2COL, 2.9))
+    # Four maps on top, and below them the error against position around the
+    # loop. That lower panel is what separates the two kinds of effect:
+    # displacing the blocks lifts one stretch and leaves the rest alone, while
+    # removing the pole lifts the whole loop.
+    fig = plt.figure(figsize=(style.WIDTH_2COL, 4.3))
+    gs = fig.add_gridspec(2, 4, height_ratios=[1, .62], hspace=.28, wspace=.04,
+                          left=.055, right=.99, top=.95, bottom=.10)
+    axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
+    axp = fig.add_subplot(gs[1, :])
     titles = ["A  Trained arena, run twice",
               "B  Pole removed",
               "C  Pole and one block removed",
@@ -182,7 +190,38 @@ def main():
     axes[3].plot(T["moved"][:, 0], T["moved"][:, 1], color=C_TRAJ, lw=.7,
                  alpha=.85, zorder=4)
 
-    fig.subplots_adjust(wspace=.04, left=.01, right=.99, top=.93, bottom=.01)
+    # ---- profile around the loop -------------------------------------------
+    def profile(run, nbin=20):
+        xy = T[run]
+        d = np.linalg.norm(xy[:, None, :] - P[None, :, :], axis=2)
+        j = d.argmin(1)
+        f = j / len(P)
+        dist = d.min(1)
+        edges = np.linspace(0, 1, nbin + 1)
+        xs, ys = [], []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            m = (f >= lo) & (f < hi)
+            if m.sum() > 3:
+                xs.append(100 * (lo + hi) / 2); ys.append(np.median(dist[m]))
+        return xs, ys
+
+    axp.axvspan(54, 75, color="#7A5C3E", alpha=.13, lw=0, zorder=0)
+    for run, colour, lab, ls in (
+            ("baseline", "0.45", "Trained arena (both runs)", "-"),
+            ("replicate", "0.45", None, "-"),
+            ("pole_out", "#4C72B0", "Pole removed", "-"),
+            ("both_out", "#8172B2", "Pole and block removed", "-"),
+            ("moved", C_TRAJ, "Two blocks displaced", "-")):
+        xs, ys = profile(run)
+        axp.plot(xs, ys, ls, color=colour, lw=1.2, label=lab)
+    axp.set_xlabel("Position around the loop (%)")
+    axp.set_ylabel("Distance from\npath (mm)")
+    axp.set_xlim(0, 100)
+    axp.legend(frameon=False, fontsize=5.5, ncol=4, loc="upper center",
+               columnspacing=1.2)
+    axp.text(64.5, axp.get_ylim()[1] * .05, "stretch the moved blocks border",
+             fontsize=5, ha="center", color="#5A4430")
+
     style.save(fig, NAME)
     print("[fig] blocks named:", {k: int(v) for k, v in named.items()},
           "| pole at", pole[0].round().tolist())
