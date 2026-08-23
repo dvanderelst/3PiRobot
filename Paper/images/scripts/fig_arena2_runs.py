@@ -61,11 +61,19 @@ WALL_STRETCH = (37, 43)      # % of the loop the displaced wall section borders
 # amounts, which is why both are drawn.
 #   run 1: P0 ~215 mm SSW, P1 ~545 mm N
 #   run 2: P0 ~800 mm ESE, P1 ~400 mm SW
+# A third pole, P2, was also displaced (~225 mm SW) in the first displacement
+# run, and stood at that same displaced position through the removal run. So
+# the removal condition is two poles removed and one displaced, and the first
+# displacement condition is three poles displaced. Both are drawn as such.
+P2 = (1236.0, -128.0)
+P2_MOVE = (-159.0, -159.0)
 POLE_MOVES = {
     "poles_moved":  {(110.0, 736.0): (-82.0, -199.0),
-                     (-1020.0, 404.0): (0.0, 545.0)},
+                     (-1020.0, 404.0): (0.0, 545.0),
+                     P2: P2_MOVE},
     "poles_moved2": {(110.0, 736.0): (739.0, -306.0),
                      (-1020.0, 404.0): (-283.0, -283.0)},
+    "poles_out":    {P2: P2_MOVE},
 }
 # The added wall, read off Dieter's annotation of that run's own photograph
 # (arena_shark_annotated_moved_wall_drawn.png) in the rectified map frame that
@@ -147,8 +155,8 @@ def main():
     axp = fig.add_subplot(gs[1, :])
 
     titles = ["A  Trained arena, run twice",
-              "B  Two poles removed",
-              "C  The same poles displaced, twice",
+              "B  Two poles removed, one moved",
+              "C  Poles displaced, run twice",
               "D  Wall added across the path"]
     for ax, title in zip(axes, titles):
         ax.plot(P[:, 0], P[:, 1], color=C_PATH, lw=1.0, ls=(0, (5, 3)), zorder=2)
@@ -158,12 +166,16 @@ def main():
             ax.scatter(B[:, 0], B[:, 1], s=.6, color=C_WALL, edgecolor="none",
                        zorder=1)
         ax.set_aspect("equal"); ax.set_xticks([]); ax.set_yticks([])
-        ax.set_title(title, fontsize=6.5, pad=3, loc="left")
+        ax.set_title(title, fontsize=6.0, pad=3, loc="left")
 
     manip = np.array(MANIP_POLES)
 
-    def draw_poles(ax, mark=None):
+    def draw_poles(ax, mark=None, vacated=()):
         for p_xy in pole:
+            if any(np.linalg.norm(np.array(v) - p_xy) < 60 for v in vacated):
+                ax.add_patch(Circle(tuple(p_xy), 60, fc="none", ec=C_GONE,
+                                    lw=1.0, ls=(0, (2, 2)), zorder=5))
+                continue
             is_manip = np.min(np.linalg.norm(manip - p_xy, axis=1)) < 60
             if is_manip and mark:
                 ax.add_patch(Circle(tuple(p_xy), 60, fc="none", ec=C_GONE,
@@ -186,11 +198,18 @@ def main():
                  lw=.7, alpha=.85, zorder=4, label="Run 2")
     axes[0].legend(frameon=False, fontsize=5.5, loc="lower left")
 
-    draw_poles(axes[1], mark="x")
+    draw_poles(axes[1], mark="x", vacated=(P2,))
+    for base_xy, (dx, dy) in POLE_MOVES["poles_out"].items():
+        axes[1].annotate("", xy=(base_xy[0] + dx, base_xy[1] + dy),
+                         xytext=base_xy,
+                         arrowprops=dict(arrowstyle="-|>", color=C_TRAJ, lw=1.0,
+                                         shrinkA=3, shrinkB=1), zorder=7)
+        axes[1].add_patch(Circle((base_xy[0] + dx, base_xy[1] + dy), 60,
+                                 fc=C_TRAJ, ec=C_TRAJ, lw=.8, alpha=.8, zorder=6))
     axes[1].plot(T["poles_out"][:, 0], T["poles_out"][:, 1], color=C_TRAJ,
                  lw=.7, alpha=.85, zorder=4)
 
-    draw_poles(axes[2], mark="o")
+    draw_poles(axes[2], mark="o", vacated=(P2,))
     for run, colour in (("poles_moved", C_TRAJ), ("poles_moved2", C_TRAJ2)):
         for base_xy, (dx, dy) in POLE_MOVES[run].items():
             axes[2].annotate("", xy=(base_xy[0] + dx, base_xy[1] + dy),
