@@ -20,8 +20,9 @@ Three things are meant to be visible at once:
      figure looks like it is showing a failure the system commits, when in
      fact the system never gets that far.
 
-Examples are chosen by rule: within each range band, the echo whose azimuth
-error is the median for that band.
+Examples are chosen by rule: among the echoes the model classified as a pole,
+the one whose combined bearing-and-range error is the median for its range
+band, each error scaled as the training loss scales it.
 
     Control_code/.venv/bin/python3 Paper/images/scripts/fig_pole_examples.py
 """
@@ -81,15 +82,34 @@ def main():
         cls[sel] = p["cls_pred"]; p_pole[sel] = p["cls_probs"][:, 1]
 
     pole = (classes == 1) & np.isfinite(near) & np.isfinite(p_az)
-    az_err = np.abs(p_az - az)
+
+    # Rank on BOTH pole outputs, not azimuth alone. Selecting on azimuth error
+    # picked near-range examples whose bearing happened to be poor, which
+    # undersells a regime where the model is in fact good. The two errors are
+    # put on one scale the way the training loss does it -- azimuth over the
+    # cone half-angle, range over POLE_DIST_NORM_MM -- so neither dominates by
+    # its units. In the far bands the range term is near-constant within a
+    # band (the head has saturated), so the ranking there still turns on
+    # azimuth, which is the intended behaviour.
+    combined = (np.abs(p_az - az) / T.CONE_HALF_DEG
+                + np.abs(p_r - near) / T.POLE_DIST_NORM_MM)
+
+    # Selected among the echoes the model CALLED a pole. Those are the only
+    # ones whose pole channels the robot ever uses, so they are the population
+    # the figure should be typical of. Selecting over all true poles instead
+    # put a misclassification in the first panel, which is a one-in-six case
+    # close in (recall 76% at 200-500 mm) and misrepresents the band. Every
+    # band has enough: 126 / 170 / 136 / 162 / 79 / 41 across the six.
+    called_pole = cls == 1
 
     picks = []
     for lo, hi in BANDS:
-        m = pole & (near >= lo) & (near < hi)
+        m = (pole & called_pole & (near >= lo) & (near < hi)
+             & np.isfinite(combined))
         if m.sum() < 10:
             continue
         idx = np.where(m)[0]
-        picks.append(int(idx[np.argsort(az_err[idx])[len(idx) // 2]]))
+        picks.append(int(idx[np.argsort(combined[idx])[len(idx) // 2]]))
 
     geo = {}
     for s_name in sorted(set(sess)):
