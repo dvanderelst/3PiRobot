@@ -300,16 +300,28 @@ def main():
 
     axp.set_xlabel("Position around the loop (%)")
     axp.set_ylabel("Distance from\npath (mm)")
-    axp.set_xlim(0, 100); axp.set_ylim(0, None)
+    # Headroom for the legend, and enough to show the wall condition's peak,
+    # which the previous limit clipped.
+    ymax = max(np.nanmax(prof(r)) for r in RUNS)
+    axp.set_xlim(0, 100); axp.set_ylim(0, ymax * 1.32)
     axp.legend(frameon=False, fontsize=5.5, ncol=4, loc="upper center",
                columnspacing=1.2)
     axp.text(0.004, 0.97, "E", transform=axp.transAxes, fontsize=6.5,
              fontweight="bold", va="top", ha="left")
 
     axp.axvspan(*WALL_STRETCH, color="#7A5C3E", alpha=.13, lw=0, zorder=0)
-    for pos, txt in ((1, "pole"), (7, "pole"), (40, "wall")):
+    # The three manipulated poles, named by where they stand, and the added
+    # wall. Their loop positions are computed rather than typed in.
+    def loop_pct(xy):
+        return 100 * int(np.argmin(np.linalg.norm(P - np.array(xy), axis=1))) / len(P)
+
+    marks = [(loop_pct((-1020.0, 404.0)), "NW pole"),
+             (loop_pct((110.0, 736.0)), "N pole"),
+             (loop_pct(P2), "E pole"),
+             (float(np.mean(WALL_STRETCH)), "added wall")]
+    for pos, txt in marks:
         axp.axvline(pos, color="0.35", lw=.8, ls=(0, (2, 2)), zorder=2)
-        axp.text(pos, axp.get_ylim()[1] * .035, txt, fontsize=5, ha="center",
+        axp.text(pos, axp.get_ylim()[1] * .025, txt, fontsize=5, ha="center",
                  va="bottom", color="0.25",
                  bbox=dict(boxstyle="round,pad=0.12", fc="#F2E9DA", ec="none"))
 
