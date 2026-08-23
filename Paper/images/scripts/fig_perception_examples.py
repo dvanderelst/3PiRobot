@@ -46,6 +46,20 @@ C_PRED = "#C44E52"
 SECTOR_FILL = "#DCC9A8"
 
 
+def arc(ax, radius, lo_deg, hi_deg, **kw):
+    """A sector arc as a polyline.
+
+    Drawn this way rather than as a thin Wedge: a Wedge of width 1 has an
+    inner and an outer arc a millimetre apart, which overlap on screen, and a
+    dashed linestyle then runs along both with different phase. The gaps of one
+    fill the dashes of the other, so the same dashed arc renders solid at some
+    radii and dashed at others, which looks like it means something. It does
+    not.
+    """
+    a = np.deg2rad(np.linspace(90 + lo_deg, 90 + hi_deg, 60))
+    ax.plot(radius * np.cos(a), radius * np.sin(a), **kw)
+
+
 def sector_edges(half):
     """The three thirds of the field, in SLICE_NAMES order.
 
@@ -128,15 +142,14 @@ def main():
             if np.isfinite(t):
                 ax.add_patch(Wedge((0, 0), t, w0, w1, fc=SECTOR_FILL,
                                    ec="none", alpha=.85, zorder=0))
-                ax.add_patch(Wedge((0, 0), t, w0, w1, width=1, fc="none",
-                                   ec=C_TRUE, lw=1.1, zorder=4))
+                arc(ax, t, lo, hi, color=C_TRUE, lw=1.2, zorder=4)
             if np.isfinite(pm):
                 if np.isfinite(ps):
                     ax.add_patch(Wedge((0, 0), pm + ps, w0, w1, width=2 * ps,
                                        fc=C_PRED, ec="none", alpha=.22,
                                        zorder=2))
-                ax.add_patch(Wedge((0, 0), pm, w0, w1, width=1, fc="none",
-                                   ec=C_PRED, lw=1.2, ls="--", zorder=5))
+                arc(ax, pm, lo, hi, color=C_PRED, lw=1.3, ls=(0, (3.5, 2)),
+                    zorder=5)
 
         for a_deg in (90 - half, 90 + half):
             r = np.deg2rad(a_deg)
