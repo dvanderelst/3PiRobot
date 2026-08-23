@@ -226,10 +226,23 @@ def main():
     # with the baseline's shows the southern boundary still in place and an
     # extra wall inside it. So no "before" marking and no arrow -- just the
     # wall where it stood, which is a few centimetres outside the trained path.
-    wx = np.array([WALL_FIT["x0"], WALL_FIT["x1"]])
-    wy = WALL_FIT["slope"] * wx + WALL_FIT["intercept"]
-    axes[3].plot(wx, wy, "-", color="k", lw=2.2, zorder=6,
+    # Clip the drawn wall to the arena. The annotation's east end runs past the
+    # boundary (to x = 1995, where the arena stops near 1857), so taking its
+    # extent literally draws a wall sticking out of the room.
+    from scipy.spatial import ConvexHull
+    from matplotlib.path import Path as MplPath
+    hull_pts = np.vstack([walls] + list(blocks.values()))
+    hull = hull_pts[ConvexHull(hull_pts).vertices]
+    inside = MplPath(hull)
+    xs = np.linspace(WALL_FIT["x0"], WALL_FIT["x1"], 400)
+    ys = WALL_FIT["slope"] * xs + WALL_FIT["intercept"]
+    keep = inside.contains_points(np.stack([xs, ys], 1), radius=-60)
+    if keep.any():
+        xs, ys = xs[keep], ys[keep]
+    axes[3].plot(xs, ys, "-", color="k", lw=2.2, zorder=6,
                  solid_capstyle="round")
+    print("[fig] wall drawn from x %.0f to %.0f (annotation gave %.0f to %.0f)"
+          % (xs.min(), xs.max(), WALL_FIT["x0"], WALL_FIT["x1"]))
     axes[3].plot(T["wall"][:, 0], T["wall"][:, 1], color=C_TRAJ, lw=.7,
                  alpha=.85, zorder=4)
 
