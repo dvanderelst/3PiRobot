@@ -243,30 +243,7 @@ Fig.~\ref{fig:inverse-results}F shows the performance of the 3-segment wall dist
 
 
 
-In summary, we trained an inverse model using visual input from the overhead camera system to convert binaural sonar data into an estimate of the closest object's position (if a pole) and layout (if a wall). Overall, the model was successful, with some clear limits.  (1) For echoes whose nearest object was a pole, it inferred the azimuth better than baseline up to about $2000$\,mm and distance up to about 1000 mm. (2) For echoes whose nearest object was a wall, it inferred the closest distance in three sectors in front of the robot better than baseline, but with considerable noise. (3) However, it could classify the nearest object as pole or wall better than the baseline only up to about $1500$\,mm. (4) The model could estimate the range to the nearest object of any kind out to about $2500$\,mm, with an error of roughly $10$ to $15\%$ of the true range beyond a metre. Note that (1) and (2) are measured on echoes we know came from a pole or a wall, using the camera as ground truth. Beyond about $1500$\,mm the model cannot supply that identification itself, so the bearing in (1) would be of little use to the robot, which would not know it was looking at a pole. The range in (4) requires no identification, which is why it remains usable. Hence, the model could locate an object well beyond the range at which it could identify it, but even ranging was limited.    
-
-
-
-\begin{table}[ht]
-\centering
-\caption{The deployed inverse model on the echoes it was trained on (in-sample, $n=2357$) and on the spatially held-out $15\%$ ($n=418$). This table is the overfitting check only; the range-resolved results in the text and in Fig.~\ref{fig:inverse-results} are out-of-fold over all four spatial folds. The pole-range head is scored over its training domain, poles within $1$\,m, because it is not defined beyond it.}
-\label{tab:inverse-results}
-\begin{tabular}{lcc}
-\hline
-\textbf{Metric} & \textbf{In-sample} & \textbf{Held-out} \\
-\hline
-Class accuracy                               & $83.4$ & $79.2$ \\
-\quad Wall (precision / recall)              & $85.6$ / $89.3$ & $80.5$ / $84.8$ \\
-\quad Pole (precision / recall)              & $78.8$ / $72.6$ & $77.2$ / $71.4$ \\
-Pole-azimuth RMSE ($^{\circ}$)               & $13.3$ & $14.3$ \\
-Nearest-reflector range RMSE (mm)            & $190$ & $225$ \\
-\quad Constant-predictor baseline (mm)       & $560$ & $546$ \\
-Wall-depth RMSE, left / center / right (mm)  & $312$ / $314$ / $281$ & $301$ / $361$ / $277$ \\
-\hline
-\end{tabular}
-\end{table}
-
-
+In summary, we trained an inverse model using visual input from the overhead camera system to convert binaural sonar data into an estimate of the closest object's position (if a pole) and layout (if a wall). Overall, the model was successful, with some clear limits.  (1) For echoes whose nearest object was a pole, it inferred the azimuth better than baseline up to about $2000$\,mm and distance up to about 1000 mm. (2) For echoes whose nearest object was a wall, it inferred the closest distance in three sectors in front of the robot better than baseline, but with considerable noise. (3) However, it could classify the nearest object as a pole or wall better than the baseline only up to about $1500$\,mm. (4) The model could estimate the range to the nearest object of any kind out to about $2500$\,mm, with an error of roughly $10$ to $15\%$ of the true range beyond a meter. Note that (1) and (2) are measured on echoes we know came from a pole or a wall, using the camera as ground truth. Beyond about $1500$\,mm the model cannot supply that identification itself, so the bearing in (1) would be of little use to the robot, which would not know it was looking at a pole. The range in (4) requires no identification, which is why it remains usable. Hence, the model could locate an object well beyond the range at which it could identify it, but even ranging was limited.
 
 \subsection{Experiment 1}
 
@@ -435,6 +412,25 @@ Training     & Optimizer                         & Adam \\
 \end{tabular}
 \end{table}
 
+\begin{table}[ht]
+\centering
+\caption{The deployed inverse model on the echoes it was trained on (in-sample, $n=2357$) and on the spatially held-out $15\%$ ($n=418$). This table is the overfitting check only; the range-resolved results in the text and in Fig.~\ref{fig:inverse-results} are out-of-fold over all four spatial folds. The pole-range head is scored over its training domain, poles within $1$\,m, because it is not defined beyond it.}
+\label{tab:inverse-results}
+\begin{tabular}{lcc}
+\hline
+\textbf{Metric} & \textbf{In-sample} & \textbf{Held-out} \\
+\hline
+Class accuracy                               & $83.4$ & $79.2$ \\
+\quad Wall (precision / recall)              & $85.6$ / $89.3$ & $80.5$ / $84.8$ \\
+\quad Pole (precision / recall)              & $78.8$ / $72.6$ & $77.2$ / $71.4$ \\
+Pole-azimuth RMSE ($^{\circ}$)               & $13.3$ & $14.3$ \\
+Nearest-reflector range RMSE (mm)            & $190$ & $225$ \\
+\quad Constant-predictor baseline (mm)       & $560$ & $546$ \\
+Wall-depth RMSE, left / center / right (mm)  & $312$ / $314$ / $281$ & $301$ / $361$ / $277$ \\
+\hline
+\end{tabular}
+\end{table}
+
 \begin{table}[htb]
 \centering
 \caption{Constants of the reactive controller and of the terminal approach, with what each one governs. The same values were used under sonar and under vision. Every distance and bearing in the first four blocks is the one the robot \emph{perceived} through the local feature; only the scoring block uses the overhead tracker's ground truth.}
@@ -476,7 +472,7 @@ Robot radius       & 48\,mm           & Half the 96\,mm chassis diameter, subtra
 \begin{figure}[htb]
 	\centering
 	\includegraphics[width=\textwidth]{fig_pole_range_cap}
-	\caption{...}
+	\caption{Why the pole-range head is trained only on poles within $1$\,m. Two models differing in one setting: the range span that head is trained on. Both are four-fold quadrant cross-validations over the same $2775$ echoes, so every pole echo is scored once by a model that did not see it. (A) Predictions of the deployed setting, trained on poles within $1$\,m. Past that span it answers about the same distance whatever the true range. (B) Predictions of a model trained on every pole echo, out to $3196$\,mm, which tracks the true range throughout. Black lines are band means; the dotted vertical line marks the $1$\,m training limit. (C) Signed bias against range for both, with an inset over the training span, and (D) the same as RMSE on a logarithmic axis. The shaded strip in (C) and (D) is the band containing the $400$\,mm stop of Experiment 1, which fires on this head's output. Training on every pole echo buys accurate ranging past a metre, at the cost of a close-range bias that grows from $+36$ to $+167$\,mm, in the direction that makes the robot stop nearer than intended.}
 	\label{fig:pole-range-cap}
 \end{figure}
 
