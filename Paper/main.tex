@@ -238,7 +238,14 @@ Fig.~\ref{fig:inverse-results}E shows the performance of the head that inferred 
 
 Together with the categorization head, this head expands the model’s ability to localize poles beyond the dedicated pole range head. The categorization head may signal that the closest object has some low probability of being a pole, while the category-agnostic distance head could return the approximate distance. 
 
-Fig.~\ref{fig:inverse-results}F shows the performance of the 3-segment wall distance prediction. This shows that the prediction outperformed a baseline across most of the distance range in the training set (we show only the quadrant models’ performance to reduce plot complexity). However, average errors were substantial: about $270$\,mm close in, rising to about $400$\,mm between $1$ and $1.4$\,m before falling again at longer ranges.  Hence, while range is easily extracted from sonar, this plot shows that a more difficult task, i.e., extracting the range to obstacles in different directions (i.e., reconstructing a very rough wall profile), is substantially more difficult.
+Fig.~\ref{fig:inverse-results}F shows the performance of the 3-segment wall distance prediction. This shows that the prediction outperformed a baseline across most of the distance range in the training set (we show only the quadrant models’ performance to reduce plot complexity). However, average errors were substantial: about $270$\,mm close in, rising to about $400$\,mm between $1$ and $1.4$\,m before falling again at longer ranges.  Hence, while range is easily extracted from sonar, this plot shows that a more difficult task, i.e., extracting the range to obstacles in different directions (i.e., reconstructing a very rough wall profile), is substantially more difficult. Fig.~\ref{fig:perception-examples} shows what this looks like for single echoes. The error is rarely spread evenly across the field: in most examples one sector is recovered almost exactly while another is out by several hundred millimetres, and which sector fails varies from echo to echo.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=\textwidth]{fig_perception_examples}
+    \caption{Six individual perceptions of the wall profile, one for each range band. The robot sits at the apex of each panel with its field of view pointing up; blue marks the digitised arena geometry and purple the poles. In each of the three sectors, the filled wedge reaches the true distance to the nearest wall, the black arc marks that distance, and the dashed red arc is the model's estimate with its predicted $\pm\sigma$ shaded around it. The examples were not chosen by eye: within each range band we took the echo whose mean absolute sector error is the median for that band, so each panel is a typical case for its distance rather than a favourable one. All six share one scale, so the widening of the sectors with range is comparable across panels. Titles give the distance to the nearest wall anywhere in the field, and then the three sector errors, listed right, centre and left.}
+    \label{fig:perception-examples}
+\end{figure}
 
 
 
