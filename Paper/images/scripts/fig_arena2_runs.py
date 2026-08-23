@@ -55,6 +55,22 @@ RUNS = {"baseline": "default_Path07_run01",
 MANIP_POLES = [(110.0, 736.0), (-1020.0, 404.0)]
 WALL_STRETCH = (37, 43)      # % of the loop the displaced wall section borders
 
+# Measured displacements, from the blob inventory of each run's own arena
+# photograph (Performance notes 2026-08-20 and 08-21). The two displacement
+# runs moved the same two poles in different directions and by different
+# amounts, which is why both are drawn.
+#   run 1: P0 ~215 mm SSW, P1 ~545 mm N
+#   run 2: P0 ~800 mm ESE, P1 ~400 mm SW
+POLE_MOVES = {
+    "poles_moved":  {(110.0, 736.0): (-82.0, -199.0),
+                     (-1020.0, 404.0): (0.0, 545.0)},
+    "poles_moved2": {(110.0, 736.0): (739.0, -306.0),
+                     (-1020.0, 404.0): (-283.0, -283.0)},
+}
+# The displaced wall, as a weighted line fit to the changed region of that
+# run's photograph: y = 0.051 x - 2626 over x in [-850, 1700], rms 35 mm.
+WALL_FIT = dict(slope=0.051, intercept=-2626.0, x0=-850.0, x1=1700.0)
+
 C_WALL = "#3E6B8A"
 C_POLE = "#8172B2"
 C_PATH = "0.45"
@@ -172,6 +188,16 @@ def main():
                  lw=.7, alpha=.85, zorder=4)
 
     draw_poles(axes[2], mark="o")
+    for run, colour in (("poles_moved", C_TRAJ), ("poles_moved2", C_TRAJ2)):
+        for base_xy, (dx, dy) in POLE_MOVES[run].items():
+            axes[2].annotate("", xy=(base_xy[0] + dx, base_xy[1] + dy),
+                             xytext=base_xy,
+                             arrowprops=dict(arrowstyle="-|>", color=colour,
+                                             lw=1.0, shrinkA=3, shrinkB=1),
+                             zorder=7)
+            axes[2].add_patch(Circle((base_xy[0] + dx, base_xy[1] + dy), 60,
+                                     fc=colour, ec=colour, lw=.8, alpha=.8,
+                                     zorder=6))
     axes[2].plot(T["poles_moved"][:, 0], T["poles_moved"][:, 1], color=C_TRAJ,
                  lw=.7, alpha=.85, zorder=4, label="Run 1")
     axes[2].plot(T["poles_moved2"][:, 0], T["poles_moved2"][:, 1], color=C_TRAJ2,
@@ -193,13 +219,16 @@ def main():
     near_stretch = np.min(np.linalg.norm(
         all_wall[:, None, :] - P[None, lo:hi, :], axis=2), axis=1)
     south = all_wall[near_stretch < near_stretch.min() + 250]
-    axes[3].scatter(south[:, 0], south[:, 1], s=2.2, color="k", zorder=5)
+    axes[3].scatter(south[:, 0], south[:, 1], s=2.2, color=C_GONE, zorder=5)
+    wx = np.array([WALL_FIT["x0"], WALL_FIT["x1"]])
+    wy = WALL_FIT["slope"] * wx + WALL_FIT["intercept"]
+    axes[3].plot(wx, wy, "-", color="k", lw=2.0, zorder=6,
+                 solid_capstyle="round")
     cen = south.mean(0)
-    inward = P[(lo + hi) // 2] - cen
-    inward = 470 * inward / np.linalg.norm(inward)
-    axes[3].annotate("", xy=tuple(cen + inward), xytext=tuple(cen),
-                     arrowprops=dict(arrowstyle="-|>", color="k", lw=1.1),
-                     zorder=7)
+    tgt = np.array([cen[0], WALL_FIT["slope"] * cen[0] + WALL_FIT["intercept"]])
+    axes[3].annotate("", xy=tuple(tgt), xytext=tuple(cen),
+                     arrowprops=dict(arrowstyle="-|>", color="k", lw=1.1,
+                                     shrinkA=2, shrinkB=2), zorder=7)
     axes[3].plot(T["wall"][:, 0], T["wall"][:, 1], color=C_TRAJ, lw=.7,
                  alpha=.85, zorder=4)
 
