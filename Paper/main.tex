@@ -308,12 +308,22 @@ Steps on which a pole was perceived         & $97 / 781$ & $234 / 410$ \\
 
 \subsection{Experiment 2}
 
-We trained each controller in simulation on the path drawn for its arena (Section~\ref{sec:inverse-training}) before deploying them in the arenas, starting from the release box. Every run lasted for $500$ sense-act steps, allowing the robot to complete several loops of the path. For each path, we completed two runs using the arena layout the controller was trained on. Completing two runs allowed us to assess baseline variation in the robot's behavior, which is not zero: the robot starts from a slightly different pose each time and its motors do not execute a command identically twice. In addition, we completed runs with changes to the arenas, that is, the removal or displacement of poles, blocks or a wall. The controller was not retrained for these runs.
+We trained each controller in simulation on the path drawn for its arena (Section~\ref{sec:inverse-training}) before deploying them in the arenas, starting from the release box. Every run lasted for $500$ sense-act steps, allowing the robot to complete several loops of the path. For each path, we completed two runs using the arena layout the controller was trained on. Two runs allowed us to assess baseline variation in the robot's behavior caused by differences in starting position as well as sensory and motor noise. In addition, we completed runs with changes to the arenas, that is, the removal or displacement of poles, blocks, or a wall. The controller was not retrained for these runs.
 
-For every run, we logged the trajectory from the overhead camera system. We report the number of laps the robot completed, its distance from the trained path at each step, and, when the arena changed, the effect of the changes on the robot’s path compared with the variation observed in the two baseline runs.
+For every run, we logged the trajectory from the overhead camera system. We report the number of laps the robot completed, its distance from the trained path at each step, and, when the arena changed, the effect of the changes on the robot’s path compared with the variation observed in the two baseline runs. 
 
-We describe the two arenas in turn, and then what the two together support.
 
+\subsubsection{First arena}
+
+The first arena held five rectangular blocks and a single pole, and the path was a closed loop of $8.8$\,m drawn between them. Each run of $500$ steps therefore covered about eight and a half laps.
+
+Run twice without any change to the arena, the robot followed the path closely and repeatably. Its median distance from the path was $37$\,mm in both runs, with the ninetieth percentile at $89$ and $94$\,mm and the largest excursion at $188$ and $185$\,mm. The two runs are not the same trajectory, but they are the same behavior, and the agreement between them is the floor against which the changes below are read.
+
+We then removed objects. Taking away the pole alone raised the median distance from the path to $68$\,mm, the ninetieth percentile to $174$\,mm and the largest excursion to $618$\,mm. Taking away the pole and one of the blocks raised them further, to $118$, $370$ and $639$\,mm. Both objects are therefore load-bearing: the robot does not merely pass them, it uses them.
+
+Removal shows that an object matters, but not that its position matters, since removing it also changes the scene as a whole. We therefore displaced two of the blocks by about $320$\,mm and left everything else in place. The route moved with them. Over the stretch of the loop those blocks border, the trajectory sat $124$\,mm east and $88$\,mm north of the trained path, against $8$ and $9$\,mm in the first baseline run and $19$ and $19$\,mm in the second. The shift was present on every lap: taking the median eastward offset over that stretch lap by lap gives $156$, $80$, $148$, $111$, $171$, $133$, $158$, $125$ and $105$\,mm across the nine laps, while the same measurement on the two baseline runs scatters about zero. Away from that stretch the route was unchanged, so the effect is local to the objects that moved.
+
+The robot therefore follows the blocks when they move, but only partway: a displacement of about $320$\,mm pulled the route by roughly a third of that. This is what one would expect of a route held by several cues at once. Two blocks moved while three blocks, the pole and all four walls stayed where they were, and the route settled between what the moved objects implied and what the stationary ones did.
 
 \section{Discussion}
 
