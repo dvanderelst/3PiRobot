@@ -1,0 +1,101 @@
+[
+ {
+  "run": "default_Path04_run01",
+  "arena": "Path04",
+  "n_kept": 470,
+  "rot_gain": 0.9852924363275155,
+  "curl_deg_per_step": 0.29037900618465035,
+  "curl_deg_per_lap": 17.03556836283282,
+  "steps_per_lap": 58.666666666666664
+ },
+ {
+  "run": "default_Path04_run01_B1_Pole_removed",
+  "arena": "Path04",
+  "n_kept": 461,
+  "rot_gain": 0.9929223556622904,
+  "curl_deg_per_step": 0.6884403165082208,
+  "curl_deg_per_lap": 40.388498568482284,
+  "steps_per_lap": 58.666666666666664
+ },
+ {
+  "run": "default_Path04_run01_Pole_removed",
+  "arena": "Path04",
+  "n_kept": 476,
+  "rot_gain": 0.9802962195096969,
+  "curl_deg_per_step": 0.5885532391250845,
+  "curl_deg_per_lap": 34.52845669533829,
+  "steps_per_lap": 58.666666666666664
+ },
+ {
+  "run": "default_Path04_run02",
+  "arena": "Path04",
+  "n_kept": 470,
+  "rot_gain": 0.9792418820891338,
+  "curl_deg_per_step": 1.617408680084795,
+  "curl_deg_per_lap": 94.88797589830797,
+  "steps_per_lap": 58.666666666666664
+ },
+ {
+  "run": "default_Path04_run1_B1_moved",
+  "arena": "Path04",
+  "n_kept": 485,
+  "rot_gain": 0.9998092994117346,
+  "curl_deg_per_step": -1.2206284392277102,
+  "curl_deg_per_lap": -71.61020176802566,
+  "steps_per_lap": 58.666666666666664
+ },
+ {
+  "run": "default_Path07_run01",
+  "arena": "Path07",
+  "n_kept": 455,
+  "rot_gain": 0.979286415025335,
+  "curl_deg_per_step": -0.5088157454406577,
+  "curl_deg_per_lap": -40.026838641331736,
+  "steps_per_lap": 78.66666666666667
+ },
+ {
+  "run": "default_Path07_run01_added_walls",
+  "arena": "Path07",
+  "n_kept": 471,
+  "rot_gain": 0.9216255042567466,
+  "curl_deg_per_step": 2.2188633747470523,
+  "curl_deg_per_lap": 174.55058548010146,
+  "steps_per_lap": 78.66666666666667
+ },
+ {
+  "run": "default_Path07_run01_moved_poles",
+  "arena": "Path07",
+  "n_kept": 479,
+  "rot_gain": 0.9812902281764336,
+  "curl_deg_per_step": 3.016459156953097,
+  "curl_deg_per_lap": 237.29478701364366,
+  "steps_per_lap": 78.66666666666667
+ },
+ {
+  "run": "default_Path07_run01_removed_poles",
+  "arena": "Path07",
+  "n_kept": 480,
+  "rot_gain": 0.897023352762356,
+  "curl_deg_per_step": 2.368933026387892,
+  "curl_deg_per_lap": 186.35606474251418,
+  "steps_per_lap": 78.66666666666667
+ },
+ {
+  "run": "default_Path07_run02",
+  "arena": "Path07",
+  "n_kept": 477,
+  "rot_gain": 0.9381845109006605,
+  "curl_deg_per_step": -1.0362909589789642,
+  "curl_deg_per_lap": -81.52155543967852,
+  "steps_per_lap": 78.66666666666667
+ },
+ {
+  "run": "default_Path07_run02_moved_poles",
+  "arena": "Path07",
+  "n_kept": 478,
+  "rot_gain": 0.9578642048837229,
+  "curl_deg_per_step": 1.359227251027636,
+  "curl_deg_per_lap": 106.9258770808407,
+  "steps_per_lap": 78.66666666666667
+ }
+]
