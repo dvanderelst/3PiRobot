@@ -41,16 +41,25 @@ BANDS = [(200, 500), (500, 750), (750, 1000), (1000, 1400), (1400, 2000),
 VIEW_X = 1850
 VIEW_Y = 2600
 C_TRUE = "#333333"
+C_WALL = "#3E6B8A"      # arena geometry, distinct from the grey cone edges
 C_PRED = "#C44E52"
 SECTOR_FILL = "#DCC9A8"
 
 
 def sector_edges(half):
-    """Left, centre and right thirds of the field, as (lo, hi) in degrees."""
+    """The three thirds of the field, in SLICE_NAMES order.
+
+    That order is ("right", "center", "left"), i.e. column 0 of the targets is
+    the MOST NEGATIVE azimuth, which is the robot's physical right. Azimuth is
+    +ccw from forward, so with the panel drawn forward-up, negative azimuth is
+    screen-right. Returning these in the other order silently mirrors the
+    figure: the right sector's distance gets drawn on the left, and the arcs
+    then float in open space instead of landing on the wall.
+    """
     step = 2 * half / 3.0
-    return [(half - step, half),            # left  (+ve is CCW)
+    return [(-half, -half + step),          # right  (most negative azimuth)
             (-half + step, half - step),    # centre
-            (-half, -half + step)]          # right
+            (half - step, half)]            # left
 
 
 def main():
@@ -104,7 +113,7 @@ def main():
         R = np.array([[np.cos(-th + np.pi / 2), -np.sin(-th + np.pi / 2)],
                       [np.sin(-th + np.pi / 2), np.cos(-th + np.pi / 2)]])
         W = (R @ (walls[:, :2] - [x, y]).T).T
-        ax.scatter(W[:, 0], W[:, 1], s=.7, color="0.55", edgecolor="none",
+        ax.scatter(W[:, 0], W[:, 1], s=.9, color=C_WALL, edgecolor="none",
                    zorder=1)
         if len(poles):
             P = (R @ (np.asarray(poles)[:, :2] - [x, y]).T).T
@@ -132,7 +141,7 @@ def main():
         for a_deg in (90 - half, 90 + half):
             r = np.deg2rad(a_deg)
             ax.plot([0, VIEW_Y * np.cos(r)], [0, VIEW_Y * np.sin(r)],
-                    color="0.35", lw=.7, zorder=4)
+                    color="0.45", lw=.7, ls=(0, (4, 2)), zorder=4)
         ax.plot([0], [0], marker="^", ms=5, color="k", zorder=6)
         ax.set_xlim(-VIEW_X, VIEW_X); ax.set_ylim(-330, VIEW_Y)
         ax.set_aspect("equal")
@@ -148,10 +157,12 @@ def main():
     fig.subplots_adjust(hspace=.10, wspace=.04, top=.90, bottom=.01,
                         left=.02, right=.98)
     fig.legend(handles=[
+        plt.Line2D([], [], color=C_WALL, lw=0, marker="o", ms=3,
+                   label="Arena geometry"),
         plt.Line2D([], [], color=C_TRUE, lw=1.2, label="True nearest wall"),
         plt.Line2D([], [], color=C_PRED, lw=1.2, ls="--",
                    label="Model, with $\\pm\\sigma$")],
-        loc="upper center", ncol=2, frameon=False, fontsize=7)
+        loc="upper center", ncol=3, frameon=False, fontsize=7)
     style.save(fig, NAME)
     with open(SCRIPTS / f"{NAME}_numbers.json", "w") as f:
         json.dump(numbers, f, indent=1)
