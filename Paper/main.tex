@@ -315,7 +315,7 @@ For every run, we logged the trajectory from the overhead camera system. We repo
 
 \subsubsection{Arena 1}
 
-The first arena held five rectangular blocks and a single pole, and the path was a closed loop of $8.8$\,m drawn between them. Each run of $500$ steps therefore covered about $8.5$ laps. When run twice without any change to the arena, the robot followed the path closely and repeatably (Fig.~\ref{fig:arena1-runs}A). Its median distance from the path was $37$\,mm in both runs, with the ninetieth percentile at $89$ and $94$\,mm and the largest excursion at $188$ and $185$\,mm. The two runs are not identical, but they show very similar behavior.
+The first arena held five rectangular blocks and a single pole, and the path was a closed loop of $8.8$\,m. Each run of $500$ steps therefore covered about $8.5$ laps. When run twice without any change to the arena, the robot followed the path closely and repeatably (Fig.~\ref{fig:arena1-runs}A). The median distance from the path was $37$\,mm in both runs, with the ninetieth percentile at $89$ and $94$\,mm and the largest excursion at $188$ and $185$\,mm. Hence, the two runs are not identical, but they show very similar behavior.
 
 Removing the single pole in the arena raised the median distance from the path to $68$\,mm, the ninetieth percentile to $174$\,mm, and the largest excursion to $618$\,mm (Fig.~\ref{fig:arena1-runs}B). We observed increased deviations from the path along the entire loop. However, the deviation was largest around the section of the path nearest to the pole: Fig.~\ref{fig:arena1-runs}E shows a localized peak at about $28\%$ of the loop, where the pole stood ($26\%$). Removing both the pole and one block further increased deviations from the prescribed path to $118$, $370$, and $639$\,mm, and the deviation then peaked at the locations of both removed objects, at about $29\%$ and $68\%$ of the loop (Fig.~\ref{fig:arena1-runs}E).
 
@@ -330,6 +330,23 @@ We displaced two of the blocks by about $320$\,mm and left everything else in pl
     \label{fig:arena1-runs}
 \end{figure}
 
+
+\subsubsection{Arena 2}
+
+Arena 2 had a different outline, five poles and a single block, and the path was a longer closed loop of $11.8$\,m, so each run of $500$ steps covered about six laps (Fig.~\ref{fig:arena2-runs}A). Run twice without any change, the robot again followed the path closely: median distance from the path $43$\,mm in both runs, with the ninetieth percentile at $114$ and $97$\,mm and the largest excursion at $248$ and $183$\,mm.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=\textwidth]{fig_arena2_runs}
+    \caption{Arena 2: the trained route and what each change to the arena did to it, drawn as in Fig.~\ref{fig:arena1-runs}. Blue marks the digitised layout, purple the poles, the dashed grey line the trained path and red the flown trajectory. (A) The arena as trained, run twice. (B) The two northern poles removed, crossed where they stood. (C) The same two poles displaced, run twice; the circles mark which poles moved. (D) A section of the southern wall displaced inward by about $450$\,mm, marked in black with an arrow giving the direction; its new position was not digitised, so the arrow is schematic. (E) Distance from the path against position around the loop, as a median in a sliding window of $500$\,mm of path, with the stretch the displaced wall borders shaded and the manipulated objects marked. Removing the poles raises the profile where they stood, displacing them changes nothing anywhere, and displacing the wall produces a single tall peak where it borders the loop.}
+    \label{fig:arena2-runs}
+\end{figure}
+
+We removed the two poles standing nearest the northern part of the loop. The median distance from the path rose to $57$\,mm, the ninetieth percentile to $154$\,mm and the largest excursion to $289$\,mm (Fig.~\ref{fig:arena2-runs}B). As in Arena 1, the deviation was concentrated where the removed objects had stood: the error profile rises over the first fifth of the loop, peaking at $216$\,mm at $14\%$, while the two poles stand at $1\%$ and $7\%$ (Fig.~\ref{fig:arena2-runs}E). The route also moved in a consistent direction there, sitting $127$\,mm north of the trained path over the first $15\%$ of the loop, against $7$ and $33$\,mm in the two unmanipulated runs.
+
+We then displaced the same two poles, twice, in different directions and by different amounts, and left the rest of the arena as trained. This time nothing happened. The median distance from the path was $43$ and $46$\,mm in the two runs, against $43$\,mm in both baselines, and the error profile is indistinguishable from the unmanipulated band around the whole loop (Fig.~\ref{fig:arena2-runs}C,E). Over the same northern stretch the route sat $40$ and $48$\,mm north of the path, against $7$ and $33$\,mm at baseline. Removing these poles changed the route; moving them did not.
+
+Finally we displaced a section of the southern boundary wall inward by about $450$\,mm, across the part of the loop it borders. The route followed it. The median distance from the path rose to $83$\,mm, the ninetieth percentile to $224$\,mm and the largest excursion to $496$\,mm, and the error profile shows a single tall peak of $412$\,mm at $39\%$ of the loop, exactly the stretch the moved wall borders (Fig.~\ref{fig:arena2-runs}D,E). Over that stretch the trajectory sat $184$\,mm east and $288$\,mm north of the trained path, against $22$ and $12$\,mm north in the two baselines, so the route moved roughly two thirds of the way with the wall. The shift was present on every lap: the median northward offset over that stretch was $289$, $181$, $177$, $196$, $199$, $286$ and $198$\,mm across the seven laps, while the two baseline runs give $1$ to $31$\,mm.
 
 \section{Discussion}
 
