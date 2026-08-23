@@ -313,9 +313,16 @@ We trained each controller in simulation on the path drawn for its arena (Sectio
 For every run, we logged the trajectory from the overhead camera system. We report the number of laps the robot completed, its distance from the trained path at each step, and, when the arena changed, the effect of the changes on the robot’s path compared with the variation observed in the two baseline runs. 
 
 
-\subsubsection{First arena}
+\subsubsection{Arena 1}
 
-The first arena held five rectangular blocks and a single pole, and the path was a closed loop of $8.8$\,m drawn between them. Each run of $500$ steps therefore covered about eight and a half laps.
+Arena 1 held five rectangular blocks and a single pole, and the path was a closed loop of $8.8$\,m drawn between them (Fig.~\ref{fig:arena1-runs}). Each run of $500$ steps therefore covered about eight and a half laps.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=\textwidth]{fig_arena1_runs}
+    \caption{Arena 1: the trained route and what each change to the arena did to it. Blue marks the digitised layout, the dashed grey line is the path the controller was trained on, and red is the trajectory the robot flew. (A) The arena as trained, run twice. (B) The pole removed, marked with a cross where it stood. (C) The pole and the central block removed. (D) The central block and the one below it displaced about $320$\,mm east, drawn from their measured new positions with an arrow from where they were trained; the thicker section of the path marks the stretch those blocks border, over which the route shift is measured. The layout drawn in every panel is the trained one, which was not re-digitised for the manipulated runs, so removals and displacements are shown from the recorded measurements rather than from a fresh digitisation of each arena.}
+    \label{fig:arena1-runs}
+\end{figure}
 
 Run twice without any change to the arena, the robot followed the path closely and repeatably. Its median distance from the path was $37$\,mm in both runs, with the ninetieth percentile at $89$ and $94$\,mm and the largest excursion at $188$ and $185$\,mm. The two runs are not the same trajectory, but they are the same behavior, and the agreement between them is the floor against which the changes below are read.
 
