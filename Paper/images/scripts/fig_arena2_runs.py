@@ -5,7 +5,7 @@ Four panels, all drawn in the arena's own frame:
   A  the two unmanipulated runs, which set the floor
   B  the two northern poles removed
   C  the same two poles displaced, run twice
-  D  a section of the southern wall displaced inward
+  D  an extra wall placed across the southern part of the loop
 
 The arena geometry comes from the digitised layout stored with the runs. Note
 that this layout is the TRAINED one and was not re-digitised for the
@@ -67,9 +67,12 @@ POLE_MOVES = {
     "poles_moved2": {(110.0, 736.0): (739.0, -306.0),
                      (-1020.0, 404.0): (-283.0, -283.0)},
 }
-# The displaced wall, as a weighted line fit to the changed region of that
-# run's photograph: y = 0.051 x - 2626 over x in [-850, 1700], rms 35 mm.
-WALL_FIT = dict(slope=0.051, intercept=-2626.0, x0=-850.0, x1=1700.0)
+# The added wall, read off Dieter's annotation of that run's own photograph
+# (arena_shark_annotated_moved_wall_drawn.png) in the rectified map frame that
+# meta.json defines: 5 mm/px over x in [-2500, 3000], y in [-3500, 2000].
+# Fit y = 0.0588 x - 2607 over x in [-470, 1995], rms 40 mm, which agrees with
+# the independent fit recorded on 2026-08-21 (y = 0.051 x - 2626) to ~25 mm.
+WALL_FIT = dict(slope=0.0588, intercept=-2607.0, x0=-470.0, x1=1995.0)
 
 C_WALL = "#3E6B8A"
 C_POLE = "#8172B2"
@@ -146,7 +149,7 @@ def main():
     titles = ["A  Trained arena, run twice",
               "B  Two poles removed",
               "C  The same poles displaced, twice",
-              "D  Wall section displaced inward"]
+              "D  Wall added across the path"]
     for ax, title in zip(axes, titles):
         ax.plot(P[:, 0], P[:, 1], color=C_PATH, lw=1.0, ls=(0, (5, 3)), zorder=2)
         ax.scatter(walls[:, 0], walls[:, 1], s=.6, color=C_WALL,
@@ -219,16 +222,14 @@ def main():
     near_stretch = np.min(np.linalg.norm(
         all_wall[:, None, :] - P[None, lo:hi, :], axis=2), axis=1)
     south = all_wall[near_stretch < near_stretch.min() + 250]
-    axes[3].scatter(south[:, 0], south[:, 1], s=2.2, color=C_GONE, zorder=5)
+    # The wall was ADDED, not displaced: comparing this run's arena photograph
+    # with the baseline's shows the southern boundary still in place and an
+    # extra wall inside it. So no "before" marking and no arrow -- just the
+    # wall where it stood, which is a few centimetres outside the trained path.
     wx = np.array([WALL_FIT["x0"], WALL_FIT["x1"]])
     wy = WALL_FIT["slope"] * wx + WALL_FIT["intercept"]
-    axes[3].plot(wx, wy, "-", color="k", lw=2.0, zorder=6,
+    axes[3].plot(wx, wy, "-", color="k", lw=2.2, zorder=6,
                  solid_capstyle="round")
-    cen = south.mean(0)
-    tgt = np.array([cen[0], WALL_FIT["slope"] * cen[0] + WALL_FIT["intercept"]])
-    axes[3].annotate("", xy=tuple(tgt), xytext=tuple(cen),
-                     arrowprops=dict(arrowstyle="-|>", color="k", lw=1.1,
-                                     shrinkA=2, shrinkB=2), zorder=7)
     axes[3].plot(T["wall"][:, 0], T["wall"][:, 1], color=C_TRAJ, lw=.7,
                  alpha=.85, zorder=4)
 
@@ -281,9 +282,10 @@ def main():
                  bbox=dict(boxstyle="round,pad=0.12", fc="#F2E9DA", ec="none"))
 
     style.save(fig, NAME)
-    print("[fig] %d poles, %d manipulated; wall stretch %s%%, "
-          "marked section centroid (%.0f, %.0f), %d points"
-          % (len(pole), len(MANIP_POLES), WALL_STRETCH, cen[0], cen[1], len(south)))
+    print("[fig] %d poles, %d manipulated; added wall y = %.4f x %+.0f "
+          "over x in [%.0f, %.0f]"
+          % (len(pole), len(MANIP_POLES), WALL_FIT["slope"],
+             WALL_FIT["intercept"], WALL_FIT["x0"], WALL_FIT["x1"]))
 
 
 if __name__ == "__main__":
