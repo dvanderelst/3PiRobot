@@ -146,23 +146,39 @@ def main():
         ax.set_xlim(-VIEW_X, VIEW_X); ax.set_ylim(-330, VIEW_Y)
         ax.set_aspect("equal")
         ax.set_xticks([]); ax.set_yticks([])
-        ax.set_title("wall at %d mm  \u00b7  error %d mm"
-                     % (round(near[i]), round(err[i])), fontsize=6.5, pad=3)
+        # Per-sector errors, not the mean: the spread across the field is what
+        # this figure exists to show, and a single mean hides it. In the first
+        # example the left sector is out by 145 mm while the mean reads 79.
+        # Order is SLICE_NAMES, right / centre / left, matching the panel from
+        # left to right when read R/C/L against the drawing's mirror.
+        per_sector = np.abs(pred_wall[i] - slice_t[i])
+        # Two lines: on one line these collide across columns. The right /
+        # centre / left key lives in the legend instead of being repeated six
+        # times.
+        ax.set_title("nearest wall %d mm\nsector errors %s mm"
+                     % (round(near[i]),
+                        " / ".join("%d" % round(v) for v in per_sector)),
+                     fontsize=6.2, pad=2, linespacing=1.35)
         numbers.append(dict(index=i, session=str(sess[i]),
                             near_mm=float(near[i]), mean_err_mm=float(err[i]),
+                            per_sector_err=[float(v) for v in
+                                            np.abs(pred_wall[i] - slice_t[i])],
                             true=[float(v) for v in slice_t[i]],
                             pred=[float(v) for v in pred_wall[i]],
                             sigma=[float(v) for v in pred_std[i]]))
 
-    fig.subplots_adjust(hspace=.10, wspace=.04, top=.90, bottom=.01,
+    fig.subplots_adjust(hspace=.20, wspace=.04, top=.88, bottom=.01,
                         left=.02, right=.98)
     fig.legend(handles=[
         plt.Line2D([], [], color=C_WALL, lw=0, marker="o", ms=3,
                    label="Arena geometry"),
         plt.Line2D([], [], color=C_TRUE, lw=1.2, label="True nearest wall"),
         plt.Line2D([], [], color=C_PRED, lw=1.2, ls="--",
-                   label="Model, with $\\pm\\sigma$")],
-        loc="upper center", ncol=3, frameon=False, fontsize=7)
+                   label="Model, with $\\pm\\sigma$"),
+        plt.Line2D([], [], color="none",
+                   label="errors listed right / centre / left")],
+        loc="upper center", ncol=4, frameon=False, fontsize=6.5,
+        handlelength=1.6, columnspacing=1.3)
     style.save(fig, NAME)
     with open(SCRIPTS / f"{NAME}_numbers.json", "w") as f:
         json.dump(numbers, f, indent=1)
