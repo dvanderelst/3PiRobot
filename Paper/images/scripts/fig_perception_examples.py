@@ -168,7 +168,7 @@ def main():
         # Two lines: on one line these collide across columns. The right /
         # centre / left key lives in the legend instead of being repeated six
         # times.
-        ax.set_title("nearest wall %d mm\nsector errors %s mm"
+        ax.set_title("Nearest wall %d mm\nSector errors %s mm"
                      % (round(near[i]),
                         " / ".join("%d" % round(v) for v in per_sector)),
                      fontsize=6.2, pad=2, linespacing=1.35)
@@ -189,7 +189,7 @@ def main():
         plt.Line2D([], [], color=C_PRED, lw=1.2, ls="--",
                    label="Model, with $\\pm\\sigma$"),
         plt.Line2D([], [], color="none",
-                   label="errors listed right / centre / left")],
+                   label="Errors listed right / centre / left")],
         loc="upper center", ncol=4, frameon=False, fontsize=6.5,
         handlelength=1.6, columnspacing=1.3)
     style.save(fig, NAME)

@@ -614,19 +614,19 @@ def main():
     # therefore shows the standard deviation of the predictions themselves.
     for ax, rows, deprows, colour, title, lab, ekey in (
             (axc, pole_rows, dep_pole, C_POLE, "Pole range",
-             "bars: SD of predictions", "pred_sd"),
+             "Bars: SD of predictions", "pred_sd"),
             (axd, agn_rows, dep_agn, C_AGN, "Nearest-reflector range",
-             "bars: $\\pm$RMSE", "rmse")):
+             "Bars: $\\pm$RMSE", "rmse")):
         if ax is axc:
             ax.fill_between(hist_x, 0, hist_all_y, step="mid", color="0.55",
                             alpha=.13, lw=0, zorder=-2)
             ax.step(hist_x, hist_all_y, where="mid", color="0.55", lw=.7,
                     alpha=.6, ls=(0, (2, 1.5)), zorder=-2,
-                    label="all pole echoes")
+                    label="All pole echoes")
             ax.fill_between(hist_x, 0, hist_y, step="mid", color="0.45",
                             alpha=.30, lw=0, zorder=-1)
             ax.step(hist_x, hist_y, where="mid", color="0.35", lw=.8,
-                    alpha=.8, zorder=-1, label="used by this head")
+                    alpha=.8, zorder=-1, label="Used by this head")
         ax.plot([0, R_LIM], [0, R_LIM], "--", color="0.4", lw=.8, zorder=0)
         ax.errorbar([r["centre"] for r in rows], [r["pred_mean"] for r in rows],
                     yerr=[r[ekey] for r in rows], fmt="o-", color=colour,
@@ -660,10 +660,10 @@ def main():
     # effect in that band sits in the tail, which a median cannot show.
     insd.plot([r["centre"] for r in agn_cont_rows],
               [r["rmse"] for r in agn_cont_rows], "o-", color=C_AGN, ms=2.5,
-              lw=1.0, label="contested")
+              lw=1.0, label="Contested")
     insd.plot([r["centre"] for r in agn_clean_rows],
               [r["rmse"] for r in agn_clean_rows], "^--", color=C_AGN, ms=3,
-              lw=1.0, alpha=.65, mfc="none", label="uncontested")
+              lw=1.0, alpha=.65, mfc="none", label="Uncontested")
     insd.set_title("RMSE (mm)", fontsize=5.5, pad=2)
     insd.tick_params(labelsize=5, length=2, pad=1)
     insd.legend(frameon=False, fontsize=5, loc="upper left", handlelength=1.2)
@@ -684,7 +684,7 @@ def main():
     axe.set_title("Wall depth")
     axe.legend(frameon=False, fontsize=6, loc="upper left",
                bbox_to_anchor=(0.0, 0.95), labelspacing=.3,
-               title="dotted: constant predictor", title_fontsize=6)
+               title="Dotted: constant predictor", title_fontsize=6)
     _panel_letter(axe, "F")
 
     axf.plot([0.5, 1.0], [50, 100], "--", color="0.4", lw=.8, zorder=0)

@@ -146,10 +146,13 @@ def main():
         ax.set_xlim(-VIEW_X, VIEW_X); ax.set_ylim(-330, VIEW_Y)
         ax.set_aspect("equal"); ax.set_xticks([]); ax.set_yticks([])
         called = T.CLASS_NAMES[int(cls[i])]
-        ax.set_title("pole at %d mm, %+d$^{\\circ}$\nmodel: %d mm, %+d$^{\\circ}$"
-                     "  (says %s, p=%.2f)"
+        # The probability OF THE CLASS IT CALLED, rather than a bare label: the
+        # classifier's output is a probability and the figure should say so.
+        p_called = p_pole[i] if called == "pole" else 1.0 - p_pole[i]
+        ax.set_title("Pole at %d mm, %+d$^{\\circ}$\nModel: %d mm, %+d$^{\\circ}$"
+                     "  (classification: $p(\\mathrm{%s})=%.2f$)"
                      % (round(near[i]), round(az[i]), round(p_r[i]),
-                        round(p_az[i]), called, p_pole[i]),
+                        round(p_az[i]), called, p_called),
                      fontsize=6.0, pad=2, linespacing=1.35)
         _panel_letter(ax, letter)
         numbers.append(dict(index=i, session=str(sess[i]),

@@ -168,7 +168,7 @@ def main():
                  "o-", color=colour, ms=3, lw=1.1)
     ins.set_xlim(150, 1050)
     ins.tick_params(labelsize=5, length=2, pad=1)
-    ins.set_title("within the training span", fontsize=5.5, pad=2)
+    ins.set_title("Within the training span", fontsize=5.5, pad=2)
     axc.set_title(f"Shaded: band holding the {STOP_MM:.0f} mm stop", fontsize=7)
 
     style.save(fig, NAME)
