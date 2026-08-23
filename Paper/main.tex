@@ -308,13 +308,12 @@ Steps on which a pole was perceived         & $97 / 781$ & $234 / 410$ \\
 
 \subsection{Experiment 2}
 
-We deployed one controller in each of the two arenas. Each was trained in simulation on the path drawn for its own arena (Section~\ref{sec:inverse-training}), and each was then released from its release box and left to run. Every run lasted $500$ sense-act steps, which is several laps of either path. The controller was never retrained between conditions: within an arena, every run below uses the same network, so that what differs across conditions is the arena and not the robot.
+We trained each controller in simulation on the path drawn for its arena (Section~\ref{sec:inverse-training}) before deploying them in the arenas, starting from the release box. Every run lasted for $500$ sense-act steps, allowing the robot to complete several loops of the path. For each path, we completed two runs using the arena layout the controller was trained on. Completing two runs allowed us to assess baseline variation in the robot's behavior, which is not zero: the robot starts from a slightly different pose each time and its motors do not execute a command identically twice. In addition, we completed runs with changes to the arenas, that is, the removal or displacement of poles, blocks or a wall. The controller was not retrained for these runs.
 
-For every run we logged the trajectory from the overhead camera system. We report the number of laps the robot completed, its distance from the trained path at each step, and, in the conditions where we displaced an object, how far the route moved toward that object's new position.
-
-An effect of a manipulation has to be judged against something. Repeating a run does not reproduce it exactly: the robot starts from a slightly different pose, its motors do not execute a command identically twice, and the sonar returns a different sample of echoes. We therefore ran the unmanipulated arena twice before manipulating anything, and treat the difference between those two runs as the floor that any effect has to clear. In both arenas that floor turned out to be small, so the comparisons below are between an effect and a repeat rather than between an effect and zero.
+For every run, we logged the trajectory from the overhead camera system. We report the number of laps the robot completed, its distance from the trained path at each step, and, when the arena changed, the effect of the changes on the robot’s path compared with the variation observed in the two baseline runs.
 
 We describe the two arenas in turn, and then what the two together support.
+
 
 \section{Discussion}
 
