@@ -113,8 +113,42 @@ CLAMP_CONST = {
     "pole_az_sigma_deg": float("nan"), "pole_dist_sigma_mm": float("nan"),
     "agn_dist_mm": 750.0, "agn_dist_sigma_mm": 150.0,
 }
-_clamp_pool = []               # real measurements seen so far, for "shuffle"
+# Where "shuffle" draws from. Left empty, the pool warms up from the run's own
+# steps -- which means step 0 draws the robot's own current measurement, step 5
+# draws from six steps spanning 750 mm, and the first ~10 steps are therefore
+# substantially veridical. Against a condition that collapses by step 16 that is
+# not a small contaminant. Point this at a previous *intact* run in the same
+# arena and the pool is realistic and position-decorrelated from step 0.
+# Path relative to DATA_FOLDER; "" restores the warm-up behaviour.
+CLAMP_SHUFFLE_POOL_RUN = ""
+
+_clamp_pool = []               # measurements available to "shuffle"
 _clamp_rng = np.random.default_rng(0xC1A3)
+
+
+def reset_clamp_pool():
+    """Empty the pool, then prefill it from CLAMP_SHUFFLE_POOL_RUN if set.
+
+    Called once before the live loop: the pre-flight preview also runs through
+    apply_sensory_clamp, and its simulated steps must not survive into the run.
+    """
+    import glob
+    _clamp_pool.clear()
+    if CLAMP_SENSING != "shuffle" or not CLAMP_SHUFFLE_POOL_RUN:
+        return
+    import dill
+    src = os.path.join(DATA_FOLDER, CLAMP_SHUFFLE_POOL_RUN)
+    for f in sorted(glob.glob(os.path.join(src, "data*.dill"))):
+        try:
+            meas = dill.load(open(f, "rb"))["data"].get("sonar_prediction")
+        except Exception:
+            continue
+        if meas:
+            _clamp_pool.append(dict(meas))
+    if not _clamp_pool:
+        raise SystemExit(f"CLAMP_SHUFFLE_POOL_RUN set but no measurements found under {src}")
+    print(f"Shuffle pool prefilled with {len(_clamp_pool)} real measurements from "
+          f"{CLAMP_SHUFFLE_POOL_RUN}")
 
 
 def apply_sensory_clamp(meas):
@@ -838,10 +872,7 @@ else:
 # Main loop
 # ══════════════════════════════════════════════════════════════════════════════
 
-# The preview rolls the policy forward through apply_sensory_clamp too, which
-# under "shuffle" would seed the pool with simulated measurements. The real run
-# must draw only from steps the robot actually took.
-_clamp_pool.clear()
+reset_clamp_pool()
 
 PushOver.send(f"Policy run started: {SESSION}")
 
