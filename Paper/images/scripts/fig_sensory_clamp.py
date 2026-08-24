@@ -53,7 +53,11 @@ PANELS = [
 C_WALL = "#3E6B8A"
 C_POLE = "#8172B2"
 C_PATH = "0.45"
-C_INTACT = "#C44E52"
+# The intact run is a reference, not a fourth condition. Drawn grey and behind
+# the dashed path so the only saturated trajectories in a panel are the clamped
+# ones; its width against the dashed line is the baseline scatter, which is what
+# makes the clamped medians legible as distances.
+C_INTACT = "0.62"
 # Three clamped runs per panel. Distinct from the trajectory red of the intact
 # run and from the pole purple, and ordered light to dark so they read as a set
 # rather than as three unrelated conditions.
@@ -119,11 +123,10 @@ def main():
         for p_xy in poles:
             ax.add_patch(Circle(tuple(p_xy), 60, fc=C_POLE, ec=C_POLE, lw=1.0,
                                 zorder=5))
-        ax.plot(P[:, 0], P[:, 1], color=C_PATH, lw=1.0, ls=(0, (5, 3)), zorder=2)
-
         xy = load_traj(intact)
         numbers[arena]["runs"][intact] = measures(xy, P, loop_mm)
-        ax.plot(xy[:, 0], xy[:, 1], color=C_INTACT, lw=.55, alpha=.75, zorder=3)
+        ax.plot(xy[:, 0], xy[:, 1], color=C_INTACT, lw=.5, alpha=.9, zorder=2)
+        ax.plot(P[:, 0], P[:, 1], color=C_PATH, lw=1.0, ls=(0, (5, 3)), zorder=3)
 
         for colour, run in zip(C_CLAMP, clamped):
             xy = load_traj(run)
@@ -148,7 +151,7 @@ def main():
 
     handles = [
         Line2D([], [], color=C_PATH, ls=(0, (5, 3)), lw=1.2, label="Trained path"),
-        Line2D([], [], color=C_INTACT, lw=1.2, label="Intact run (500 steps)"),
+        Line2D([], [], color=C_INTACT, lw=1.2, label="Intact run"),
     ] + [Line2D([], [], color=c, lw=1.2, label=f"Clamped run {i}")
          for i, c in enumerate(C_CLAMP, 1)] + [
         Line2D([], [], marker="o", ls="", mfc="w", mec="k", ms=4, label="Release"),
