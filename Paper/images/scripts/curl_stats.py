@@ -71,7 +71,12 @@ def calibrated_curl(run_dir):
 
 
 def fit(rot, dyaw):
-    """Trimmed fit of dyaw = gain * rot + curl."""
+    """Trimmed fit of dyaw = gain * rot + curl, with the slope's standard error.
+
+    The SE is reported because the paper quotes a RANGE of gains: without it
+    there is no way to tell a real 0.90 from a poorly determined 1.00. Commanded
+    rotations spread about 14 deg, which pins the slope to a few thousandths.
+    """
     x, y = rot, dyaw
     g = c = float("nan")
     for _ in range(N_TRIM):
@@ -82,7 +87,11 @@ def fit(rot, dyaw):
         if keep.sum() < 50:
             break
         x, y = x[keep], y[keep]
-    return float(g), float(c), int(len(x))
+    A = np.c_[x, np.ones_like(x)]
+    resid = y - A @ np.array([g, c])
+    s2 = float(resid @ resid) / max(1, len(x) - 2)
+    se = float(np.sqrt(s2 * np.linalg.inv(A.T @ A)[0, 0]))
+    return float(g), float(c), int(len(x)), se
 
 
 def main():
@@ -93,23 +102,24 @@ def main():
         yaw, rot = a["yaw_deg"], a["rot_deg"]
         dyaw = (np.diff(yaw) + 180.0) % 360.0 - 180.0
         m = np.isfinite(dyaw) & np.isfinite(rot[:-1])
-        gain, curl, n = fit(rot[:-1][m], dyaw[m])
+        gain, curl, n, gain_se = fit(rot[:-1][m], dyaw[m])
         arena = "Path04" if "Path04" in d else "Path07"
         steps_per_lap = LOOP_MM[arena] / DRIVE_MM
         # What Client.step added to every command, and therefore the physical
         # curl implied by what was left over.
         comp = -calibrated_curl(d) * DRIVE_MM
         rows.append(dict(run=os.path.basename(d), arena=arena, n_kept=n,
-                         rot_gain=gain, curl_deg_per_step=curl,
+                         rot_gain=gain, rot_gain_se=gain_se,
+                         curl_deg_per_step=curl,
                          curl_deg_per_lap=curl * steps_per_lap,
                          correction_deg_per_step=comp,
                          physical_curl_deg_per_step=curl - gain * comp,
                          steps_per_lap=steps_per_lap))
 
-    print(f"{'run':<40} {'gain':>6} {'corr':>7} {'resid':>7} {'raw':>7} "
+    print(f"{'run':<40} {'gain':>6} {'±SE':>6} {'corr':>7} {'resid':>7} {'raw':>7} "
           f"{'resid °/lap':>12}")
     for r in rows:
-        print(f"{r['run']:<40} {r['rot_gain']:>6.3f} "
+        print(f"{r['run']:<40} {r['rot_gain']:>6.3f} {r['rot_gain_se']:>6.3f} "
               f"{r['correction_deg_per_step']:>+7.2f} "
               f"{r['curl_deg_per_step']:>+7.2f} "
               f"{r['physical_curl_deg_per_step']:>+7.2f} "
@@ -117,9 +127,12 @@ def main():
     res = [r["curl_deg_per_step"] for r in rows]
     raw = [r["physical_curl_deg_per_step"] for r in rows]
     lap = [abs(r["curl_deg_per_lap"]) for r in rows]
+    gains = [r["rot_gain"] for r in rows]
     print(f"\nall {len(rows)} runs: physical curl {min(raw):+.2f} to "
           f"{max(raw):+.2f} °/step; residual after correction {min(res):+.2f} "
-          f"to {max(res):+.2f} °/step; largest residual {max(lap):.0f} °/lap")
+          f"to {max(res):+.2f} °/step; largest residual {max(lap):.0f} °/lap; "
+          f"rotation gain {min(gains):.3f} to {max(gains):.3f} "
+          f"(max SE {max(r['rot_gain_se'] for r in rows):.3f})")
     with open(SCRIPTS / f"{NAME}.json", "w") as f:
         json.dump(rows, f, indent=1)
 
