@@ -78,6 +78,55 @@ do_translation = True
 # sim-to-real sanity check.
 POLICY_INPUT_SOURCE = "live"   # "live" | "sim" | "sim_clean"
 
+# ── Sensory-clamp control condition ──────────────────────────────────────────
+# Replaces every feature the inverse reports with a value carrying no
+# information about where the robot is, leaving the recurrent controller running
+# on its own dynamics and the rotation it last commanded.
+#
+# What it tests: a controller that ignores its sensory input is by definition
+# unaffected by what is put there, so a route that collapses under this is a
+# route the sonar was driving. It does NOT measure how far dead reckoning alone
+# carries the robot -- the encoding has no null value, so this feeds a false
+# reading rather than an absent one, and the controller may be steering wrongly
+# rather than merely uninformed. The qualitative claim survives that; a
+# quantitative one would not.
+#
+# "const"   holds every feature at CLAMP_CONST for the whole run. This is the
+#           closest thing to "no information" the obs encoding permits.
+# "shuffle" feeds a measurement drawn at random from the steps already taken,
+#           which keeps realistic marginals but destroys the tie to position.
+#           Use only if "const" happens to land somewhere benign.
+#
+# Simulation says what to expect: SCRIPT_Ablations.py's `dead_reckoning`
+# condition on the deployed Path04 policy gives 0.36 laps and 24/24 collisions
+# against 0.99 laps and 3/24 intact. Expect the robot to hit something.
+CLAMP_SENSING = "off"          # "off" | "const" | "shuffle"
+
+# Mid-range, self-consistent, and inside the training distribution: the nearest
+# reflector sat at a median of ~740 mm across the eleven deployed runs.
+CLAMP_CONST = {
+    "distance_right_mm": 750.0, "distance_center_mm": 750.0,
+    "distance_left_mm": 750.0,
+    "sigma_right_mm": 150.0, "sigma_center_mm": 150.0, "sigma_left_mm": 150.0,
+    "p_wall": 1.0, "p_pole": 0.0, "p_none": 0.0,
+    "pole_az_deg": float("nan"), "pole_dist_mm": float("nan"),
+    "pole_az_sigma_deg": float("nan"), "pole_dist_sigma_mm": float("nan"),
+    "agn_dist_mm": 750.0, "agn_dist_sigma_mm": 150.0,
+}
+_clamp_pool = []               # real measurements seen so far, for "shuffle"
+_clamp_rng = np.random.default_rng(0xC1A3)
+
+
+def apply_sensory_clamp(meas):
+    """The measurement the policy sees under CLAMP_SENSING. Identity when off."""
+    if CLAMP_SENSING == "off":
+        return meas
+    if CLAMP_SENSING == "shuffle":
+        _clamp_pool.append(dict(meas))
+        return dict(_clamp_pool[_clamp_rng.integers(len(_clamp_pool))])
+    return dict(CLAMP_CONST)
+
+
 # After a step (especially a sharp turn) the overhead tracker takes ~1–2 s to
 # converge on the new pose; reading immediately gives a stale yaw and feeds the
 # wrong geometric profile to the policy. We delegate the settled-read to
@@ -287,6 +336,15 @@ def _assert_calibrated(cfg) -> None:
         print(f"Calibration OK: curl {cfg.drive_yaw_curl_deg_per_mm:+.5f} deg/mm "
               f"({curl_per_step:+.2f} deg/step at {policy.fixed_drive_mm:.0f} mm), "
               f"drive scale {cfg.drive_distance_scale:.4f}")
+        # Loud, because a clamped run looks exactly like a normal one in the
+        # logs until the trajectory is plotted, and leaving it on by accident
+        # would quietly ruin a session's worth of table time.
+        if CLAMP_SENSING != "off":
+            print("\n" + "!" * 72)
+            print(f"!! SENSORY CLAMP ACTIVE: CLAMP_SENSING = {CLAMP_SENSING!r}")
+            print("!! The policy is NOT seeing the arena. This is the control")
+            print("!! condition -- expect the robot to leave the path and collide.")
+            print("!" * 72 + "\n")
         return
     print("\n" + "=" * 74)
     print("REFUSING TO RUN: calibration constants in Library/Settings.py are at identity")
@@ -847,6 +905,8 @@ for step in range(MAX_STEPS):
                 meas_for_policy.setdefault(k, meas_sim[k])
     else:
         meas_for_policy = meas_live   # fallback when sim source requested but tracker missed
+    # Applied last, so the clamp overrides whatever POLICY_INPUT_SOURCE chose.
+    meas_for_policy = apply_sensory_clamp(meas_for_policy)
     obs       = policy.encode_obs(meas_for_policy, prev_rot)
     rotate, hidden_new = policy.step(obs, hidden)
 
