@@ -122,6 +122,16 @@ CLAMP_CONST = {
 # Path relative to DATA_FOLDER; "" restores the warm-up behaviour.
 CLAMP_SHUFFLE_POOL_RUN = ""
 
+# Seed for the shuffle draw, re-applied in reset_clamp_pool() so that each run is
+# an independent *and* replayable sample. This matters more than it looks: with a
+# prefilled pool of ~500, every draw lands in the prefill (none in the handful of
+# live steps appended so far), so the whole input sequence is fixed by (pool,
+# seed). Left to a module-level constant, repeat runs would differ only through
+# how many steps the pre-flight preview happened to simulate before the live loop
+# -- real variation, but accidental, unrecorded, and gone entirely if someone sets
+# PREVIEW_N=0. None derives a distinct seed per SESSION name.
+CLAMP_SHUFFLE_SEED = None      # None = derive from SESSION; int = force
+
 _clamp_pool = []               # measurements available to "shuffle"
 _clamp_rng = np.random.default_rng(0xC1A3)
 
@@ -130,11 +140,19 @@ def reset_clamp_pool():
     """Empty the pool, then prefill it from CLAMP_SHUFFLE_POOL_RUN if set.
 
     Called once before the live loop: the pre-flight preview also runs through
-    apply_sensory_clamp, and its simulated steps must not survive into the run.
+    apply_sensory_clamp, and neither its simulated steps nor the draws it
+    consumed may carry into the run -- hence the reseed as well as the clear.
     """
-    import glob
+    import glob, zlib
+    global _clamp_rng
     _clamp_pool.clear()
-    if CLAMP_SENSING != "shuffle" or not CLAMP_SHUFFLE_POOL_RUN:
+    if CLAMP_SENSING != "shuffle":
+        return
+    seed = (CLAMP_SHUFFLE_SEED if CLAMP_SHUFFLE_SEED is not None
+            else zlib.crc32(SESSION.encode()))
+    _clamp_rng = np.random.default_rng(seed)
+    print(f"Shuffle draw seed: {seed}  (from SESSION={SESSION!r})")
+    if not CLAMP_SHUFFLE_POOL_RUN:
         return
     import dill
     src = os.path.join(DATA_FOLDER, CLAMP_SHUFFLE_POOL_RUN)
