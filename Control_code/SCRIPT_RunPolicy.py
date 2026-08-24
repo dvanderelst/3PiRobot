@@ -690,7 +690,10 @@ def _simulate_rollout(x0, y0, yaw0, n_steps,
         if min(meas[f"distance_{n}_mm"] for n in slice_names) < PREVIEW_COLLISION_MM:
             end_reason = "collision"
             break
-        obs = policy.encode_obs(meas, prev_rot)
+        # Collision is judged on the true geometry; only what the policy *sees*
+        # is clamped. Without this the preview draws a clean intact lap under
+        # CLAMP_SENSING, which is exactly the wrong expectation for a control run.
+        obs = policy.encode_obs(apply_sensory_clamp(meas), prev_rot)
         rotate, hidden = policy.step(obs, hidden)
         rotate_cmd = float(rotate)
 
@@ -834,6 +837,11 @@ else:
 # ══════════════════════════════════════════════════════════════════════════════
 # Main loop
 # ══════════════════════════════════════════════════════════════════════════════
+
+# The preview rolls the policy forward through apply_sensory_clamp too, which
+# under "shuffle" would seed the pool with simulated measurements. The real run
+# must draw only from steps the robot actually took.
+_clamp_pool.clear()
 
 PushOver.send(f"Policy run started: {SESSION}")
 
