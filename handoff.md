@@ -60,6 +60,12 @@ The `~/.claude` auto-memory is machine-local and does not follow this project ac
 *Last updated: 2026-08-21.*
 *Current branch for ongoing work: `direct-learning-poletask`. `main` carries up through the direct-learning rename + Par 9 task commitment.*
 
+### Considered and deliberately NOT done: the drop-in / route-recovery test (2026-08-23, Dieter's call)
+
+Release the robot somewhere on the trained path -- or anywhere in the arena -- and see whether it can pick the route up from there on sensory data alone. It looks like the natural next experiment after Experiment 2's manipulations, and it is not one: it asks whether the inverse model's output supports **self-localization**, which is the subject of the separate mapping/SLAM paper. Running it here would import that paper's question into this one.
+
+**Dieter raised this himself and ruled it out in the same breath, and asked to be reminded of the reasoning if it resurfaces**, because he expects to forget why he dropped it. If it comes up, say it was considered and deferred, and give the reason rather than re-arguing it. `CLAUDE.md` already carries the general rule that mapping and SLAM stay out of this paper; this is the specific experiment that rule catches.
+
 ### Experiment 2 Results written, and a wrong argument about path integration caught (2026-08-23; commits `5653dff` -> `c85121b`)
 
 **The section is complete**: shared opening, `\subsubsection{Arena 1}`, `\subsubsection{Arena 2}`, and a closing `\subsubsection{Both arenas together}`. Figures `fig_arena1_runs`, `fig_arena2_runs` (four maps + a sliding-window profile each) and `fig_control_loop`. Only `\dnote[18]`'s biological framing is left in it.
