@@ -10,15 +10,20 @@ Trajectories are colored by START rather than by perceived class: with five
 runs per panel, per-step class coloring turns into confetti, and the perception
 story is carried by the separate sampling panel instead.
 
+The sonar arm is the 2026-08-24 re-run; one of its ten runs (pole 2, start 3)
+exhausted the 200-step budget mid-approach, and ends in a cross rather than a
+star so that a failure is not read as an arrival.
+
     Control_code/.venv/bin/python3 Paper/images/scripts/fig_direct_results.py
 """
 
 import csv
+import json
 
 import numpy as np
 
 import style
-from exp1_stats import (HORIZON_MM, POLES, SOURCES, STARTS, load_geometry,
+from exp1_stats import (POLES, SOURCES, STARTS, VETO_MM, load_geometry,
                         run_dir, true_class)
 
 style.setup()
@@ -39,13 +44,17 @@ def load_path(pole, start, source, geom):
     """Path, initial heading, and the poses at which a pole was seen or missed.
 
     A miss is a pose where a pole was genuinely the nearest reflector in the
-    forward cone and within the horizon, yet the modality reported something
-    else. Vision has none by construction, since it reads the same geometry the
+    forward cone and inside the range the controller will accept a pole call
+    over, yet the modality reported something else. Beyond the veto a pole call
+    is refused by design, so a pole out there is not a miss and is not drawn as
+    one. Vision has none by construction, since it reads the same geometry the
     referee uses; the misses are therefore a sonar-only overlay.
     """
     d = run_dir(pole, start, source)
     with open(d / "trajectory.tsv") as fh:
         rows = [r for r in csv.DictReader(fh, delimiter="\t") if r["x_mm"]]
+    with open(d / "run_summary.json") as fh:
+        reached = json.load(fh)["outcome"] == "reached_aligned"
     xy = np.array([[float(r["x_mm"]), float(r["y_mm"])] for r in rows])
     yaw0 = float(rows[0]["yaw_deg"])
 
@@ -54,10 +63,10 @@ def load_path(pole, start, source, geom):
     for r in rows:
         perceived = (r["feat_cls"] or "empty") == "pole"
         truth, _ = true_class(walls, poles, prad, float(r["x_mm"]),
-                              float(r["y_mm"]), float(r["yaw_deg"]), HORIZON_MM)
+                              float(r["y_mm"]), float(r["yaw_deg"]), VETO_MM)
         saw_pole.append(perceived)
         missed_pole.append(truth == "pole" and not perceived)
-    return xy, yaw0, np.array(saw_pole), np.array(missed_pole)
+    return xy, yaw0, np.array(saw_pole), np.array(missed_pole), reached
 
 
 def draw_panel(ax, pole, source, xlim, ylim):
@@ -72,7 +81,8 @@ def draw_panel(ax, pole, source, xlim, ylim):
                                 lw=0.4, zorder=6))
 
     for color, start in zip(START_COLORS, STARTS):
-        xy, yaw0, saw_pole, missed_pole = load_path(pole, start, source, geom)
+        xy, yaw0, saw_pole, missed_pole, reached = load_path(pole, start,
+                                                             source, geom)
         ax.plot(xy[:, 0], xy[:, 1], color=color, lw=0.9, alpha=0.95, zorder=3,
                 solid_joinstyle="round")
         # Pole present within the horizon but not reported.
@@ -86,9 +96,11 @@ def draw_panel(ax, pole, source, xlim, ylim):
         ax.plot(*xy[0], marker=(3, 0, yaw0 - 90.0), ms=5.5, color=color,
                 mec="k", mew=0.4, ls="", zorder=5)
         # Arrival gets a distinct shape: the final pose is itself a detection,
-        # so a larger round dot would not be readable against the shell.
-        ax.plot(*xy[-1], marker="*", ms=8.5, color=color, mec="k", mew=0.4,
-                ls="", zorder=5)
+        # so a larger round dot would not be readable against the shell. A run
+        # that ran out of steps ends in a cross, so that the one failure is not
+        # read as a tenth arrival.
+        ax.plot(*xy[-1], marker="*" if reached else "X", ms=8.5 if reached else 7.0,
+                color=color, mec="k", mew=0.4, ls="", zorder=5)
 
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
@@ -110,7 +122,7 @@ def bounds(margin=200.0):
 
 def main():
     xlim, ylim = bounds()
-    fig, axes = plt.subplots(2, 2, figsize=(style.WIDTH_2COL, 6.4))
+    fig, axes = plt.subplots(2, 2, figsize=(style.WIDTH_2COL, 6.7))
 
     for row, pole in enumerate(POLES):
         for col, source in enumerate(SOURCES):
@@ -139,18 +151,20 @@ def main():
         Line2D([], [], marker="o", ls="", mfc="k", mec="k", ms=3.6,
                label="Pole perceived"),
         Line2D([], [], marker="o", ls="", mfc="none", mec=MISS_C, mew=0.8,
-               ms=4.4, label="Pole present, missed"),
+               ms=4.4, label=f"Pole within {VETO_MM:.0f} mm, missed"),
         Line2D([], [], marker="*", ls="", mfc="w", mec="k", ms=8,
                label="Arrival"),
+        Line2D([], [], marker="X", ls="", mfc="w", mec="k", ms=7,
+               label="Step budget exhausted"),
         Line2D([], [], marker="o", ls="", mfc=POLE_C, mec="k", ms=6,
                label="Pole"),
         Line2D([], [], color=POLE_C, ls=(0, (3, 2)), lw=1,
                label=f"{STOP_MM:.0f} mm stop range"),
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=6, frameon=False,
+    fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False,
                bbox_to_anchor=(0.5, 0.0), fontsize=8)
 
-    fig.subplots_adjust(left=0.05, right=0.99, top=0.96, bottom=0.09,
+    fig.subplots_adjust(left=0.05, right=0.99, top=0.96, bottom=0.13,
                         wspace=0.04, hspace=0.04)
     style.save(fig, "fig_direct_results")
     fig.savefig(style.IMAGES / "fig_direct_results.png", dpi=150)
