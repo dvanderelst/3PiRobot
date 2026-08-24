@@ -2,18 +2,18 @@
 
 Two panels, one per arena, each drawn in the arena's own frame:
 
-  A  Arena 1 (Path04): one intact run, then three clamped runs
+  A  Arena 1 (Path04): one intact run, then three shuffled-input runs
   B  Arena 2 (Path07): the same
 
-In a clamped run every feature the inverse model reports is replaced by a
+In a shuffled-input run every feature the inverse model reports is replaced by a
 measurement drawn at random from a pool of 500 real predictions taken on the
 same path by the same policy, so the marginal statistics of the input are
 realistic and only its relation to where the robot actually is has been cut.
 
 The intact run is drawn as a single trajectory rather than both, because at
 this scale the two are indistinguishable and the panel is about the contrast
-with the clamped runs, not about baseline variation (Figs 8A and 9A carry
-that). Each clamped run ends where it hit something: the marker is the last
+with the shuffled-input runs, not about baseline variation (Figs 8A and 9A
+carry that). Each ends where it hit something: the marker is the last
 logged pose, one step before the contact, since a run ends when a drive is
 blocked or the operator stops it at a pole.
 
@@ -54,13 +54,15 @@ C_WALL = "#3E6B8A"
 C_POLE = "#8172B2"
 C_PATH = "0.45"
 # The intact run is a reference, not a fourth condition. Drawn grey and behind
-# the dashed path so the only saturated trajectories in a panel are the clamped
-# ones; its width against the dashed line is the baseline scatter, which is what
+# the dashed path so the only saturated trajectories in a panel are the
+# shuffled-input ones; its width against the dashed line is the baseline scatter, which is what
 # makes the clamped medians legible as distances.
 C_INTACT = "0.62"
-# Three clamped runs per panel. Distinct from the trajectory red of the intact
-# run and from the pole purple, and ordered light to dark so they read as a set
-# rather than as three unrelated conditions.
+# Three shuffled-input runs per panel. `CLAMP_SENSING` in SCRIPT_RunPolicy.py has
+# a second variant, "const", which was flown twice and retired; only "shuffle"
+# is reported, so the paper never says "clamp". Colours are distinct from the
+# pole purple and ordered light to dark, so the three read as one set rather
+# than as three unrelated conditions.
 C_CLAMP = ["#4C72B0", "#55A868", "#CCA000"]
 
 
@@ -152,7 +154,7 @@ def main():
     handles = [
         Line2D([], [], color=C_PATH, ls=(0, (5, 3)), lw=1.2, label="Trained path"),
         Line2D([], [], color=C_INTACT, lw=1.2, label="Intact run"),
-    ] + [Line2D([], [], color=c, lw=1.2, label=f"Clamped run {i}")
+    ] + [Line2D([], [], color=c, lw=1.2, label=f"Shuffled input {i}")
          for i, c in enumerate(C_CLAMP, 1)] + [
         Line2D([], [], marker="o", ls="", mfc="w", mec="k", ms=4, label="Release"),
         Line2D([], [], marker="X", ls="", mfc="w", mec="k", ms=6, label="Collision"),
