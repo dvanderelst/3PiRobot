@@ -132,6 +132,42 @@ CLAMP_SHUFFLE_POOL_RUN = ""
 # PREVIEW_N=0. None derives a distinct seed per SESSION name.
 CLAMP_SHUFFLE_SEED = None      # None = derive from SESSION; int = force
 
+
+# ── Features exempted from the clamp ─────────────────────────────────────────
+# Keys listed here keep their LIVE value while every other feature is replaced.
+# Empty tuple = clamp everything, which is the condition flown 2026-08-24.
+#
+# The exemption worth running is the class-agnostic range head. A reader need
+# not accept that head as part of the inverse model at all: it is monaural
+# time-of-flight to the nearest reflector -- no class, no bearing, the one
+# output a plain ranger would also give. Leave it live and destroy everything
+# that is distinctively the inverse model's (the three wall slices, the class
+# posteriors, pole azimuth and pole range) and the run answers the obvious
+# objection to the full-shuffle control directly: if the route still collapses,
+# it was not being flown on the generic range channel.
+#
+# Both deployed policies are the 10-channel layout with use_sigma=False, so the
+# sigmas in the measurement dict are never encoded; agn_dist_sigma_mm is listed
+# below for completeness and costs nothing.
+#
+# To fly that condition, three lines:
+#     CLAMP_EXEMPT_KEYS = ("agn_dist_mm", "agn_dist_sigma_mm")
+#     VARIATION         = "shuffle_keep_agn"
+#     CLAMP_SHUFFLE_SEED = <the seed of the matching full-shuffle run>
+# Forcing the seed is what makes the pair a matched comparison rather than two
+# independent samples: run i then sees the identical drawn measurement stream
+# as run i of the full shuffle, differing in exactly one channel. Seeds flown
+# 2026-08-24 -- Path04 run01/02/03: 4115754309 / 3436990848 / 3685172675;
+# Path07 run01/02/03: 3828090684 / 3718331385 / 3403296698. Pools were
+# Paths/default_Path04_run01 and Paths/default_Path07_run01.
+#
+# Note the asymmetry this introduces: a spliced measurement is internally
+# inconsistent (a live range next to wall slices drawn from some other pose),
+# which is off the training manifold in a way the full shuffle is not. See
+# SCRIPT_Ablations.py's shuffle_agn_only condition -- the counterpart is
+# equally inconsistent, so the pair separates incoherence from insufficiency.
+CLAMP_EXEMPT_KEYS = ()
+
 _clamp_pool = []               # measurements available to "shuffle"
 _clamp_rng = np.random.default_rng(0xC1A3)
 
@@ -174,9 +210,17 @@ def apply_sensory_clamp(meas):
     if CLAMP_SENSING == "off":
         return meas
     if CLAMP_SENSING == "shuffle":
+        # The pool keeps the intact measurement, not the spliced one: exempt
+        # keys must not enter the draw pool or later steps could redraw a live
+        # value into a clamped channel.
         _clamp_pool.append(dict(meas))
-        return dict(_clamp_pool[_clamp_rng.integers(len(_clamp_pool))])
-    return dict(CLAMP_CONST)
+        out = dict(_clamp_pool[_clamp_rng.integers(len(_clamp_pool))])
+    else:
+        out = dict(CLAMP_CONST)
+    for k in CLAMP_EXEMPT_KEYS:
+        if k in meas:
+            out[k] = meas[k]
+    return out
 
 
 # After a step (especially a sharp turn) the overhead tracker takes ~1–2 s to
@@ -394,8 +438,13 @@ def _assert_calibrated(cfg) -> None:
         if CLAMP_SENSING != "off":
             print("\n" + "!" * 72)
             print(f"!! SENSORY CLAMP ACTIVE: CLAMP_SENSING = {CLAMP_SENSING!r}")
-            print("!! The policy is NOT seeing the arena. This is the control")
-            print("!! condition -- expect the robot to leave the path and collide.")
+            if CLAMP_EXEMPT_KEYS:
+                print(f"!! EXEMPT (still live): {', '.join(CLAMP_EXEMPT_KEYS)}")
+                print("!! Partial clamp -- every OTHER feature is replaced.")
+            else:
+                print("!! The policy is NOT seeing the arena.")
+            print("!! This is the control condition -- expect the robot to")
+            print("!! leave the path and collide.")
             print("!" * 72 + "\n")
         return
     print("\n" + "=" * 74)
@@ -1025,6 +1074,10 @@ for step in range(MAX_STEPS):
         sonar_prediction=meas_live,
         sim_prediction=meas_sim,
         sim_prediction_clean=meas_sim_clean,
+        # What the policy was actually handed. Identical to sonar_prediction
+        # on an intact run; on a clamped one it is the only record of the
+        # input, which otherwise survives only as (pool, seed).
+        policy_input=meas_for_policy,
     )
     _write_metrics_row(step, position, meas_live, meas_sim_clean, meas_sim,
                        rotate, L, R)

@@ -31,6 +31,32 @@ NaN, matching how the old script handled "no_sonar"). Conditions:
                                             work and the Experiment 2 claim
                                             fails.
 
+A second family (added 2026-08-25) replaces the listed channels not with their
+median but with a JOINT draw from a pool of real observations — the simulated
+counterpart of SCRIPT_RunPolicy.py's CLAMP_SENSING = "shuffle", which is what
+the robot actually flew. One pooled row supplies every clamped channel at a
+step, so the substituted input keeps realistic marginals AND their joint
+structure; only the tie to where the robot is is destroyed.
+
+  shuffle_all      : every sonar channel  — the flown control (2026-08-24).
+  shuffle_keep_agn : everything EXCEPT    — the class-agnostic range head stays
+                     the agnostic range     live. A reader need not accept that
+                                            head as part of the inverse model:
+                                            it is monaural time-of-flight, no
+                                            class, no bearing. If the route
+                                            still collapses, it was not being
+                                            flown on the generic range channel.
+  shuffle_agn_only : the agnostic range   — the counterpart, and the control on
+                     channels alone         shuffle_keep_agn's one weakness: a
+                                            spliced measurement is internally
+                                            inconsistent, so a collapse could
+                                            be blamed on incoherence rather
+                                            than on the missing channels. This
+                                            condition is equally incoherent. If
+                                            it survives while shuffle_keep_agn
+                                            fails, incoherence is not the
+                                            explanation.
+
 Per condition we record trajectories, collisions, max arc-length progress
 (in laps), and mean cross-track error. Outputs a 2×4 trajectory grid plus a
 summary table.
@@ -43,6 +69,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS",  "1")
 
 import json
+import zlib
 from typing import Dict, List, Tuple
 
 import matplotlib
@@ -65,9 +92,30 @@ from SCRIPT_TrainPolicy import (
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────
-RUN_DIR    = "PolicyTraining/default_Path04"
-N_ROLLOUTS = 24
-SEED       = 1234
+RUN_DIR     = "PolicyTraining/default_Path04"
+# The artifact actually deployed in that arena. Path07 flew best_policy_survival
+# (val selection there is close to random); Path04 has no survival artifact.
+# Ablating a policy the robot never flew answers a question nobody asked.
+POLICY_FILE = "best_policy.json"
+N_ROLLOUTS  = 24
+SEED        = 1234
+
+# Empty = run every condition. Set to a subset to skip the ones already
+# recorded; names must match CONDITIONS_BY_NAME / SHUFFLE_CONDITIONS_BY_NAME.
+ONLY_CONDITIONS: List[str] = []
+
+# Both overridable from the command line:
+#   python SCRIPT_Ablations.py PolicyTraining/default_Path07 best_policy_survival.json
+import sys as _sys
+if len(_sys.argv) > 1:
+    RUN_DIR = _sys.argv[1]
+if len(_sys.argv) > 2:
+    POLICY_FILE = _sys.argv[2]
+
+# Output basename. Tagged by artifact so a survival-artifact run does not
+# silently overwrite the figure from a best_policy run in the same folder.
+ABLATION_TAG = ("ablations.png" if POLICY_FILE == "best_policy.json"
+                else f"ablations_{os.path.splitext(POLICY_FILE)[0]}.png")
 
 # Each condition specifies which input *names* to clamp. Resolved against the
 # actual obs layout in main(); names not present in the layout are silently
@@ -92,16 +140,33 @@ CONDITIONS_BY_NAME: Dict[str, List[str]] = {
     "dead_reckoning": list(_SONAR),
 }
 
+# Replaced by a joint draw from the observation pool rather than by a median.
+# prev_rot is never in here: on the robot the policy is fed back its own
+# commanded rotation, and the clamp does not touch that.
+SHUFFLE_CONDITIONS_BY_NAME: Dict[str, List[str]] = {
+    "shuffle_all":      list(_SONAR),
+    "shuffle_keep_agn": _WALLS + _CLASS + _POLE,
+    "shuffle_agn_only": list(_AGN),
+}
 
-def resolve_conditions(input_names: List[str]) -> Dict[str, List[int]]:
-    """Map condition→list-of-indices against the actual input layout.
+
+def resolve_conditions(input_names: List[str]) -> Dict[str, Tuple[List[int], str]]:
+    """Map condition→(list-of-indices, mode) against the actual input layout.
     Drop conditions that collapse to 'full' (i.e. all their clamps were σs
     that aren't present in this policy)."""
-    out: Dict[str, List[int]] = {}
-    for cond, names in CONDITIONS_BY_NAME.items():
-        idx = [input_names.index(n) for n in names if n in input_names]
-        if cond == "full" or names == [] or idx:
-            out[cond] = idx
+    out: Dict[str, Tuple[List[int], str]] = {}
+    for mode, table in (("median", CONDITIONS_BY_NAME),
+                        ("shuffle", SHUFFLE_CONDITIONS_BY_NAME)):
+        for cond, names in table.items():
+            idx = [input_names.index(n) for n in names if n in input_names]
+            if cond == "full" or names == [] or idx:
+                out[cond] = (idx, mode)
+    if ONLY_CONDITIONS:
+        missing = [c for c in ONLY_CONDITIONS if c not in out]
+        if missing:
+            raise SystemExit(f"ONLY_CONDITIONS names no such condition: {missing}"
+                             f" (available: {list(out)})")
+        out = {c: out[c] for c in ONLY_CONDITIONS}
     return out
 
 # Median measurement
@@ -116,7 +181,7 @@ def load_run(run_dir: str) -> Tuple[Config, RNNNet, List[str]]:
     valid_keys = set(Config.__dataclass_fields__.keys())
     cfg = Config(**{k: v for k, v in cfg_dict.items() if k in valid_keys})
 
-    with open(os.path.join(run_dir, "best_policy.json")) as f:
+    with open(os.path.join(run_dir, POLICY_FILE)) as f:
         pol = json.load(f)
 
     in_dim = int(pol["in_dim"])
@@ -162,13 +227,19 @@ def load_run(run_dir: str) -> Tuple[Config, RNNNet, List[str]]:
 def measure_input_medians(sim: EnvironmentSimulator, path, starts,
                           cfg: Config, input_names: List[str],
                           rng: np.random.Generator,
-                          n_steps: int = N_MEDIAN_STEPS) -> np.ndarray:
-    """Walk the teacher around the loop and record medians of every input
-    channel (in normalised units, matching the network's input scale).
+                          n_steps: int = N_MEDIAN_STEPS
+                          ) -> Tuple[np.ndarray, np.ndarray]:
+    """Walk the teacher around the loop and record every input channel
+    (in normalised units, matching the network's input scale).
 
-    Returns a (in_dim,) array ordered by input_names. prev_rot's slot is
+    Returns (medians, pool): a (in_dim,) array of medians ordered by
+    input_names, and the (n_steps, in_dim) log the medians came from, which
+    the shuffle conditions draw from. prev_rot's slot in the medians is
     pinned to 0 by hand for "no_prev_rot" semantics — its empirical median
-    drifts with the path's curvature and isn't a useful baseline."""
+    drifts with the path's curvature and isn't a useful baseline. The pool is
+    left exactly as observed; it is the analogue of the robot condition's
+    pool of 500 real predictions from a previous intact run on the same
+    path."""
     from SCRIPT_TrainPolicy import teacher_rotation_deg
     sim.reseed(int(rng.integers(2**31 - 1)))
     obs_log: List[np.ndarray] = []
@@ -210,7 +281,7 @@ def measure_input_medians(sim: EnvironmentSimulator, path, starts,
     for i, nm in enumerate(input_names):
         if nm.startswith("prev_rot"):
             medians[i] = 0.0
-    return medians
+    return medians, arr
 
 
 # ── Rollout under ablation ───────────────────────────────────────────────────
@@ -219,6 +290,8 @@ def rollout_ablated(net: RNNNet, sim: EnvironmentSimulator, path,
                     start: Tuple[float, float, float], cfg: Config,
                     clamp_idx: List[int], medians: np.ndarray,
                     rng: np.random.Generator,
+                    pool: np.ndarray = None, mode: str = "median",
+                    draw_rng: np.random.Generator = None,
                     ) -> Dict:
     """One ablated rollout under the FULL training motion model.
 
@@ -232,6 +305,11 @@ def rollout_ablated(net: RNNNet, sim: EnvironmentSimulator, path,
     trained for.
     """
     from SCRIPT_TrainPolicy import _sample_motion_biases, _apply_motion_noise
+    # The shuffle draw takes its own generator, so adding these conditions does
+    # not shift the motion-noise stream the median conditions were measured on.
+    if mode == "shuffle" and draw_rng is None:
+        raise ValueError("shuffle mode needs draw_rng")
+    clamp_ix = np.asarray(clamp_idx, dtype=int)
     sim.reseed(int(rng.integers(2**31 - 1)))
     rot_gain, drive_gain, rot_bias = _sample_motion_biases(cfg, rng, tag="ablation")
     x, y, yaw = start
@@ -249,8 +327,17 @@ def rollout_ablated(net: RNNNet, sim: EnvironmentSimulator, path,
                 _obs_from_cfg(meas, prev_rot, cfg),
                 dtype=np.float32,
             )
-            for k in clamp_idx:
-                obs[k] = medians[k]
+            if clamp_ix.size:
+                if mode == "shuffle":
+                    # ONE pooled row supplies every clamped channel, matching
+                    # the robot condition, where a single drawn measurement
+                    # replaces the whole feature vector. Per-channel draws
+                    # would destroy the joint structure as well as the tie to
+                    # position, and that is a different (weaker) condition.
+                    donor = pool[int(draw_rng.integers(len(pool)))]
+                    obs[clamp_ix] = donor[clamp_ix]
+                else:
+                    obs[clamp_ix] = medians[clamp_ix]
 
             x_in = torch.from_numpy(obs).unsqueeze(0)
             h    = torch.tanh(x_in @ net.W_xh.T + h @ net.W_hh.T + net.b_h)
@@ -297,7 +384,7 @@ def rollout_ablated(net: RNNNet, sim: EnvironmentSimulator, path,
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    print(f"Loading {RUN_DIR}")
+    print(f"Loading {RUN_DIR}/{POLICY_FILE}")
     cfg, net, input_names = load_run(RUN_DIR)
     cfg.teacher_perturb_prob = 0.0   # no perturbation during eval
 
@@ -314,7 +401,8 @@ def main():
     walls = sim.arena.walls
 
     print(f"Measuring input medians under teacher ({N_MEDIAN_STEPS} steps)")
-    medians = measure_input_medians(sim, path, starts_pool, cfg, input_names, rng)
+    medians, pool = measure_input_medians(sim, path, starts_pool, cfg,
+                                          input_names, rng)
     print(f"  medians (normalised units):")
     for name, m in zip(input_names, medians):
         print(f"    {name:>9}: {m:+.3f}")
@@ -322,14 +410,21 @@ def main():
     starts = [starts_pool[int(rng.integers(len(starts_pool)))]
               for _ in range(N_ROLLOUTS)]
 
+    print(f"  shuffle pool: {pool.shape[0]} observations × {pool.shape[1]} channels")
+
     results: Dict[str, List[Dict]] = {c: [] for c in conditions}
-    for cond, clamp_idx in conditions.items():
+    for cond, (clamp_idx, mode) in conditions.items():
         names_clamped = [input_names[k] for k in clamp_idx]
-        print(f"\n→ {cond}  (clamping: {names_clamped})  × {N_ROLLOUTS} rollouts")
+        verb = "drawing from pool" if mode == "shuffle" else "clamping to median"
+        print(f"\n→ {cond}  ({verb}: {names_clamped})  × {N_ROLLOUTS} rollouts")
+        # Per-condition, derived from the script seed so a re-run reproduces the
+        # draw and so the conditions do not share one stream.
+        draw_rng = np.random.default_rng(SEED + zlib.crc32(cond.encode()))
         for s in starts:
             results[cond].append(
                 rollout_ablated(net, sim, path, s, cfg,
-                                clamp_idx, medians, rng)
+                                clamp_idx, medians, rng,
+                                pool=pool, mode=mode, draw_rng=draw_rng)
             )
         laps = [r["laps"] for r in results[cond]]
         coll = [r["collided"] for r in results[cond]]
@@ -340,19 +435,22 @@ def main():
 
     # ── Summary printout ────────────────────────────────────────────────────
     print("\n" + "─" * 72)
-    print(f"  {'condition':<14}  {'laps_mean':>9}  {'coll/n':>8}  {'⟨ct⟩ mm':>10}")
+    print(f"  {'condition':<18}  {'laps_mean':>9}  {'coll/n':>8}  {'⟨ct⟩ mm':>10}")
     print("─" * 72)
     for cond in conditions:
         rs = results[cond]
         laps_mean = float(np.mean([r["laps"] for r in rs]))
         n_coll    = sum(r["collided"] for r in rs)
         ct_mean   = float(np.mean([r["ct_mean_mm"] for r in rs]))
-        print(f"  {cond:<14}  {laps_mean:>9.2f}  {n_coll:>3d}/{N_ROLLOUTS:<4d}  {ct_mean:>10.0f}")
+        print(f"  {cond:<18}  {laps_mean:>9.2f}  {n_coll:>3d}/{N_ROLLOUTS:<4d}  {ct_mean:>10.0f}")
     print("─" * 72)
 
     # ── Trajectory plot: 2×4 grid ───────────────────────────────────────────
     n_cond = len(conditions)
-    fig, axes = plt.subplots(2, 4, figsize=(20, 11), sharex=True, sharey=True)
+    n_col  = min(4, n_cond)
+    n_row  = int(np.ceil(n_cond / n_col))
+    fig, axes = plt.subplots(n_row, n_col, figsize=(5 * n_col, 5.5 * n_row),
+                             sharex=True, sharey=True, squeeze=False)
     cmap = plt.cm.tab10
     pts  = path.points
     for ax, cond in zip(axes.flat, conditions):
@@ -372,18 +470,19 @@ def main():
         laps = float(np.mean([r["laps"]     for r in results[cond]]))
         coll = sum(r["collided"]            for r in results[cond])
         ct   = float(np.mean([r["ct_mean_mm"] for r in results[cond]]))
-        clamp_str = ",".join(input_names[k] for k in conditions[cond]) or "(none)"
-        ax.set_title(f"{cond}\nclamp: {clamp_str}\n"
+        clamp_idx, mode = conditions[cond]
+        clamp_str = ",".join(input_names[k] for k in clamp_idx) or "(none)"
+        ax.set_title(f"{cond}  [{mode}]\nclamp: {clamp_str}\n"
                      f"laps={laps:.2f}  coll={coll}/{N_ROLLOUTS}  ⟨ct⟩={ct:.0f}mm",
                      fontsize=9)
         ax.set_aspect("equal", "box")
         ax.grid(True, alpha=0.3)
     # Hide unused panels
-    for j in range(n_cond, 8):
+    for j in range(n_cond, n_row * n_col):
         axes.flat[j].set_visible(False)
-    fig.suptitle(f"Input ablations on {RUN_DIR}", fontsize=12)
+    fig.suptitle(f"Input ablations on {RUN_DIR}/{POLICY_FILE}", fontsize=12)
     fig.tight_layout()
-    out_path = os.path.join(RUN_DIR, "ablations.png")
+    out_path = os.path.join(RUN_DIR, ABLATION_TAG)
     fig.savefig(out_path, dpi=120)
     fig.savefig(os.path.splitext(out_path)[0] + ".svg")
     plt.close(fig)
