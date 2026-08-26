@@ -130,8 +130,20 @@ def measures(xy, P, loop_mm):
                 max=float(d.max()))
 
 
+def set_limits(ax, walls, margin=0.02):
+    """Clip to the arena itself. matplotlib's default margins leave a wide band
+    of empty background around each arena, which at four panels wide is most of
+    the figure's whitespace."""
+    (x0, y0), (x1, y1) = walls.min(0), walls.max(0)
+    mx, my = margin * (x1 - x0), margin * (y1 - y0)
+    ax.set_xlim(x0 - mx, x1 + mx)
+    ax.set_ylim(y0 - my, y1 + my)
+
+
 def draw_backdrop(ax, intact, arena, P):
-    """Arena geometry, the trained path, and one intact run, in that order."""
+    """Arena geometry, the trained path, and one intact run, in that order.
+
+    Returns the wall point cloud, so the caller can clip the axes to it."""
     walls, poles = load_geometry(intact)
     ax.scatter(walls[:, 0], walls[:, 1], s=.6, color=C_WALL, edgecolor="none",
                zorder=1)
@@ -145,6 +157,7 @@ def draw_backdrop(ax, intact, arena, P):
     ax.set_aspect("equal")
     ax.set_xticks([])
     ax.set_yticks([])
+    return walls
 
 
 def draw_runs(ax, runs, colours, lw=1.1, alpha=.95, zorder=4, markers=True):
@@ -180,6 +193,38 @@ def collect_numbers():
     return numbers
 
 
+def build_wide(plt, Line2D):
+    """1x4: the two conditions side by side within each arena, arenas in order.
+
+    Pairing the conditions within an arena puts the comparison that matters
+    next to each other -- both collapse -- rather than across the figure.
+    """
+    fig, axes = plt.subplots(1, 4, figsize=(style.WIDTH_2COL, 2.55))
+    panels = [(a, c) for a in ARENAS for c in CONDITIONS]
+    for ax, letter, ((arena_label, arena, stem, intact),
+                     (_, suf, cond_label)) in zip(axes, "ABCD", panels):
+        P, loop_mm = load_path(arena)
+        set_limits(ax, draw_backdrop(ax, intact, arena, P))
+        draw_runs(ax, [f"{stem}_run0{i}{suf}" for i in (1, 2, 3)], C_CLAMP,
+                  lw=.9, markers=True)
+        ax.set_title(f"{letter}  {arena_label}\n{cond_label}", fontsize=7,
+                     pad=2.5, loc="left", linespacing=1.25)
+    scale_bar(axes[0])
+    handles = [
+        Line2D([], [], color=C_PATH, ls=(0, (5, 3)), lw=1.2, label="Trained path"),
+        Line2D([], [], color=C_INTACT, lw=1.2, label="Intact run"),
+    ] + [Line2D([], [], color=c, lw=1.2, label=f"Run {i}")
+         for i, c in enumerate(C_CLAMP, 1)] + [
+        Line2D([], [], marker="o", ls="", mfc="w", mec="k", ms=4, label="Release"),
+        Line2D([], [], marker="X", ls="", mfc="w", mec="k", ms=6, label="Collision"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=7, frameon=False,
+               bbox_to_anchor=(0.5, 0.0), fontsize=6.8, columnspacing=1.3,
+               handlelength=1.6, handletextpad=.5)
+    fig.subplots_adjust(left=.005, right=.995, top=.85, bottom=.13, wspace=.04)
+    return fig
+
+
 def build_grid(plt, Line2D):
     """2x2: condition by row, arena by column. Three trajectories per panel."""
     fig, axes = plt.subplots(2, 2, figsize=(style.WIDTH_2COL, 5.8))
@@ -188,7 +233,7 @@ def build_grid(plt, Line2D):
         for c, (arena_label, arena, stem, intact) in enumerate(ARENAS):
             ax = axes[r, c]
             P, loop_mm = load_path(arena)
-            draw_backdrop(ax, intact, arena, P)
+            set_limits(ax, draw_backdrop(ax, intact, arena, P))
             draw_runs(ax, [f"{stem}_run0{i}{suf}" for i in (1, 2, 3)], C_CLAMP)
             ax.set_title(f"{next(letters)}  {arena_label}, {cond_label}",
                          fontsize=8, pad=3, loc="left")
@@ -213,7 +258,7 @@ def build_rows(plt, Line2D):
     fig, axes = plt.subplots(1, 2, figsize=(style.WIDTH_2COL, 4.7))
     for ax, (arena_label, arena, stem, intact), letter in zip(axes, ARENAS, "AB"):
         P, loop_mm = load_path(arena)
-        draw_backdrop(ax, intact, arena, P)
+        set_limits(ax, draw_backdrop(ax, intact, arena, P))
         draw_runs(ax, [f"{stem}_run0{i}_shuffle" for i in (1, 2, 3)],
                   [C_DEMOTED] * 3, lw=.9, alpha=.9, zorder=3, markers=False)
         draw_runs(ax, [f"{stem}_run0{i}_shuffle_keep_agn" for i in (1, 2, 3)],
@@ -236,7 +281,7 @@ def build_rows(plt, Line2D):
 
 
 def main():
-    layout = "grid"
+    layout = "wide"
     stem_out = NAME
     for a in sys.argv[1:]:
         if a.startswith("--layout="):
@@ -248,7 +293,8 @@ def main():
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
-    fig = {"grid": build_grid, "rows": build_rows}[layout](plt, Line2D)
+    fig = {"wide": build_wide, "grid": build_grid,
+           "rows": build_rows}[layout](plt, Line2D)
 
     style.save(fig, stem_out)
     fig.savefig(style.IMAGES / f"{stem_out}.png", dpi=150)
