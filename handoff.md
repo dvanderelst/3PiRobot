@@ -544,6 +544,23 @@ Chronological record of model and robot-experiment performance, written when mea
 
 This exists because `SonarModel/`, `PolicyTraining/`, and `PolicyRuns/` are all gitignored, so per-run JSONs get overwritten and historical numbers are otherwise lost.
 
+### 2026-08-26 — **Path04 baseline re-check: still 8.53 laps at 41 mm.** And the post-battery `+0.024` curl was a session transient, not the new normal
+
+Amends the entry below (2026-08-25, later) on one point only; its numbers and conclusions stand. `default_Path04_run03_check` — intact run, `CLAMP_SENSING = "off"`, `CLAMP_EXEMPT_KEYS = ()`, `best_policy.json`, `MAX_STEPS = 500`, flown to confirm the policy still works after the battery change. **500 steps, 8.53 laps, no collision, median cross-track 41 mm** against the 37 mm of `run01`/`run02` — inside this arena's known noise floor. Per-100-step medians 45 / 44 / 47 / 33 / 40 mm, i.e. **flat across 8.5 laps**, so nothing is curling out within a run. `rot_deg` mean −5.3°, sd 14.5°, range ±44°: active steering, not a stuck bias.
+
+**The correction.** That run flew on `drive_yaw_curl_deg_per_mm = -0.01151`, `drive_distance_scale = 1.0015` — Dieter recalibrated again between the keep_agn runs and this one. The curl has flipped **back** to roughly where every pre-battery session sat:
+
+| session | curl | deg/step at 150 mm |
+|---|---|---|
+| full shuffle (2026-08-24) | −0.01444 | −2.17 |
+| keep_agn precalib (2026-08-25) | +0.00591 | +0.89 |
+| post-battery, two measurements | +0.02400 / +0.02226 | +3.60 / +3.34 |
+| this run (2026-08-26) | **−0.01151** | **−1.73** |
+
+So the `+0.024` figure was a property of *that calibration session*, not of the new batteries, even though it replicated twice within the session to 7%. **Do not read `+0.024` as the robot's post-battery baseline.** Two agreeing measurements inside one session are not evidence of stability across sessions — the calibration constants move by more than their within-session spread, which is exactly why the standing rule is to recalibrate before every deploy rather than to trust a recent value.
+
+What this does **not** change: the three Path04 keep_agn runs of 2026-08-25 genuinely did fly on `+0.02226`, with the sign opposite to their full-shuffle partners' `-0.01444`, and they still landed inside the family. The claim that the collapse survives a large motor-calibration change stands as written.
+
 ### 2026-08-25 (later) — **The partial sensory clamp on the robot, both arenas: 6 runs, 6 collisions, none past 0.56 of a lap.** The prediction holds, and keeping the agnostic range head live rescues nothing
 
 Discharges plan item 0c. **This is the measurement; the entry below it (PREDICTION) is the pre-registration and stands unedited.** Code at `fc55b1a`: `CLAMP_SENSING = "shuffle"` with `CLAMP_EXEMPT_KEYS = ("agn_dist_mm", "agn_dist_sigma_mm")`, so the class-agnostic range head keeps its live value and everything distinctively the inverse model's — three wall slices, three class posteriors, pole azimuth, pole range — is replaced by a joint draw from a 500-measurement pool of a previous intact run on the same path. `VARIATION = "shuffle_keep_agn"`; runs filed under `PolicyRuns/Paths/`. Each run's seed was forced to its full-shuffle partner's, so run *i* saw the same drawn measurement stream as run *i* of 2026-08-24, differing in exactly one channel.
