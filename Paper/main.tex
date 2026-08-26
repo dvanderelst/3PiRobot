@@ -51,7 +51,7 @@
 \newcommand{\cnote}[2][]{\textcolor{blue}{[C#1: #2]}}
 \newcommand{\dnote}[2][]{\textcolor{red}{[D#1: #2]}}
 
-\title{Vicarious sonar learning in a bat-inspired robot}
+\title{Vision as a scaffold for echo interpretation:\\a proof of principle in a bat-like robot}
 \author{Dieter Vanderelst}
 \date{\today}
 
@@ -357,7 +357,7 @@ As mentioned in the methods, the way we trained the controller precluded it from
 
 To further demonstrate that dead reckoning was not solely responsible for the successful path following, we ran two further manipulations, three runs each in each arena. In both, we replaced the features the inverse model reported, at every step, with those of a single measurement drawn at random from a pool of $500$ predictions recorded earlier on the same path by the same controller. The substitutes are therefore realistic readings of that arena, with the statistics the robot would ordinarily encounter. However, the sensory data bears no relation to the robot's local environment.
 
-The two manipulations differ in a single channel. In the first, we left the class-agnostic range head live and replaced everything else: the three wall distances, the class posteriors, and the pole's azimuth and range. What remains is what a plain rangefinder would also deliver, a time of flight to the nearest reflector carrying neither class nor bearing, while everything specific to the inverse model is gone. In the second, we replaced that head as well, so that the whole observation was one coherent reading taken from the wrong place. We report both because each meets an objection the other leaves open: replacing every channel keeps the substituted observation internally consistent, while leaving the range head live keeps the result from resting on a channel a reader may decline to count as part of the inverse model.
+The two manipulations differ in a single channel. In the first, we left the class-agnostic range head intact and replaced all other outputs of the inverse model, i.e., the three wall distances, the class posteriors, and the pole's azimuth and range. In the second manipulation, we replaced the class agnostic distance head as well, so that the whole observation was a coherent reading, but taken at the wrong place.
 
 \begin{figure}[!htb]
 	\centering
@@ -366,9 +366,8 @@ The two manipulations differ in a single channel. In the first, we left the clas
 	\label{fig:sensory-clamp}
 \end{figure}
 
-Neither condition preserved the route (Fig.~\ref{fig:sensory-clamp}). All twelve runs ended in a collision and none covered more than $0.56$ of a lap, against $8.5$ and $6.4$ laps without a single contact in the corresponding intact runs. With the class-agnostic range head left live, the runs covered $0.19$, $0.46$ and $0.17$ laps in Arena 1 and $0.51$, $0.56$ and $0.51$ in Arena 2, at median distances from the trained path of $210$, $74$ and $295$\,mm and $162$, $203$ and $205$\,mm, against $37$ and $43$\,mm in the intact runs. With every feature replaced, the runs covered $0.20$, $0.44$ and $0.39$ laps and $0.45$, $0.47$ and $0.51$, at medians of $167$, $110$ and $298$\,mm and $100$, $99$ and $149$\,mm. The two conditions are indistinguishable, and which of them fares worse differs between the arenas (means of $0.27$ against $0.35$ laps in Arena 1, and $0.53$ against $0.47$ in Arena 2), so we draw no distinction between them.
+For either manipulation, the robot was no longer able to follow the pre described path (Fig.~\ref{fig:sensory-clamp}). All twelve runs ended in a collision and none covered more than $0.56$ of a lap, against $8.5$ and $6.4$ laps without a single contact in the corresponding intact runs. With the class-agnostic range head left live, the runs covered $0.19$, $0.46$ and $0.17$ laps in Arena 1 and $0.51$, $0.56$ and $0.51$ in Arena 2, at median distances from the trained path of $210$, $74$ and $295$\,mm and $162$, $203$ and $205$\,mm, against $37$ and $43$\,mm in the intact runs. With every feature replaced, the runs covered $0.20$, $0.44$ and $0.39$ laps and $0.45$, $0.47$ and $0.51$, at medians of $167$, $110$ and $298$\,mm and $100$, $99$ and $149$\,mm. The two conditions are indistinguishable, and which of them fares worse differs between the arenas (means of $0.27$ against $0.35$ laps in Arena 1, and $0.53$ against $0.47$ in Arena 2). These results further confirm that the path following observed in  Fig \ref{fig:arena1-runs} and \ref{fig:arena2-runs} are not solely due to dead reckoning or the class agnostic distance.
 
-Two things follow. Path following did not rest on dead reckoning alone. Nor did it rest on a generic range signal: leaving the class-agnostic distance estimate intact and destroying only what the inverse model adds to it, i.e., where the surrounding surfaces are, what kind of object is present, and where a pole lies, collapsed the route just as completely. The controller was steering on the inverse model's own outputs. 
 
 
 
