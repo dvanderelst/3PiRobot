@@ -38,13 +38,13 @@ from Library.AcquisitionPlanner import (
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-ARENA_NAME             = "Acquisition04"
+ARENA_NAME             = "Acquisition06"
 TARGET_K               = 250       # number of waypoints (excluding the start)
 N_YAWS                 = 5         # measurements per position (72° spacing → cones non-overlapping)
 CLEARANCE_MM           = 250.0     # min distance from any wall (point AND segment)
 MIN_STEP_MM            = 300.0     # min distance between consecutive waypoints
 MIN_NEIGHBOR_MM        = 200.0     # min distance from ANY prior waypoint (spreads coverage)
-MAX_ATTEMPTS_PER_STEP  = 200       # safety cap on rejection sampling per step
+MAX_ATTEMPTS_PER_STEP  = 1000       # safety cap on rejection sampling per step
 REORDER_TOUR           = True      # post-hoc nearest-neighbour TSP to cut drive time
 SEED                   = None      # int for reproducibility; None = wall-clock
 
@@ -55,7 +55,7 @@ SEED                   = None      # int for reproducibility; None = wall-clock
 # the nearest reflectors, reallocating pings out of the mid-range band that
 # earlier sessions already cover densely. Positions are unaffected, so two
 # plans built at the same SEED in the two modes differ only in their yaws.
-YAW_MODE               = "uniform"       # "uniform" | "far_biased"
+YAW_MODE               = "far_biased"   # "uniform" | "far_biased"
 N_FAR_YAWS             = 3         # far-looking yaws per position (far_biased)
 CONE_HALF_DEG          = 35.0      # must match the inverse model's slice cone
 YAW_MIN_SEP_DEG        = 40.0      # min angular separation between chosen yaws

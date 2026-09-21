@@ -1,0 +1,74 @@
+[
+ {
+  "index": 160,
+  "session": "Acquisition01A",
+  "true_range": 326.3314514160156,
+  "true_az": 10.173137664794922,
+  "pred_range": 343.66705322265625,
+  "pred_az": -3.186101198196411,
+  "sigma_range": 55.38709259033203,
+  "sigma_az": 13.61144733428955,
+  "called": "pole",
+  "p_pole": 0.6508662104606628
+ },
+ {
+  "index": 1707,
+  "session": "Acquisition05A",
+  "true_range": 689.9415283203125,
+  "true_az": 16.975696563720703,
+  "pred_range": 724.30517578125,
+  "pred_az": 25.297500610351562,
+  "sigma_range": 109.38812255859375,
+  "sigma_az": 13.022621154785156,
+  "called": "pole",
+  "p_pole": 0.5319299101829529
+ },
+ {
+  "index": 1871,
+  "session": "Acquisition05A",
+  "true_range": 827.7752075195312,
+  "true_az": -24.540544509887695,
+  "pred_range": 825.2391967773438,
+  "pred_az": -12.395101547241211,
+  "sigma_range": 118.00882720947266,
+  "sigma_az": 13.910887718200684,
+  "called": "pole",
+  "p_pole": 0.6135702133178711
+ },
+ {
+  "index": 632,
+  "session": "Acquisition02A",
+  "true_range": 1310.90185546875,
+  "true_az": 0.8429290056228638,
+  "pred_range": 825.8682250976562,
+  "pred_az": -7.036914348602295,
+  "sigma_range": 79.93021392822266,
+  "sigma_az": 16.059125900268555,
+  "called": "pole",
+  "p_pole": 0.5799014568328857
+ },
+ {
+  "index": 2537,
+  "session": "Acquisition06A",
+  "true_range": 1838.076904296875,
+  "true_az": -4.895111083984375,
+  "pred_range": 696.3364868164062,
+  "pred_az": -1.1148160696029663,
+  "sigma_range": 120.85906982421875,
+  "sigma_az": 13.105009078979492,
+  "called": "pole",
+  "p_pole": 0.575525164604187
+ },
+ {
+  "index": 2446,
+  "session": "Acquisition06A",
+  "true_range": 2398.136474609375,
+  "true_az": -28.54207992553711,
+  "pred_range": 761.0000610351562,
+  "pred_az": -1.8978843688964844,
+  "sigma_range": 128.51113891601562,
+  "sigma_az": 20.673282623291016,
+  "called": "pole",
+  "p_pole": 0.5297383666038513
+ }
+]
