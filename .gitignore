@@ -27,3 +27,9 @@ Paper/dieters_scratch_pad.md
 ############## Paper figure working files (commit figures + scripts only)
 Paper/images/*.drawio.bkp
 Paper/images/image_resources/echo_candidates/
+
+############## Strays
+# pdflatex run outside Paper/ leaves one of these behind
+texput.log
+# raw photos of the robot and arena; figure sources go in Paper/images/image_resources/
+Robot_pictures/
