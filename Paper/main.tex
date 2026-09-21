@@ -60,6 +60,9 @@
 % deferred, and because LaTeX emits floats in order, every later figure
 % queues behind them and lands at the end of the document.
 \renewcommand{\topfraction}{0.85}
+% Two-column: page-wide floats (figure*, table*) are governed by the dbl
+% counterpart, not by \topfraction, so it has to be raised as well.
+\renewcommand{\dbltopfraction}{0.85}
 
 \begin{document}
 
@@ -105,12 +108,12 @@ Using a small mobile robot equipped with a bat-like sonar system, we show that a
 
 Our experiments used a small wheeled robot operating inside a walled arena with an overhead camera system tracking its pose (Fig.\ref{fig_robot}). The arena measured approximately 3.5 by 3.5 m. We built repositionable arena walls from cardboard panels. Cardboard panels, each about 80 cm wide and 30 cm high, formed the backing of the walls. We glued foam tiles (sold as decorative terraria backgrounds) onto the cardboard. These tiles had a variety of surface textures that simulated different types of natural rock. We fixed the tiles to the cardboard with 5 cm gaps between them. Together, the gaps and textured tile surfaces produced complex, overlapping reflections.
 
-\begin{figure}[htb]
+\begin{figure*}[htb]
     \centering
     \includegraphics[width=\textwidth]{fig_robot}
     \caption{Robot and arena setup. Left: Close-up of the robot showing the 3 MaxBotix ultrasonic transducers. The blue plastic scale indicator measures 5 by 5 cm. Middle: A view of the arena with the robot. The yardstick in the arena is about 90 cm long. Right: An example of the sonar data as acquired by the two `ears' of the robot.}
     \label{fig_robot}
-\end{figure}
+\end{figure*}
 
 We also used sub-assemblies (built from four panels fixed at right angles) as freestanding rectangular obstacles inside the arena. As a second class of in-arena obstacle, we used vertical poles: wooden dowels (25 mm diameter, ~60 cm height), each held upright by a low-profile metal base. We could place poles anywhere within the arena. Interlocking high-density foam tiles with a smooth top surface formed the arena floor, providing the wheels with reliable traction and a uniform background for the overhead tracker.
 
@@ -126,12 +129,12 @@ An overhead camera system tracked the robot's pose using two ceiling-mounted cam
 
 We trained the inverse model on echoes collected as the robot drove through the arena, using training data from six sessions. For each session, the overhead camera system's field of view dictated a similar overall outline for the arena. We locally altered the layout by moving some walls and installing interior walls. In addition, we placed four or five poles in the arenas at semi-random positions. This ensured we collected data across a range of arena geometries.
 
-\begin{figure}[htb]
+\begin{figure*}[htb]
 	\centering
 	\includegraphics[width=0.85\textwidth]{fig_arena_layouts}
 	\caption{Arena layouts for collecting inverse-model training data. We recorded echoes in six arenas, each sharing an overall outline set by the overhead camera's field of view. Within that outline, we moved boundary walls, installed interior walls, and placed four or five poles at semi-random positions, so that the sessions sampled a range of geometries. All panels are overhead images with the digitized geometry overlaid (walls, cyan; poles, red; ping positions, yellow). Panel A shows arena 1 together with the positions at which the robot ensonified it, the sampling scheme used in every session; panels B to F show arenas 2 to 6 with their geometry alone. Arena 6 (F) differed from the others in both its layout and its sampling headings (see text). All panels share the scale bar (1\,m) shown in panel A.}
 	\label{fig:arena_layouts}
-\end{figure}
+\end{figure*}
 
 For each session, we used a predetermined number of semi-random positions within the arena (see Fig.\ref{fig:arena_layouts}A for an example). We sequentially drove the robot to each position using the overhead camera system. Once the robot arrived at a position, it rotated to five headings, emitted one sonar pulse at each, and recorded the resulting echo envelopes at both ears. In the first five sessions, these five headings were spaced $72^{\circ}$ apart. The emitter, modeled as a 15\,mm-diameter circular piston at 42\,kHz, has a $-6$\,dB main lobe about $\pm 22^{\circ}$ wide; at $\pm 35^{\circ}$ off axis, its directivity falls by roughly 18\,dB. Because successive headings were $72^{\circ}$ apart, well beyond this main lobe, the five emissions sampled approximately non-overlapping, and therefore approximately independent, regions of the environment.
 
@@ -158,12 +161,12 @@ To a first approximation, the two ears are symmetric. Swapping the echoes should
 %
 We run each of the five heads twice, once using $z_{LR}$ as input and once using $z_{RL}$ as input. We then average the outputs after flipping the depth-head output and the azimuth-head sign for $z_{RL}$. The class and range heads needed no correction, as their outputs are unchanged by the swap, so we averaged them directly. We combine the predicted variances symmetrically, as we do for the depth means. Encoding symmetry this way forces the model to respect it exactly. It also roughly doubles the effective training data (each emission serves as its mirror image) and reduces the parameter count. This symmetry constraint is not strictly necessary: a variant without it, free to learn left-right asymmetries, fit the depth profile slightly worse (data not shown). Table~\ref{tab:inverse-params} lists the configuration.
 
-\begin{figure}[htb]
+\begin{figure*}[htb]
 	\centering
 	\includegraphics[width=\textwidth]{fig_network}
 	\caption{Architecture of the convolutional neural network we used to implement and train the inverse model. An emission produces one echo envelope per ear (200 samples), which a shared trunk encodes into 32-dimensional embeddings $z_L$ and $z_R$; these feed five output heads: classification, wall depth, pole azimuth, pole range, and nearest-reflector range. \emph{Combine} forms the two ear orderings $z_{LR}=[z_L,z_R]$ and $z_{RL}=[z_R,z_L]$. Each head consists of a small two-layer network. The \emph{wall} head is a single three-output head applied to both orderings, giving the nearest-wall distance in the left, center, and right thirds of the field of view; the swap exchanges its left and right outputs, so those two distances are read from the two orderings, while its center output is averaged over them. The \emph{class} head averages its output over both orderings, giving a wall/pole prediction that is unchanged when the ears are swapped, and the two \emph{range} heads are averaged in the same way, since a reflector and its mirror image lie at the same distance. The \emph{pole-range} head is trained only on echoes whose nearest reflector is a pole within $1$\,m, and supplies the terminal approach stop; the \emph{nearest-reflector-range} head is trained on every echo at every range, and so answers a question that needs no classification. The \emph{pole-azimuth} mean is the only antisymmetric output, $\tfrac{1}{2}(z_{LR}-z_{RL})$, and so flips sign with the swap. The four regression heads are heteroscedastic: each returns a mean and a log-variance, $\log\sigma^2$, the latter expressing the model's per-estimate uncertainty.}
 	\label{fig:network}
-\end{figure}
+\end{figure*}
 
 
 We trained the model by minimizing a five-part objective, each part carrying equal weight: a cross-entropy classification loss and four regression losses, for the wall depth profile, the pole's azimuth, the pole's range, and the nearest reflector's range. The classification loss used all echoes for each emission. We applied three of the regression losses as \emph{masked} losses, considering only the relevant classes, so the depth profile was fitted on wall echoes and the azimuth and pole range on pole echoes. We further restricted the pole-range loss to poles within $1$\,m. That head supplies the terminal approach stop, and widening the span it is trained on degrades it at close range, where the stop decision is taken. The nearest-reflector range loss carried no mask: we applied it to every echo at every range, which is what lets that head report a distance for a reflector it cannot name. All four regression losses were Gaussian negative log-likelihoods: each weights the prediction error by the model's predicted variance and penalizes it, so the network learns to report a calibrated per-estimate uncertainty rather than a point value alone.
@@ -198,12 +201,12 @@ In the second experiment, we asked whether the inverse model can support a more 
 
 To determine the path the robot should follow, we manually drew a closed loop over the digitized arena, along with a rectangular release region and heading, and resampled it at $25$\,mm spacing so any position could be expressed as a distance traveled along the loop. We implemented the controller as a recurrent network with $32$ hidden units. At each step, it received the same local feature the inverse model supplies in Experiment 1, together with the rotation it commanded in the previous step, and returned a rotation, capped at $90^{\circ}$ (Fig.~\ref{fig:control-loop}).
 
-\begin{figure}[!htbp]
+\begin{figure*}[!htbp]
     \centering
     \includegraphics[width=\textwidth]{fig_control_loop}
     \caption{The control loop deployed in Experiment 2. Sonar returns one echo envelope per ear, and the inverse model turns these into the features listed beneath the arrow. Those features are one of the network's two inputs. The other is the motor command the network itself produced on the previous step --- the same signal that goes to the motors, which is why the two arrows carry the same label. Nothing else reaches the network. The motors execute the command with error, so the pose the robot arrives at is not the one it commanded, and no sensor reports the difference: there is no odometry and no inertial sensor. The only route by which that discrepancy can reach the network is the next emission, made from wherever the robot actually ended up (dashed). The network therefore never learns what the robot actually did, only what it asked for.}
     \label{fig:control-loop}
-\end{figure}
+\end{figure*}
 
 In simulation, we trained a controller to keep the robot on the path. We did not model how the route was chosen, or where the corrections that keep the robot on it (while using vision) originate. In other words, we assumed that the bat already knew how to follow the path visually. We only modeled acquiring a controller that could mimic the path using sonar, using the features extractable by the inverse model. A pure-pursuit controller with access to the robot's true position drove the route, projecting that position onto the loop, advancing $240$\,mm along it, and returning the rotation that pointed at the resulting target. We trained the controller with no access to the robot's position. It received only the local feature and the rotation it had commanded on the previous step, so that it could learn only what features recoverable from sonar can support. The features presented during training carried realistic error, drawn from the errors the inverse model makes on real echoes.
 
@@ -224,9 +227,9 @@ We trained 5 different versions of the inverse model: four quadrant models and t
 
 The classifier emits a probability for each class. Fig.~\ref{fig:inverse-results}A reports how often the most likely one was correct. Fig.~\ref{fig:inverse-results}B plots how often the model was correct as a function of the probability the model reported. Points on the diagonal mean the reported probability can be taken as a probability of the class membership. The model stays close to the diagonal: when it reports being $90\%$ certain, it is correct on $97.8\%$ of those echoes. This is useful for a controller, which can act on the class where the model is confident and disregard it where it is not, without the model needing a separate category for \emph{unsure}.
 
-\begin{figure}[!htbp]
+\begin{figure*}[!htbp]
 	\centering
-	\includegraphics[width=0.92\textwidth]{fig_inverse_limits}
+	\includegraphics[width=0.86\textwidth]{fig_inverse_limits}
 	\caption{What the inverse model recovers, as a function of the range to the nearest reflector in the analysed $\pm 35^{\circ}$ cone. Solid lines with filled markers are the four quadrant models, every one of the $2775$ echoes scored by the model that did not train on it. Dashed lines with open markers are the deployed model on its own held-out $15\%$, drawn only in bands holding at least $15$ of those echoes, which is why they stop short of the longest ranges. Grey dotted lines are baselines rather than models.
 (A) Classification accuracy, against the majority class of each band: the score obtainable by ignoring the echo entirely. The vertical dotted line marks where the models stop beating that baseline, $1537$\,mm, and the shaded band is its $95\%$ bootstrap interval.
 (B) Reliability of the class posterior: the probability the model reported against how often the class it reported was correct. The deployed model is binned into five probability intervals against the quadrant models' ten, since it is scored on $418$ echoes rather than all of them.
@@ -235,19 +238,19 @@ The classifier emits a probability for each class. Fig.~\ref{fig:inverse-results
 (E) The class-agnostic range head, trained on every echo at every range, drawn on the same axes as (D) for comparison; bars are $\pm$RMSE. The inset gives RMSE against range separately for echoes with and without a nearer reflector just outside the cone, and stops at $2$\,m because uncontested echoes become too rare past it.
 (F) Wall-depth error for the three directions, against a constant predictor that answers each band's mean distance and never listens (dotted, in the matching colour).}
 	\label{fig:inverse-results}
-\end{figure}
+\end{figure*}
 
 
 Fig.~\ref{fig:inverse-results}C shows the error of the models in predicting a pole’s azimuth from the echoes, again as a function of distance. We compare the models’ performance with a baseline for a model that returns 0 degrees, irrespective of the input. This plot shows that the quadrant models stop outperforming the baseline at around $2000$\,mm. The deployed model still seemed to outperform the baseline beyond this distance (not shown). However, this compares the deployed model against a baseline computed over all echoes, rather than over the small sample of $23$ echoes beyond $2000$\,mm on which the deployed model could be scored. Measured on those same  $23$ echoes, the baseline error is $4.9$ degrees, and the deployed model achieves $6.8$. Hence, just like the quadrant models, the deployed model does not outperform the baseline beyond $2000$\,mm either. 
 
 Fig.~\ref{fig:inverse-results}D shows the performance of the models for pole range. This plot shows that, even though the model can recognize a pole as such up to $1500$\,mm (Fig.~\ref{fig:inverse-results}A), the estimated distance saturates at about $800$\,mm. Poles farther than about $800$\,mm are perceived as closer than they are. This is due to a training decision we made. We trained the pole-distance head only on echoes where the pole was the closest object and less than $1$\,m away (See histograms in Fig.~\ref{fig:inverse-results}D). We did this because training the model on all available echoes where the pole was the closest introduced bias and increased distance-prediction error at short range {Fig \ref{fig:pole-range-cap}}.  Given this trade-off, we trained the model to improve pole-range inference at short ranges, at the cost of not being able to localize poles beyond about $1$\,m. However, this job was partially fulfilled by the class-agnostic distance prediction, which we discuss in the next paragraph. Fig.~\ref{fig:pole-examples} shows the consequence echo by echo. Within a metre the model's estimate falls on the pole; beyond it the estimate stops moving outward as the pole recedes, and the classifier's confidence that it is looking at a pole at all falls away with it.
 
-\begin{figure}[!htbp]
+\begin{figure*}[!htbp]
     \centering
     \includegraphics[width=\textwidth]{fig_pole_examples}
     \caption{What the model reports about a pole, for six individual echoes, one per range band. The layout follows Fig.~\ref{fig:perception-examples}: the robot sits at the apex with its field of view pointing up, and blue marks the digitised arena. The pole the echo was labelled with is filled purple; other poles are open circles. The red patch is the model's estimate, the predicted bearing with its $\pm\sigma$ as an angular wedge crossed with the predicted range and its $\pm\sigma$ as a radial band, and the cross marks the estimate itself. Titles give the true range and bearing, then the reported ones, then the probability the model assigned to the class it reported. Examples were chosen by rule: among the echoes the model classified as a pole, which are the only ones whose pole channels the robot uses, the one whose combined bearing-and-range error is the median for its band. Within a metre (A--C) the estimate falls on the pole, with the range recovered to within a few tens of millimetres. Beyond it (D--F) the range estimate stops moving outward while the pole recedes, so the model reports a pole at roughly $800$\,mm whether the pole is at $1.3$ or $2.4$\,m. In each of these the model does call a pole, so these are estimates the robot would act on. That is the reason the controller of Experiment 1 additionally refuses a pole call when the class-agnostic range head places the nearest reflector beyond $1200$\,mm.}
     \label{fig:pole-examples}
-\end{figure}
+\end{figure*}
 
 Fig.~\ref{fig:inverse-results}E shows the performance of the head that inferred the distance to the nearest obstacle (within the visual field of the robot). Inferring the distance to the nearest object may seem straightforward, and this head did work well. However, performance had limits. Fig.~\ref{fig:inverse-results}E shows that as distance increases, the errors increase as well. This is most likely because we ask the model to return the distance to the nearest object inside the visual field. At larger distances, it becomes more likely that objects outside this area return an echo preceding that of the nearest object inside the area. Hence, the model must not only find the closest echo but also reject echoes from objects outside the visual field of view. This interpretation is supported by the inset in Fig.~\ref{fig:inverse-results}E, which splits the echoes by whether an object just outside the visual field was nearer than the nearest object inside it. Errors increased when such an object was present, that is, when the closest reflector could not be seen and introduced an echo that had to be ignored.
 
@@ -255,12 +258,12 @@ Together with the categorization head, this head expands the model’s ability t
 
 Fig.~\ref{fig:inverse-results}F shows the performance of the 3-segment wall distance prediction. This shows that the prediction outperformed a baseline across most of the distance range in the training set (we show only the quadrant models’ performance to reduce plot complexity). However, average errors were substantial: about $270$\,mm close in, rising to about $400$\,mm between $1$ and $1.4$\,m before falling again at longer ranges.  Hence, while range is easily extracted from sonar, this plot shows that a more difficult task, i.e., extracting the range to obstacles in different directions (i.e., reconstructing a very rough wall profile), is substantially more difficult. Fig.~\ref{fig:perception-examples} shows what this looks like for single echoes. The error is rarely spread evenly across the field: in most examples one sector is recovered almost exactly while another is out by several hundred millimetres, and which sector fails varies from echo to echo.
 
-\begin{figure}[!htbp]
+\begin{figure*}[!htbp]
     \centering
     \includegraphics[width=\textwidth]{fig_perception_examples}
     \caption{Six individual perceptions of the wall profile, one for each range band. The robot sits at the apex of each panel with its field of view pointing up; blue marks the digitised arena geometry and purple the poles. In each of the three sectors, the filled wedge reaches the true distance to the nearest wall, the black arc marks that distance, and the dashed red arc is the model's estimate with its predicted $\pm\sigma$ shaded around it. The examples were not chosen by eye: within each range band we took the echo whose mean absolute sector error is the median for that band, so each panel is a typical case for its distance rather than a favourable one. All six share one scale, so the widening of the sectors with range is comparable across panels. Titles give the distance to the nearest wall anywhere in the field, and then the three sector errors, listed right, centre and left.}
     \label{fig:perception-examples}
-\end{figure}
+\end{figure*}
 
 In summary, we trained an inverse model using visual input from the overhead camera system to convert binaural sonar data into an estimate of the closest object's position (if a pole) and layout (if a wall). Overall, the model was successful, with some clear limits.  (1) For echoes whose nearest object was a pole, it inferred the azimuth better than baseline up to about $2000$\,mm and distance up to about $1000$\,mm. (2) For echoes whose nearest object was a wall, it inferred the closest distance in three sectors in front of the robot better than baseline, but with considerable noise (see Fig.~\ref{fig:perception-examples} for examples). (3) However, it could classify the nearest object as a pole or wall better than the baseline only up to about $1500$\,mm. (4) The model could estimate the range to the nearest object of any kind out to about $2500$\,mm, with an error of roughly $10$ to $15\%$ of the true range beyond a meter. Note that (1) and (2) are measured on echoes we know came from a pole or a wall, using the camera as ground truth. Beyond about $1500$\,mm the model cannot supply that identification itself, so the bearing in (1) would be of little use to the robot, which would not know it was looking at a pole. The range in (4) requires no identification, which is why it remains usable. Hence, the model could locate an object well beyond the range at which it could identify it, but even ranging was limited.
 
@@ -277,10 +280,8 @@ There are two reasons the model performed better during deployment than on the a
 
 In summary, the results of Experiment 1 show that the inverse model, noisy as it is, was sufficient for the robot to complete the task from almost every start pose and for both pole placements. Despite its limitations, the inverse model allows the robot to recognize and avoid walls and approach a pole (even though finding it requires more or less a random search, as the distance over which it can be discriminated from walls is limited). This allows us to test more complex behavior in Experiment 2.
 
-\begin{table}[ht]
+\begin{table*}[ht]
 	\centering
-	\caption{Experiment 1 outcomes over the ten start and placement combinations run under each modality. Each sonar run is paired with the vision run that shares its start pose, pole placement, and controller seed. No run in either condition collided, jammed in a corner, or needed a bearing correction after arriving, so the table reports the measures on which the two conditions differ. Rows marked \emph{arrivals only} exclude the one sonar run that exhausted its $200$-step budget; the two rows on first perception are over arrivals as well, and count the first step at which the modality reported a pole that was in fact the nearest reflector. Distances and clearances are the overhead tracker's ground truth, not the robot's perception.}
-	\label{tab:direct-results}
 	\begin{tabular}{lcc}
 		\hline
 		\textbf{Measure} & \textbf{Sonar} ($n=10$) & \textbf{Vision} ($n=10$) \\
@@ -298,14 +299,16 @@ In summary, the results of Experiment 1 show that the inverse model, noisy as it
 		Steps on which a pole was perceived         & $127 / 672$ & $234 / 410$ \\
 		\hline
 	\end{tabular}
-\end{table}
+	\caption{Experiment 1 outcomes over the ten start and placement combinations run under each modality. Each sonar run is paired with the vision run that shares its start pose, pole placement, and controller seed. No run in either condition collided, jammed in a corner, or needed a bearing correction after arriving, so the table reports the measures on which the two conditions differ. Rows marked \emph{arrivals only} exclude the one sonar run that exhausted its $200$-step budget; the two rows on first perception are over arrivals as well, and count the first step at which the modality reported a pole that was in fact the nearest reflector. Distances and clearances are the overhead tracker's ground truth, not the robot's perception.}
+	\label{tab:direct-results}
+\end{table*}
 
-\begin{figure}[!htbp]
+\begin{figure*}[!htbp]
 	\centering
-	\includegraphics[width=\textwidth]{fig_direct_results}
+	\includegraphics[width=0.7\textwidth]{fig_direct_results}
 	\caption{Trajectories of the $20$ Experiment 1 runs. Columns show the modality (sonar, vision), and rows show the pole placement. Each panel shows the five runs from the five start poses, one color per start and the same colors in every panel, so that a start can be followed across conditions. Triangles mark the start pose and point along the robot's initial heading, stars mark the pose at which the robot arrived, and the cross in C marks the one run that exhausted its $200$-step budget instead. Small filled dots mark every pose at which the modality reported a pole, and open circles every pose at which a pole was the nearest reflector within $1200$\,mm, the range inside which the controller will accept a pole call, but went unreported. The pole is the red disc, and the dashed ring is the $400$\,mm perceived range at which the approach stops. Using sonar, the robot wanders until the pole enters that $1200$\,mm band, so that its detections form a short tail running into the pole (A, C). Using vision, the pole is picked up within a few steps of the start and reported for most of the path (B, D). The missed poles sit at the outer edge of the band; $12$ of the $16$ lie beyond $800$\,mm from the pole. Vision has none, since it reads the geometry the tracker also uses. The eight isolated dots in C are the spurious pole calls of the experiment. In every one of them, the nearest reflector was in fact a wall, between $1.1$ and $1.4$\,m away, which is the range at which the class head begins to fail (Fig.~\ref{fig:inverse-results}A). The range veto does not catch these, because it tests the range to the nearest reflector, whatever its class, and that range lies inside $1200$\,mm. Note that pole 2 lies close to the arena wall, so that it falls outside the forward cone from several headings even when using vision (D).}
 	\label{fig:direct-results}
-\end{figure}
+\end{figure*}
 
 \subsection{Experiment 2}
 
@@ -322,24 +325,24 @@ Removing the single pole in the arena raised the median distance from the path t
 
 We displaced two of the blocks by about $320$\,mm and left everything else in place. The route moved with them. Over the stretch of the loop near those blocks, the trajectory shifted $124$\,mm east and $88$\,mm north of the trained path, compared against just $8$ and $9$\,mm in the first baseline run and $19$ and $19$\,mm in the second. That stretch is marked on the path in Fig.~\ref{fig:arena1-runs}D and shaded in Fig.~\ref{fig:arena1-runs}E. The shifts were present on every lap. Away from that stretch, the route was unchanged, so the effect is local to the moving objects. Taking the median eastward offset over that stretch lap by lap gives $156$, $80$, $148$, $111$, $171$, $133$, $158$, $125$ and $105$\,mm across the nine laps, while the same signed measurement on the two baseline runs gives offsets of both signs, with medians of $8$ and $19$\,mm. The deviation as a function of position is elevated over the stretch holding the two moved blocks, which stand at $62\%$ and $70\%$ of the loop (Fig.~\ref{fig:arena1-runs}E).
 
-\begin{figure}[!htbp]
+\begin{figure*}[!htbp]
     \centering
     \includegraphics[width=\textwidth]{fig_arena1_runs}
     \caption{Arena 1: the trained route and what each change to the arena did to it. Blue marks the digitised layout, the dashed grey line is the path the controller was trained on, and red is the trajectory the robot flew. (A) The arena as trained, run twice. (B) The pole removed, marked with a cross where it stood. (C) The pole and the central block removed. (D) The central block and the one below it displaced about $320$\,mm east, drawn from their measured new positions with an arrow from where they were trained; the thicker section of the path marks the stretch those blocks border, over which the route shift is measured. (E) The distance from the path against position around the loop, as a median in twenty sections, with the stretch the displaced blocks border shaded. Displacing the blocks lifts that stretch and leaves the rest of the loop at baseline; removing the pole lifts the loop as a whole. The layout drawn in every map is the trained one, which was not re-digitised for the manipulated runs, so removals and displacements are shown from the recorded measurements rather than from a fresh digitisation of each arena.}
     \label{fig:arena1-runs}
-\end{figure}
+\end{figure*}
 
 
 \subsubsection{Arena 2}
 
 Arena 2 had a different outline, five poles and a single block, and the path was a longer closed loop of $11.8$\,m, so each run of $500$ steps covered about six laps (Fig.~\ref{fig:arena2-runs}A). Run twice without any change, the robot again followed the path closely: median distance from the path $43$\,mm in both runs, with the ninetieth percentile at $114$ and $97$\,mm and the largest excursion at $248$ and $183$\,mm.
 
-\begin{figure}[!htbp]
+\begin{figure*}[!htbp]
     \centering
     \includegraphics[width=\textwidth]{fig_arena2_runs}
     \caption{Arena 2: the trained route and what each change to the arena did to it, drawn as in Fig.~\ref{fig:arena1-runs}. Blue marks the digitised layout, purple the poles, the dashed grey line the trained path and red the flown trajectory. (A) The arena as trained, run twice. (B) The two northern poles removed, crossed where they stood, and a third displaced (arrow). (C) The same two poles displaced instead of removed, run twice; the first run also carried the third pole at the position it holds in (B). Dashed circles mark their trained positions and the arrows run to where each was measured in that run's own photograph, in the colour of the corresponding trajectory. (D) An extra wall placed across the southern part of the loop, in black, at the position measured from that run's own photograph. The arena's own boundary was left in place, so nothing was displaced here; the new wall stands about $450$\,mm inside the boundary and a few centimetres outside the trained path. (E) Distance from the path against position around the loop, as a median in a sliding window of $500$\,mm of path, with the stretch the added wall crosses shaded and the three manipulated poles and the wall marked. A gap in a curve marks a stretch the robot entered too rarely for a median, which happens where a manipulation pushed the route away from that part of the loop altogether. Removing the poles raises the profile where they stood, displacing them changes nothing anywhere, and the added wall produces a single tall peak where it borders the loop.}
     \label{fig:arena2-runs}
-\end{figure}
+\end{figure*}
 
 We removed the two poles standing nearest the northern part of the loop, and displaced a third, standing east of the loop, by about $225$\,mm to the south-west (Fig.~\ref{fig:arena2-runs}B). The median distance from the path rose to $57$\,mm, the ninetieth percentile to $154$\,mm and the largest excursion to $289$\,mm (Fig.~\ref{fig:arena2-runs}B). As in Arena 1, the deviation was concentrated where the removed objects had stood: the error profile rises over the first fifth of the loop, peaking at $216$\,mm at $14\%$, while the two poles stand at $1\%$ and $7\%$ (Fig.~\ref{fig:arena2-runs}E). The route also moved consistently in one direction, sitting $127$\,mm north of the trained path over the first $15\%$ of the loop, compared with $7$ and $33$\,mm in the two unmanipulated runs.
 
@@ -361,12 +364,12 @@ To further demonstrate that dead reckoning was not solely responsible for the su
 
 The two manipulations differ in a single channel. In the first, we left the class-agnostic range head intact and replaced all other outputs of the inverse model, i.e., the three wall distances, the class posteriors, and the pole's azimuth and range. In the second manipulation, we replaced the class agnostic distance head as well, so that the whole observation was a coherent reading, but taken at the wrong place.
 
-\begin{figure}[!htb]
+\begin{figure*}[!htb]
 	\centering
 	\includegraphics[width=\textwidth]{fig_sensory_clamp}
 	\caption{The sensory-deprivation control, in two conditions and two arenas: Arena 1 in (A, B) and Arena 2 in (C, D), with the class-agnostic range head left live in (A, C) and every feature replaced in (B, D). In both conditions the features the inverse model reported were replaced, at every step, by those of a single measurement drawn at random from a pool of $500$ predictions recorded earlier on the same path by the same controller; the conditions differ only in whether the class-agnostic range head was replaced along with the rest. The three coloured trajectories in a panel are the three runs of that condition; colours are matched between the two panels of an arena, because each pair of runs was drawn with the same seed and so saw the same substituted measurements. They are drawn against two references: the dashed line is the trained path, and the thin grey trace around it is one intact run of $500$ steps, so that the comparison is with what the robot actually does and not only with the path it was trained on. Blue marks the walls and blocks and purple the poles, open circles mark the release pose, and crosses mark the last logged pose of each run, one step before it met a wall or a pole. The intact runs complete $8.5$ and $6.4$ laps with no contact; no run of either condition reached $0.6$ of a lap.}
 	\label{fig:sensory-clamp}
-\end{figure}
+\end{figure*}
 
 For either manipulation, the robot was no longer able to follow the pre described path (Fig.~\ref{fig:sensory-clamp}). All twelve runs ended in a collision and none covered more than $0.56$ of a lap, against $8.5$ and $6.4$ laps without a single contact in the corresponding intact runs. With the class-agnostic range head left live, the runs covered $0.19$, $0.46$ and $0.17$ laps in Arena 1 and $0.51$, $0.56$ and $0.51$ in Arena 2, at median distances from the trained path of $210$, $74$ and $295$\,mm and $162$, $203$ and $205$\,mm, against $37$ and $43$\,mm in the intact runs. With every feature replaced, the runs covered $0.20$, $0.44$ and $0.39$ laps and $0.45$, $0.47$ and $0.51$, at medians of $167$, $110$ and $298$\,mm and $100$, $99$ and $149$\,mm. The two conditions are indistinguishable, and which of them fares worse differs between the arenas (means of $0.27$ against $0.35$ laps in Arena 1, and $0.53$ against $0.47$ in Arena 2). These results further confirm that the path following observed in  Fig \ref{fig:arena1-runs} and \ref{fig:arena2-runs} are not solely due to dead reckoning or the class agnostic distance.
 
@@ -464,10 +467,8 @@ Even positive evidence needs to be scrutinised. \citet{Finger2025} trained one g
 \renewcommand{\thetable}{S\arabic{table}}
 \renewcommand{\thefigure}{S\arabic{figure}}
 
-\begin{table}[htb]
+\begin{table*}[htb]
 \centering
-\caption{Configuration of the inverse-model data acquisition, labeling, and training.}
-\label{tab:inverse-params}
 \begin{tabular}{lll}
 \hline
 \textbf{Stage} & \textbf{Parameter} & \textbf{Value} \\
@@ -500,12 +501,12 @@ Training     & Optimizer                         & Adam \\
              & Random seed (train / holdout)     & 42 / 0 \\
 \hline
 \end{tabular}
-\end{table}
+\caption{Configuration of the inverse-model data acquisition, labeling, and training.}
+\label{tab:inverse-params}
+\end{table*}
 
-\begin{table}[ht]
+\begin{table*}[ht]
 \centering
-\caption{The deployed inverse model on the echoes it was trained on (in-sample, $n=2357$) and on the spatially held-out $15\%$ ($n=418$). This table is the overfitting check only; the range-resolved results in the text and in Fig.~\ref{fig:inverse-results} are out-of-fold over all four spatial folds. The pole-range head is scored over its training domain, poles within $1$\,m, because it is not defined beyond it.}
-\label{tab:inverse-results}
 \begin{tabular}{lcc}
 \hline
 \textbf{Metric} & \textbf{In-sample} & \textbf{Held-out} \\
@@ -519,14 +520,14 @@ Nearest-reflector range RMSE (mm)            & $190$ & $225$ \\
 Wall-depth RMSE, left / center / right (mm)  & $312$ / $314$ / $281$ & $301$ / $361$ / $277$ \\
 \hline
 \end{tabular}
-\end{table}
+\caption{The deployed inverse model on the echoes it was trained on (in-sample, $n=2357$) and on the spatially held-out $15\%$ ($n=418$). This table is the overfitting check only; the range-resolved results in the text and in Fig.~\ref{fig:inverse-results} are out-of-fold over all four spatial folds. The pole-range head is scored over its training domain, poles within $1$\,m, because it is not defined beyond it.}
+\label{tab:inverse-results}
+\end{table*}
 
-\begin{table}[htb]
+\begin{table*}[htb]
 \centering
-\caption{Constants of the reactive controller and of the terminal approach, with what each one governs. The same values were used under sonar and under vision. Every distance and bearing in the first four blocks is the one the robot \emph{perceived} through the local feature; only the scoring block uses the overhead tracker's ground truth.}
-\label{tab:controller-params}
 \small
-\begin{tabular}{@{}llp{8.1cm}@{}}
+\begin{tabular}{@{}llp{9.5cm}@{}}
 \hline
 \textbf{Parameter} & \textbf{Value} & \textbf{What it governs} \\
 \hline
@@ -557,14 +558,16 @@ Collision clearance & 20\,mm          & True wall clearance below which a run is
 Robot radius       & 48\,mm           & Half the 96\,mm chassis diameter, subtracted in every clearance measure. \\
 \hline
 \end{tabular}
-\end{table}
+\caption{Constants of the reactive controller and of the terminal approach, with what each one governs. The same values were used under sonar and under vision. Every distance and bearing in the first four blocks is the one the robot \emph{perceived} through the local feature; only the scoring block uses the overhead tracker's ground truth.}
+\label{tab:controller-params}
+\end{table*}
 
-\begin{figure}[htb]
+\begin{figure*}[htb]
 	\centering
 	\includegraphics[width=\textwidth]{fig_pole_range_cap}
 	\caption{Why the pole-range head is trained only on poles within $1$\,m. Two models differing in one setting: the range span that head is trained on. Both are four-fold quadrant cross-validations over the same $2775$ echoes, so every pole echo is scored once by a model that did not see it. (A) Predictions of the deployed setting, trained on poles within $1$\,m. Past that span it answers about the same distance whatever the true range. (B) Predictions of a model trained on every pole echo, out to $3196$\,mm, which tracks the true range throughout. Black lines are band means; the dotted vertical line marks the $1$\,m training limit. (C) Signed bias against range for both, with an inset over the training span, and (D) the same as RMSE on a logarithmic axis. The shaded strip in (C) and (D) is the band containing the $400$\,mm stop of Experiment 1, which fires on this head's output. Training on every pole echo buys accurate ranging past a metre, at the cost of a close-range bias that grows from $+36$ to $+167$\,mm, in the direction that makes the robot stop nearer than intended.}
 	\label{fig:pole-range-cap}
-\end{figure}
+\end{figure*}
 
 
 \end{document}
